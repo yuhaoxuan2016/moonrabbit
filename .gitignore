@@ -1,0 +1,9 @@
+# 运行时数据（含 API Key，勿提交）
+data/
+
+# 日志
+*.log
+
+# 系统
+Thumbs.db
+.DS_Store

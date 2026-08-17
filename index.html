@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/favicon.png">
+<title>通用多角色 RP 界面</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="brand-dot"></span>
+    <h1>多角色 RP</h1>
+    <span class="subtitle">通用 RP 界面 · 设定自填</span>
+  </div>
+  <div class="header-right">
+    <select id="model-input" class="head-input" title="切换模型（选择即生效，自动保存）">
+      <option value="deepseek-chat">deepseek-chat</option>
+      <option value="deepseek-reasoner">deepseek-reasoner</option>
+      <option value="gpt-4o-mini">gpt-4o-mini</option>
+      <option value="claude-3-5-sonnet">claude-3-5-sonnet</option>
+      <option value="__custom__">✎ 自定义…</option>
+    </select>
+    <button id="new-chat-btn" class="head-btn">＋ 新对话</button>
+    <button id="api-btn" class="head-btn" title="API / 端点设置">⚙ API</button>
+  </div>
+</header>
+<div id="api-modal" class="modal hidden">
+  <div class="modal-box">
+    <div class="card-title">⚙ API 设置（保存时自动探测验证）</div>
+    <label class="api-field">协议
+      <select id="api-protocol">
+        <option value="anthropic">Anthropic 兼容（如 DeepSeek / Claude 中转）</option>
+        <option value="openai">OpenAI 兼容（如硅基流动 / OpenRouter / 本地服务）</option>
+      </select>
+    </label>
+    <label class="api-field">Base URL
+      <input id="api-base" type="text" placeholder="https://api.deepseek.com/anthropic/v1">
+    </label>
+    <label class="api-field">API Key
+      <input id="api-key" type="password" placeholder="留空 = 沿用当前 Key">
+    </label>
+    <label class="api-field">输出上限 max_tokens（256-65536）
+      <input id="api-maxtokens" type="number" min="256" max="65536" step="256" value="8192">
+    </label>
+    <label class="api-field">思考 thinking
+      <select id="api-thinking">
+        <option value="auto">自动（端点默认）</option>
+        <option value="enabled">开启（带预算）</option>
+        <option value="disabled">关闭</option>
+      </select>
+    </label>
+    <label class="api-field">思考预算 token（256-32768）
+      <input id="api-budget" type="number" min="256" max="32768" step="256" value="2048">
+    </label>
+    <label class="api-field">上下文预算 token（system+历史，0=不裁剪）
+      <input id="api-context" type="number" min="0" max="256000" step="1024" value="64000">
+    </label>
+    <label class="api-field">自动压缩总结（历史超阈值时压最旧一半为摘要）
+      <select id="api-autosummary">
+        <option value="true">开启（推荐）</option>
+        <option value="false">关闭</option>
+      </select>
+    </label>
+    <label class="api-field">摘要触发阈值（历史字符数）
+      <input id="api-sumthreshold" type="number" min="2000" max="100000" step="1000" value="12000">
+    </label>
+    <div class="api-field" id="api-now">当前：—</div>
+    <div class="modal-actions">
+      <button id="api-save" class="head-btn">保存并探测</button>
+      <button id="api-cancel" class="head-btn">取消</button>
+    </div>
+    <div id="api-msg" class="api-msg"></div>
+  </div>
+</div>
+<div id="stats-bar" class="stats-bar">— 轮 · — 次调用 | LLM 总耗时 — | 首 token 平均 — | 缓存命中 — | 输入 — · 输出 —</div>
+<div id="peak-banner" class="peak-banner hidden">⚠️ 高峰时段（北京时间 9:00-12:00 / 14:00-18:00）：API 费用翻倍、可能限流变卡</div>
+
+<main>
+  <section id="chat">
+    <div id="chat-inner">
+      <div id="messages"></div>
+      <div id="typing" class="typing hidden">角色们正在想……</div>
+    </div>
+  </section>
+
+  <aside id="sidebar">
+    <div class="card" id="card-skin">
+      <div class="card-title">🎨 主题</div>
+      <label class="api-field">主题
+        <select id="theme-select">
+          <option value="default">夜空（默认）</option>
+          <option value="paper">纸面（浅色）</option>
+          <option value="warm-night">暖夜</option>
+          <option value="forest">森林</option>
+        </select>
+      </label>
+    </div>
+    <div class="card" id="card-chats">
+      <div class="card-title">📁 会话（旧对话自动归档）</div>
+      <div id="chat-list" class="chat-list">加载中…</div>
+    </div>
+    <div class="card" id="card-world">
+      <div class="card-title">🌍 世界设定（可留空）</div>
+      <textarea id="world-setting" class="world-setting" placeholder="填入你的世界观 / 角色卡 / 规则（如：主角名、世界背景、角色关系、叙事偏好……）。保存在本浏览器，不会发送给除 LLM 外的任何人。"></textarea>
+      <div id="world-note" class="attach-note hidden">已保存 ✓（对话时注入 system）</div>
+    </div>
+    <div class="card" id="card-wardrobe-op">
+      <div class="card-title">👗 换装（界面操作，记账可导出）</div>
+      <div class="wd-row">
+        <input id="wd-char" type="text" placeholder="角色名（如：艾琳）">
+        <input id="wd-outfit" type="text" placeholder="着装描述（如：米白针织衫+百褶裙）">
+      </div>
+      <div class="wd-row">
+        <input id="wd-day" type="text" placeholder="日期（留空=今日）">
+        <button id="wd-btn" class="head-btn">✅ 提交换装</button>
+      </div>
+      <div id="wd-note" class="attach-note hidden"></div>
+    </div>
+    <div class="card" id="card-tm">
+      <div class="card-title">📜 剧情记忆（回合自动记账）</div>
+      <div class="tm-tabs">
+        <button id="tm-tab-tl" class="tm-tab active">时间线</button>
+        <button id="tm-tab-inv" class="tm-tab">物品栏</button>
+        <button id="tm-tab-hs" class="tm-tab">历史检索</button>
+      </div>
+      <div id="tm-timeline" class="tm-body">加载中…</div>
+      <div id="tm-inventory" class="tm-body hidden">加载中…</div>
+      <div id="tm-histsearch" class="tm-body hidden">
+        <div class="search-row">
+          <input id="hs-input" type="text" placeholder="本地关键词检索历史消息，如：画室 晚安（空格=AND，零 API）">
+          <button id="hs-btn">检索</button>
+        </div>
+        <label class="hs-scope"><input type="checkbox" id="hs-scope-cur"> 仅当前会话</label>
+        <div id="hs-result" class="hs-result"></div>
+      </div>
+      <button id="tm-export" class="attach">⬇ 导出回合记录（markdown）</button>
+      <div id="tm-export-box" class="tm-export-box hidden"></div>
+    </div>
+    <div class="card" id="card-settings">
+      <div class="card-title">⚙ 显示设置</div>
+      <button id="settings-toggle" class="btn-ghost">展开 / 收起设置</button>
+      <div id="settings-panel" class="hidden"></div>
+    </div>
+  </aside>
+</main>
+
+<footer>
+  <div class="view-bar">
+    <label>视角
+      <select id="view-select">
+        <option value="">默认（用户角色主观视角）</option>
+        <option value="旁白">旁白（全知视角）</option>
+      </select>
+    </label>
+    <input id="view-custom" type="text" placeholder="自定义视角角色名（可留空）">
+    <button id="view-btn" class="head-btn" title="切换叙事视角（已记账，可导出）">切换</button>
+    <span id="view-note" class="view-note"></span>
+  </div>
+  <textarea id="input" rows="2" placeholder="开始输入你的剧情……"></textarea>
+  <button id="send">发送</button>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>
