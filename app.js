@@ -6,6 +6,9 @@ const els = {
   typing: document.getElementById('typing'),
   input: document.getElementById('input'),
   send: document.getElementById('send'),
+  expandBtn: document.getElementById('expand-btn'),
+  opNote: document.getElementById('op-note'),
+  toolChips: Array.from(document.querySelectorAll('.tool-chip[data-tool]')),
 };
 
 // 通用模式：不注入任何预设真值源，世界设定由用户自填
@@ -269,6 +272,8 @@ async function generate() {
           els.messages.scrollTop = els.messages.scrollHeight;
         } else if (ev.type === 'thinking') {
           thinkAcc += ev.text;
+        } else if (ev.type === 'tools') {
+          renderThinking(`🔧 ${(ev.trace || []).join('；')}`);
         } else if (ev.type === 'summarized') {
           renderThinking(`💾 ${ev.note}`);
         } else if (ev.type === 'error') {
@@ -753,6 +758,54 @@ viewBtn.addEventListener('click', async () => {
   viewNote.classList.remove('hidden');
   viewBtn.disabled = false;
   setTimeout(() => viewNote.classList.add('hidden'), 6000);
+});
+
+// 扩写按钮（胶囊开关）
+const setExpand = (en) => els.expandBtn.classList.toggle('on', en);
+if (localStorage.getItem('rw-op-expand') === '1') setExpand(true);
+els.expandBtn.addEventListener('click', async () => {
+  const en = !els.expandBtn.classList.contains('on');
+  els.expandBtn.disabled = true;
+  try {
+    const r = await (await fetch('/api/op/expand', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId, enabled: en }),
+    })).json();
+    if (r.error) { els.opNote.textContent = '✗ ' + r.error; }
+    else { setExpand(en); localStorage.setItem('rw-op-expand', en ? '1' : '0'); els.opNote.textContent = '✓ ' + r.note; }
+  } catch (e) { els.opNote.textContent = '✗ ' + e.message; }
+  els.opNote.classList.remove('hidden');
+  els.expandBtn.disabled = false;
+  setTimeout(() => els.opNote.classList.add('hidden'), 6000);
+});
+
+// 工具桥：自由勾选工具（通用版 = 仅联网）
+const toolNames = () => els.toolChips.filter((c) => c.classList.contains('on')).map((c) => c.dataset.tool);
+const setTools = (names) => els.toolChips.forEach((c) => c.classList.toggle('on', names.includes(c.dataset.tool)));
+try { setTools(JSON.parse(localStorage.getItem('rw-op-tools') || '[]')); } catch (e) { setTools([]); }
+els.toolChips.forEach((chip) => {
+  chip.addEventListener('click', async () => {
+    chip.classList.toggle('on');
+    const sel = toolNames();
+    chip.disabled = true;
+    try {
+      const r = await (await fetch('/api/op/tools', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ chatId, tools: sel }),
+      })).json();
+      if (r.error) { chip.classList.toggle('on'); els.opNote.textContent = '✗ ' + r.error; }
+      else {
+        setTools(r.tools || []);
+        localStorage.setItem('rw-op-tools', JSON.stringify(r.tools || []));
+        els.opNote.textContent = '✓ ' + r.note;
+      }
+    } catch (e) { chip.classList.toggle('on'); els.opNote.textContent = '✗ ' + e.message; }
+    els.opNote.classList.remove('hidden');
+    chip.disabled = false;
+    setTimeout(() => els.opNote.classList.add('hidden'), 6000);
+  });
 });
 
 wdBtn.addEventListener('click', async () => {

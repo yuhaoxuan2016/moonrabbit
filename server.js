@@ -41,7 +41,7 @@ const API_KEY = loadApiKey();
 ENDPOINT.apiKey = ENDPOINT.apiKey || API_KEY;
 
 // ---------- system prompt 组装（通用版：世界设定由用户自填） ----------
-function buildSystemPrompt(worldSetting) {
+function buildSystemPrompt(worldSetting, chatId) {
   const parts = [];
   parts.push('你是叙事者与全员扮演者，正在与用户共同创作一部互动小说。用户扮演其中一位角色（具体身份由设定或对话确定）；多角色在场时，你同时扮演其余所有角色。');
   parts.push(`【创作自由】
@@ -67,6 +67,10 @@ function buildSystemPrompt(worldSetting) {
     parts.push(`【世界设定】（用户填写，以此为准）\n${worldSetting.trim()}`);
   } else {
     parts.push('【世界设定】（用户尚未填写；从对话上下文逐步建立设定，不臆造未提及的内容）');
+  }
+  const enabledNames = toolsEnabled(chatId || '');
+  if (enabledNames.length) {
+    parts.push('【工具（已开启：' + enabledNames.map((n) => BRIDGE_TOOL_LABELS[n] || n).join('、') + '）】当用户明确要求「联网/搜索/查一下」时，必须先调用 web_search 工具，得到结果后再回答；禁止跳过或编造；工具结果需标注来源。');
   }
   return parts.join('\n\n---\n\n');
 }
@@ -362,7 +366,7 @@ fs.mkdirSync(CHATS_DIR, { recursive: true });
 
 // ---------- 界面操作状态（视角 / 当日着装覆盖，会话内持久，注入 system + 记账） ----------
 const OP_FILE = path.join(DATA_DIR, 'op.json');
-let opState = { views: {}, wardrobes: {} };   // views: {chatId: 视角名}  wardrobes: {chatId: 着装串}
+let opState = { views: {}, wardrobes: {}, expands: {}, tools: {} };   // views/wardrobes/expands/tools: {chatId: ...}
 try { opState = Object.assign(opState, JSON.parse(fs.readFileSync(OP_FILE, 'utf8'))); } catch (e) { /* 首次 */ }
 function saveOpState() {
   try { fs.writeFileSync(OP_FILE, JSON.stringify(opState), 'utf8'); } catch (e) { /* 忽略 */ }
@@ -383,7 +387,118 @@ function opInject(chatId) {
   const lines = [];
   if (opState.views[cid]) lines.push(`- 当前视角覆盖：${opState.views[cid]}（用户已在界面切换视角；你必须以该角色的主观视角叙述——与设定中记录的视角冲突时，以本覆盖为准。严格遵守信息屏障：主场景角色无法感知副场景事件）`);
   if (opState.wardrobes[cid]) lines.push(`- 当日着装覆盖：${opState.wardrobes[cid]}（用户已在界面换装；以此为准，覆盖设定中的当日着装描述）`);
+  if (opState.expands[cid]) lines.push('- 【扩写指令（已开启）】当用户发来简短指令（如「角色去厨房」「角色站起来」）时，你的任务是将其【扩写】为详细、生动的动作/场景/台词描写：用第三人称叙述该角色的行为（动作细节、表情、环境、心理），符合人设；扩写要连贯、有画面感、贴合当前场景；不要替其他角色做决定；扩写后可自然衔接台词。');
+  if (opState.tools && Array.isArray(opState.tools[cid]) && opState.tools[cid].length) {
+    const labels = opState.tools[cid].map((n) => BRIDGE_TOOL_LABELS[n] || n).join('、');
+    lines.push('- 【工具桥（已开启：' + labels + '）】当用户明确要求「联网/搜索/查一下」或需要核实现实世界信息时，你必须调用 web_search 工具，不得跳过或编造；工具结果需在回复中标注来源（联网核实：…）。');
+  }
   return lines.length ? `## ⚠️ 界面操作覆盖（优先级最高，冲突时以此为准）\n${lines.join('\n')}` : '';
+}
+
+
+
+// ---------- 工具桥：对话内工具（通用版 = 仅联网搜索；RW 专属工具在正式版） ----------
+const BRIDGE_TOOL_NAMES = ['web_search'];
+const BRIDGE_TOOL_LABELS = { web_search: '联网搜索' };
+const BRIDGE_TOOLS = [
+  { name: 'web_search', description: '联网搜索（仅当用户明确要求「联网/查一下/搜索」，或需要核实现实世界信息如新闻/歌曲/游戏/品牌时使用）。返回来源标题+链接+摘要。', input_schema: { type: 'object', properties: { query: { type: 'string', description: '搜索关键词' } }, required: ['query'] } },
+];
+function normalizeToolsState() {
+  const out = {};
+  for (const [cid, v] of Object.entries(opState.tools || {})) {
+    if (v === true) out[cid] = BRIDGE_TOOL_NAMES.slice();
+    else if (Array.isArray(v)) out[cid] = v.filter((n) => BRIDGE_TOOL_NAMES.includes(n));
+    else if (v && typeof v === 'object') out[cid] = BRIDGE_TOOL_NAMES.filter((n) => v[n]);
+    else out[cid] = [];
+  }
+  opState.tools = out;
+}
+normalizeToolsState();
+function toolsEnabled(chatId) { return (opState.tools && opState.tools[sanitizeId(chatId)]) || []; }
+async function executeBridgeTool(name, input) {
+  if (name !== 'web_search') return '未知工具: ' + name;
+  const ep = ENDPOINT;
+  const q = String(input.query || '').slice(0, 200);
+  const toolDef = { name: 'web_search', description: 'Search the web', input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } };
+  const headers = { 'content-type': 'application/json', 'x-api-key': ep.apiKey, 'anthropic-version': '2023-06-01' };
+  const msgs = [{ role: 'user', content: 'Perform a web search for the query: ' + q }];
+  const seenUrls = new Set();
+  for (let i = 0; i < 3; i++) {
+    const r = await fetch(ep.baseURL + '/messages', {
+      method: 'POST', headers,
+      body: JSON.stringify({ model: ep.model, max_tokens: 1024, thinking: { type: 'disabled' }, tools: [toolDef], messages: msgs }),
+      signal: AbortSignal.timeout(60000),
+    });
+    if (!r.ok) return '联网搜索失败 HTTP ' + r.status + ': ' + (await r.text()).slice(0, 120);
+    const d = await r.json();
+    const blocks = d.content || [];
+    const out = [];
+    for (const b of blocks) {
+      if (b.type === 'web_search_tool_result' && Array.isArray(b.web_search_result)) {
+        for (const item of b.web_search_result) {
+          if (seenUrls.has(item.url)) continue;
+          seenUrls.add(item.url);
+          out.push('- ' + (item.title || '') + '（' + (item.url || '') + '）');
+        }
+      }
+      if (b.type === 'text' && Array.isArray(b.citations)) {
+        for (const c of b.citations) {
+          if (c.cited_text && !seenUrls.has(c.url)) {
+            if (c.url) seenUrls.add(c.url);
+            out.push('  [摘要] ' + String(c.cited_text).replace(/\s+/g, ' ').slice(0, 200));
+          }
+        }
+      }
+    }
+    if (out.length) return out.join('\n');
+    const tu = blocks.find((b) => b.type === 'tool_use');
+    if (!tu) return '（搜索未返回结果）';
+    msgs.push({ role: 'assistant', content: blocks }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: tu.id, content: '' }] });
+  }
+  return '（搜索多次未返回结果）';
+}
+async function bridgeDirectTool(lastUserText) {
+  const t = String(lastUserText || '');
+  const res = [];
+  if (/联网|搜索|查一下|查新闻|核实/.test(t)) {
+    let q = t.replace(/^(?:联网|搜索|查一下|帮我|请|核实|查)+[：:、\s]*/i, '').replace(/[？?].*$/, '').replace(/[。！!\s]+$/, '').slice(0, 120);
+    if (q) res.push({ name: 'web_search', input: { query: q } });
+  }
+  return res;
+}
+async function runBridgeToolLoop(messages, system, enabledNames) {
+  const ep = ENDPOINT;
+  const enabledSet = new Set(enabledNames || []);
+  const tools = BRIDGE_TOOLS.filter((t) => enabledSet.has(t.name));
+  if (!tools.length) return { messages: messages.slice(), trace: [], finalText: '' };
+  let msgs = messages.slice();
+  const trace = [];
+  for (let round = 0; round < 4; round++) {
+    const r = await fetch(ep.baseURL + '/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': ep.apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: ep.model, system, max_tokens: 1024, thinking: { type: 'disabled' }, tools, messages: msgs }),
+      signal: AbortSignal.timeout(90000),
+    });
+    if (!r.ok) throw new Error('工具回合失败 HTTP ' + r.status + ': ' + (await r.text()).slice(0, 120));
+    const d = await r.json();
+    const blocks = d.content || [];
+    const toolUses = blocks.filter((b) => b.type === 'tool_use');
+    if (!toolUses.length) return { messages: msgs, trace, finalText: blocks.map((b) => b.text || '').join('') };
+    msgs = msgs.concat([{ role: 'assistant', content: blocks }]);
+    const results = [];
+    for (const tu of toolUses) {
+      const input = (typeof tu.input === 'object' && tu.input) ? tu.input : {};
+      let resultText;
+      if (!enabledSet.has(tu.name)) resultText = '工具不可用：' + tu.name + '（未在本会话开启）';
+      else try { resultText = await executeBridgeTool(tu.name, input); }
+      catch (e) { resultText = '工具执行失败: ' + e.message; }
+      trace.push({ name: tu.name, input, resultHead: resultText.slice(0, 120) });
+      results.push({ type: 'tool_result', tool_use_id: tu.id, content: String(resultText).slice(0, 5000) });
+    }
+    msgs = msgs.concat([{ role: 'user', content: results }]);
+  }
+  return { messages: msgs, trace, finalText: '' };
 }
 
 function chatFilePath(id) { return path.join(CHATS_DIR, `${id}.json`); }
@@ -661,6 +776,43 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // 界面操作：扩写指令开关（记账）
+  if (p === '/api/op/expand' && req.method === 'POST') {
+    let body = '';
+    for await (const c of req) body += c;
+    try {
+      const { chatId, enabled } = JSON.parse(body);
+      const cid = sanitizeId(chatId || '');
+      const en = Boolean(enabled);
+      if (en) opState.expands[cid] = true; else delete opState.expands[cid];
+      saveOpState();
+      appendOpRecord(cid, '扩写指令', en ? '开启' : '关闭');
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok: true, enabled: en, note: en ? '扩写指令已开启（本会话生效，短指令将自动扩写）' : '扩写指令已关闭' }));
+    } catch (e) {
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ error: String(e) }));
+    }
+  }
+  // 界面操作：工具桥开关（自由选取工具集合；记账）
+  if (p === '/api/op/tools' && req.method === 'POST') {
+    let body = '';
+    for await (const c of req) body += c;
+    try {
+      const { chatId, tools } = JSON.parse(body);
+      const cid = sanitizeId(chatId || '');
+      const sel = (Array.isArray(tools) ? tools : []).filter((n) => BRIDGE_TOOL_NAMES.includes(String(n)));
+      if (sel.length) opState.tools[cid] = sel; else delete opState.tools[cid];
+      saveOpState();
+      appendOpRecord(cid, '工具桥', sel.length ? sel.map((n) => BRIDGE_TOOL_LABELS[n] || n).join('、') : '关闭');
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok: true, tools: sel, note: sel.length ? '工具桥已开启：' + sel.map((n) => BRIDGE_TOOL_LABELS[n] || n).join('、') : '工具桥已关闭' }));
+    } catch (e) {
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ error: String(e) }));
+    }
+  }
+
   // 历史消息检索（本地关键词，零 API）
   if (p === '/api/history/search' && req.method === 'GET') return handleHistorySearch(url, res);
 
@@ -734,7 +886,7 @@ const server = http.createServer(async (req, res) => {
     if (!merged.length || merged[0].role !== 'user') merged.unshift({ role: 'user', content: '（开场）' });
 
     // system：世界设定（用户自填）+ 界面操作覆盖
-    let system = buildSystemPrompt(payload.worldSetting || '');
+    let system = buildSystemPrompt(payload.worldSetting || '', payload.chatId || '');
     const op = opInject(payload.chatId || '');
     if (op) system += '\n\n---\n\n' + op;
 
@@ -798,6 +950,30 @@ const server = http.createServer(async (req, res) => {
     const meta = {};
     const send = (obj) => { if (!finished) res.write(`data: ${JSON.stringify(obj)}\n\n`); };
     if (summaryNote) send({ type: 'summarized', note: summaryNote });
+    // 工具桥：联网搜索（独立开关，会话内持久）
+    let toolTrace = null;
+    const enabledNames = toolsEnabled(payload.chatId);
+    if (enabledNames.length) {
+      try {
+        const lastU = merged[merged.length - 1];
+        const direct = (lastU && lastU.role === 'user' ? await bridgeDirectTool(lastU.content) : []).filter((d) => enabledNames.includes(d.name));
+        if (direct.length) {
+          const parts2 = [];
+          for (const d of direct) {
+            const out = await executeBridgeTool(d.name, d.input);
+            parts2.push('[工具 ' + d.name + ']\n' + out);
+            toolTrace = [...(toolTrace || []), { name: d.name, input: d.input, resultHead: out.slice(0, 120) }];
+          }
+          merged = merged.slice(0, -1).concat([{ role: 'user', content: lastU.content + '\n\n【工具结果】\n' + parts2.join('\n\n') }]);
+          send({ type: 'tools', trace: toolTrace.map((t) => t.name + '(' + JSON.stringify(t.input).slice(0, 60) + ')') });
+        } else {
+          const tr = await runBridgeToolLoop(merged, system, enabledNames);
+          merged = tr.messages;
+          toolTrace = tr.trace;
+          if (toolTrace && toolTrace.length) send({ type: 'tools', trace: toolTrace.map((t) => t.name + '(' + JSON.stringify(t.input).slice(0, 60) + ')') });
+        }
+      } catch (e) { console.error('[bridge] 工具回合失败:', e.message); }
+    }
     try {
       await callLLM(merged, system, (text) => {
         if (!firstTokenAt) firstTokenAt = Date.now();
@@ -821,6 +997,7 @@ const server = http.createServer(async (req, res) => {
       b.cacheMiss += inTok + cacheCreate;
       saveStats();
       appendTurnRecord(acc, payload.chatId);  // 剧情记忆：按会话自动记账
+      if (toolTrace && toolTrace.length) appendOpRecord(payload.chatId, '工具调用', toolTrace.map((t) => t.name + ':' + String(t.input.query || '').slice(0, 40)).join('；'));
       send({ type: 'done' });
     } catch (e) {
       send({ type: 'error', error: String(e) });

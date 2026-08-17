@@ -286,3 +286,11 @@ footer textarea:focus { border-color: var(--accent); }
 
 /* 视角自定义输入 */
 .view-bar input { flex: 0 0 150px; background: var(--bg2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; font-size: 12.5px; }
+
+.tool-chip {
+  appearance: none; border: 1px solid var(--border); background: var(--bg2); color: var(--muted);
+  border-radius: 999px; padding: 5px 15px; font-size: 13px; font-family: inherit;
+  cursor: pointer; transition: all 0.15s ease; margin-left: 6px; line-height: 1.4;
+}
+.tool-chip:hover { border-color: var(--accent); color: var(--text); }
+.tool-chip.on { background: var(--accent); border-color: var(--accent); color: #fff; box-shadow: 0 0 8px rgba(167, 139, 250, 0.35); }
