@@ -63,3 +63,8 @@ data/op.json                  视角/换装覆盖状态
 - 零依赖：仅使用 Node.js 内置模块（`http` / `fs` / `path`），无需 `npm install`
 - 零外部服务：检索/摘要/记账全部本地完成；只有 LLM 调用走你配置的端点
 - 内容与平台解耦：不内置任何世界观/角色，一切设定由用户填写
+
+## 相关项目
+
+- 🤖 本项目的开发、测试与文档由运行在 **DeepSeek Harness**（[deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)，"一切皆插件"的开源 Agent 框架）中的 AI 代理协作完成
+- 界面接入任意 OpenAI / Anthropic 兼容端点，包括 DeepSeek API
