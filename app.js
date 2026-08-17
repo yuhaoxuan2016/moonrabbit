@@ -132,9 +132,17 @@ function deleteMsg(seq) {
   saveChat();
 }
 
+// 记账标签剥离（仅显示层）：<storyevent>/<items>/【更新】不显示在气泡里；原文仍在 history/存档中
+function stripTurnTags(text) {
+  return String(text || '')
+    .replace(/<storyevent>[\s\S]*?<\/storyevent>/gi, '')
+    .replace(/<items>[\s\S]*?<\/items>/gi, '')
+    .replace(/^【更新】[^\n]*$/gm, '');
+}
+
 function renderAssistant(content, seq) {
   const wrap = makeWrap('assistant', seq);
-  const segs = parseSegments(content);
+  const segs = parseSegments(stripTurnTags(content));
   for (const seg of segs) {
     const row = document.createElement('div');
     row.className = 'msg' + (seg.char ? '' : ' narrator');
@@ -257,7 +265,7 @@ async function generate() {
         try { ev = JSON.parse(data); } catch (e) { continue; }
         if (ev.type === 'delta') {
           acc += ev.text;
-          tempBub.textContent = acc;
+          tempBub.textContent = stripTurnTags(acc);
           els.messages.scrollTop = els.messages.scrollHeight;
         } else if (ev.type === 'thinking') {
           thinkAcc += ev.text;
