@@ -140,6 +140,21 @@ const TURNS_DIR = path.join(DATA_DIR, 'turns');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(TURNS_DIR, { recursive: true });
 
+// ---------- 调试：最近提示词记录（查看每轮发给 AI 的 system prompt） ----------
+const PROMPT_DIR = path.join(DATA_DIR, 'prompts');
+fs.mkdirSync(PROMPT_DIR, { recursive: true });
+let lastPrompt = { chatId: '', ts: '', system: '', historyCount: 0, extraContext: false, tools: [] };
+function recordPrompt(chatId, system, historyCount, extraContext) {
+  lastPrompt = { chatId: sanitizeId(chatId), ts: new Date().toISOString(), system, historyCount: historyCount || 0, extraContext: !!extraContext, tools: toolsEnabled(chatId) };
+  try {
+    const line = JSON.stringify({ ts: lastPrompt.ts, historyCount: lastPrompt.historyCount, extraContext: lastPrompt.extraContext, tools: lastPrompt.tools, system });
+    fs.appendFileSync(path.join(PROMPT_DIR, `${lastPrompt.chatId}.jsonl`), line + '\n', 'utf8');
+    const file = path.join(PROMPT_DIR, `${lastPrompt.chatId}.jsonl`);
+    const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+    if (lines.length > 30) fs.writeFileSync(file, lines.slice(-30).join('\n') + '\n', 'utf8');
+  } catch (e) { /* 忽略 */ }
+}
+
 function sanitizeId(id) { return String(id || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 60) || 'default'; }
 function turnsFile(chatId) { return path.join(TURNS_DIR, `${sanitizeId(chatId)}.jsonl`); }
 
@@ -1180,6 +1195,23 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify({ turns, total: readTurns(chatIdOf()).length }));
   }
+  // 调试：查看最近提示词（最近一次 + 本会话历史记录）
+  if (p === '/api/prompt/latest' && req.method === 'GET') {
+    const cid = sanitizeId(url.searchParams.get('chatId') || '');
+    const history = [];
+    try {
+      const file = path.join(PROMPT_DIR, `${cid}.jsonl`);
+      if (fs.existsSync(file)) {
+        for (const l of fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).slice(-10)) {
+          try { history.push(JSON.parse(l)); } catch (e) { /* 忽略 */ }
+        }
+      }
+    } catch (e) { /* 忽略 */ }
+    const latest = lastPrompt.chatId === cid ? lastPrompt : (history[history.length - 1] || null);
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ latest, history: history.reverse() }));
+  }
+
   // 手动补记一条回合（界面编辑）
   if (p === '/api/timeline/manual' && req.method === 'POST') {
     let body = '';
@@ -1290,6 +1322,8 @@ const server = http.createServer(async (req, res) => {
     if (op) system += '\n\n---\n\n' + op;
     const emo = emotionInject(payload.chatId || '');
     if (emo) system += '\n\n---\n\n' + emo;
+    // 调试：记录本轮 system prompt（落盘 data/prompts/）
+    recordPrompt(payload.chatId || '', system, merged.length, false);
 
     // 上下文预算裁剪：system + 历史 ≤ maxContext（0 = 不裁剪）；从最旧消息开始丢弃，至少保留 1 条
     if (ENDPOINT.maxContext && ENDPOINT.maxContext > 0) {

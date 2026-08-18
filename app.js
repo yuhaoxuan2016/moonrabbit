@@ -1002,6 +1002,33 @@ tmExport.addEventListener('click', async () => {
   }
 });
 
+// ---------- 调试：查看最近提示词 ----------
+document.getElementById('prompt-btn').addEventListener('click', async () => {
+  const modal = document.getElementById('prompt-modal');
+  const meta = document.getElementById('prompt-meta');
+  const body = document.getElementById('prompt-body');
+  modal.classList.remove('hidden');
+  meta.textContent = '加载中…';
+  body.textContent = '';
+  try {
+    const d = await (await fetch(`/api/prompt/latest?chatId=${encodeURIComponent(chatId || '')}`)).json();
+    const l = d.latest;
+    if (!l || !l.system) {
+      meta.textContent = '（本会话还没有请求记录——发一条消息后再查看）';
+      body.textContent = '';
+      return;
+    }
+    const t = new Date(l.ts);
+    meta.innerHTML = `<b>${l.chatId}</b> · ${t.toLocaleString()} · 历史 ${l.historyCount} 条 · 工具：${(l.tools || []).join('、') || '无'}`;
+    body.textContent = l.system;
+  } catch (e) {
+    meta.textContent = '读取失败：' + e.message;
+  }
+});
+document.getElementById('prompt-close').addEventListener('click', () => {
+  document.getElementById('prompt-modal').classList.add('hidden');
+});
+
 // ---------- 界面操作：视角切换 / 换装（记账，可导出） ----------
 const viewSelect = document.getElementById('view-select');
 const viewCustom = document.getElementById('view-custom');
