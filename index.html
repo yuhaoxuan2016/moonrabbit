@@ -66,6 +66,34 @@
     <label class="api-field">摘要触发阈值（历史字符数）
       <input id="api-sumthreshold" type="number" min="2000" max="100000" step="1000" value="12000">
     </label>
+    <div class="set-group-title">辅助 API（后台任务走独立端点，不抢主 API）</div>
+    <label class="api-field">启用辅助 API
+      <select id="api-aux-enabled">
+        <option value="false">关闭（后台任务走主端点）</option>
+        <option value="true">开启（摘要 / 联网搜索走辅助端点）</option>
+      </select>
+    </label>
+    <label class="api-field">辅助协议
+      <select id="api-aux-protocol">
+        <option value="anthropic">Anthropic 兼容（如 DeepSeek / Claude 中转）</option>
+        <option value="openai">OpenAI 兼容</option>
+      </select>
+    </label>
+    <label class="api-field">辅助 Base URL（留空 = 关闭辅助）
+      <input id="api-aux-base" type="text" placeholder="https://api.deepseek.com/anthropic/v1">
+    </label>
+    <label class="api-field">辅助 API Key（留空 = 沿用当前 Key）
+      <input id="api-aux-key" type="password" placeholder="留空 = 沿用当前 Key">
+    </label>
+    <label class="api-field">辅助模型（建议用便宜模型做摘要）
+      <input id="api-aux-model" type="text" placeholder="如 deepseek-chat">
+    </label>
+    <label class="api-field">辅助失败时回退主端点
+      <select id="api-aux-fallback">
+        <option value="false">不回退（默认，避免撞主 API 限流）</option>
+        <option value="true">回退主端点（辅助挂了也能跑）</option>
+      </select>
+    </label>
     <div class="api-field" id="api-now">当前：—</div>
     <div class="modal-actions">
       <button id="api-save" class="head-btn">保存并探测</button>
@@ -87,27 +115,53 @@
 
   <aside id="sidebar">
     <div class="card" id="card-skin">
-      <div class="card-title">🎨 主题</div>
+      <div class="card-title">🎨 皮肤 & 背景</div>
       <label class="api-field">主题
         <select id="theme-select">
           <option value="default">夜空（默认）</option>
           <option value="paper">纸面（浅色）</option>
           <option value="warm-night">暖夜</option>
           <option value="forest">森林</option>
+          <option value="custom">自定义（调色板）</option>
         </select>
       </label>
+      <label class="api-field">背景图 URL（自定义，如 https://…/bg.jpg）
+        <input id="bg-url-input" type="text" placeholder="留空 = 无背景">
+      </label>
+      <div id="custom-skin" class="custom-skin hidden">
+        <label class="api-field">明暗
+          <select id="cs-mode">
+            <option value="dark">深色</option>
+            <option value="light">浅色</option>
+          </select>
+        </label>
+        <label class="api-field">色相（0-360）<input id="cs-hue" type="range" min="0" max="360" value="250"></label>
+        <label class="api-field">饱和度（0-100%）<input id="cs-sat" type="range" min="0" max="100" value="55"></label>
+        <label class="api-field">亮度（30-90%）<input id="cs-light" type="range" min="30" max="90" value="45"></label>
+        <button id="cs-reset" class="head-btn">恢复默认配色</button>
+        <div class="attach-note hidden" id="cs-note">已应用自定义配色（本地保存）</div>
+      </div>
     </div>
     <div class="card" id="card-chats">
       <div class="card-title">📁 会话（旧对话自动归档）</div>
       <div id="chat-list" class="chat-list">加载中…</div>
     </div>
     <div class="card" id="card-world">
-      <div class="card-title">🌍 世界设定（可留空）</div>
-      <textarea id="world-setting" class="world-setting" placeholder="填入你的世界观 / 角色卡 / 规则（如：主角名、世界背景、角色关系、叙事偏好……）。保存在本浏览器，不会发送给除 LLM 外的任何人。"></textarea>
+      <div class="card-title">🌍 设定（世界 / 角色卡 / 规则，可留空）</div>
+      <label class="api-field">世界设定（背景 / 地点 / 势力 / 时间线…）
+        <textarea id="world-setting" class="world-setting" placeholder="填入世界观：世界背景、地点、势力、时间线、叙事偏好……"></textarea>
+      </label>
+      <label class="api-field">角色卡（每个角色一段，用空行分隔）
+        <textarea id="chars-setting" class="world-setting" placeholder="如：&#10;艾琳：女剑士，性格直率，暗恋队长。&#10;卫队长：沉稳寡言，责任感强。"></textarea>
+      </label>
+      <label class="api-field">规则（输出 / 叙事 / 额外约束…）
+        <textarea id="rules-setting" class="world-setting" placeholder="如：禁止替用户角色说话 / 每轮回复不超过300字 / 战斗场景详细描写……"></textarea>
+      </label>
       <div id="world-note" class="attach-note hidden">已保存 ✓（对话时注入 system）</div>
     </div>
     <div class="card" id="card-wardrobe-op">
       <div class="card-title">👗 换装（界面操作，记账可导出）</div>
+      <div class="wd-current" id="wd-current">当前着装：加载中…</div>
       <div class="wd-row">
         <input id="wd-char" type="text" placeholder="角色名（如：艾琳）">
         <input id="wd-outfit" type="text" placeholder="着装描述（如：米白针织衫+百褶裙）">
@@ -124,9 +178,30 @@
         <button id="tm-tab-tl" class="tm-tab active">时间线</button>
         <button id="tm-tab-inv" class="tm-tab">物品栏</button>
         <button id="tm-tab-hs" class="tm-tab">历史检索</button>
+        <button id="tm-tab-em" class="tm-tab">情绪</button>
       </div>
       <div id="tm-timeline" class="tm-body">加载中…</div>
+      <div class="tm-edit">
+        <div class="tm-edit-title">✍️ 手动补记（时间线）</div>
+        <div class="em-row"><input id="mt-time" type="text" placeholder="时间（如：第3天 早上）"><input id="mt-loc" type="text" placeholder="地点（可留空）"></div>
+        <div class="em-row"><input id="mt-char" type="text" placeholder="在场角色（顿号分隔，可留空）"><input id="mt-cos" type="text" placeholder="着装变化（可留空）"></div>
+        <div class="em-row"><input id="mt-event" type="text" placeholder="事件一句话（可留空）"><button id="mt-btn" class="head-btn">✅ 补记</button></div>
+        <div id="mt-note" class="attach-note hidden"></div>
+      </div>
       <div id="tm-inventory" class="tm-body hidden">加载中…</div>
+      <div class="tm-edit hidden" id="inv-edit">
+        <div class="tm-edit-title">✍️ 手动修改物品栏</div>
+        <div class="em-row">
+          <select id="inv-act">
+            <option value="gain">＋ 添加/获得</option>
+            <option value="loss">－ 消耗/移除</option>
+          </select>
+          <input id="inv-name" type="text" placeholder="物品名（如：素描本）">
+          <input id="inv-holder" type="text" placeholder="持有者（添加时可选）">
+          <button id="inv-btn" class="head-btn">✅ 提交</button>
+        </div>
+        <div id="inv-note" class="attach-note hidden"></div>
+      </div>
       <div id="tm-histsearch" class="tm-body hidden">
         <div class="search-row">
           <input id="hs-input" type="text" placeholder="本地关键词检索历史消息，如：画室 晚安（空格=AND，零 API）">
@@ -134,6 +209,21 @@
         </div>
         <label class="hs-scope"><input type="checkbox" id="hs-scope-cur"> 仅当前会话</label>
         <div id="hs-result" class="hs-result"></div>
+      </div>
+      <div id="tm-emotions" class="tm-body hidden">
+        <div class="em-list" id="em-list">加载中…</div>
+        <div class="em-row">
+          <input id="em-name" type="text" placeholder="角色名（如：艾琳）" list="em-names">
+          <datalist id="em-names">
+            <option value="艾琳"></option><option value="卫队长"></option><option value="旁白"></option>
+          </datalist>
+        </div>
+        <div class="em-row">
+          <input id="em-text" type="text" placeholder="情绪描述（如：平静带笑意；留空=清除）">
+          <button id="em-btn" class="head-btn">✅ 记录</button>
+        </div>
+        <div id="em-note" class="attach-note hidden"></div>
+        <div class="em-hint">AI 回复可输出 <code>&lt;storyevent&gt;emotion: 角色=情绪&lt;/storyevent&gt;</code> 自动记录；此面板可手动修正。情绪会注入 system 帮助保持连续。</div>
       </div>
       <button id="tm-export" class="attach">⬇ 导出回合记录（markdown）</button>
       <div id="tm-export-box" class="tm-export-box hidden"></div>
@@ -164,6 +254,20 @@
   <textarea id="input" rows="2" placeholder="开始输入你的剧情……"></textarea>
   <button id="send">发送</button>
 </footer>
+
+<!-- 新手导航（首次使用引导） -->
+<div id="tour-overlay" class="tour-overlay hidden">
+  <div class="tour-box">
+    <div class="tour-title">👋 欢迎使用通用多角色 RP 界面</div>
+    <div class="tour-body" id="tour-body"></div>
+    <div class="tour-actions">
+      <button id="tour-prev" class="head-btn hidden">上一步</button>
+      <span id="tour-dots" class="tour-dots"></span>
+      <button id="tour-next" class="head-btn">下一步</button>
+      <button id="tour-skip" class="head-btn ghost">跳过</button>
+    </div>
+  </div>
+</div>
 
 <script src="/app.js"></script>
 </body>

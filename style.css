@@ -68,7 +68,7 @@ header {
 
 /* API 设置弹窗 */
 .modal { position: fixed; inset: 0; background: rgba(10, 12, 22, 0.65); display: flex; align-items: center; justify-content: center; z-index: 100; }
-.modal-box { width: 460px; max-width: 92vw; background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 18px; box-shadow: 0 18px 50px rgba(0,0,0,0.5); }
+.modal-box { width: 460px; max-width: 92vw; max-height: 88vh; overflow-y: auto; background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 18px; box-shadow: 0 18px 50px rgba(0,0,0,0.5); }
 .api-field { display: block; font-size: 13px; color: var(--muted); margin-bottom: 10px; }
 .api-field select, .api-field input { width: 100%; margin-top: 4px; background: var(--bg2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 7px 10px; font-size: 13px; outline: none; }
 .api-field select:focus, .api-field input:focus { border-color: var(--accent); }
@@ -168,9 +168,11 @@ main { flex: 1; display: flex; min-height: 0; }
   font-size: 16px; line-height: 1.8; white-space: pre-wrap; word-break: break-word;
   box-shadow: 0 3px 10px rgba(0, 0, 0, 0.18);
 }
-.msg.user .bubble { background: var(--user-bubble); border-color: var(--user-border); border-radius: 16px 6px 16px 16px; }
+.msg.user .bubble { background: var(--user-bubble); border-color: var(--user-border); border-radius: 16px 6px 16px 16px; margin-left: auto; }
 .char-name { font-size: 13px; color: var(--muted); margin: 0 0 3px 4px; font-weight: 700; }
 .msg.user .char-name { text-align: right; margin-right: 4px; }
+/* 用户消息主体：贴右（body 内部右对齐，气泡靠右、名字靠右） */
+.msg.user > div:last-child { display: flex; flex-direction: column; align-items: flex-end; }
 /* 旁白段：不透明实底，金色斜体区分 */
 .msg.narrator { margin-bottom: 8px; }
 .msg.narrator .bubble {
@@ -229,11 +231,20 @@ main { flex: 1; display: flex; min-height: 0; }
 
 /* 剧情记忆 */
 .tm-body { font-size: 13px; color: var(--muted); line-height: 1.7; max-height: 240px; overflow-y: auto; }
-.tm-item { padding: 5px 0; border-bottom: 1px dashed var(--border); }
+.tm-item { padding: 5px 0; border-bottom: 1px dashed var(--border); position: relative; }
 .tm-item .t { color: var(--text); }
 .tm-item .loc { color: var(--accent); font-size: 12px; }
 .tm-item .gain { color: #7fe0a9; font-size: 12px; }
 .tm-item .loss { color: #f0a3a3; font-size: 12px; }
+.tm-item .emotag { color: #f9a8d4; font-size: 12px; }
+.tm-item .tm-del { position: absolute; right: 0; top: 4px; padding: 0 6px; font-size: 11px; opacity: 0; transition: opacity 0.15s; }
+.tm-item:hover .tm-del { opacity: 1; }
+.tm-edit { margin-top: 7px; border-top: 1px dashed var(--border); padding-top: 6px; }
+.tm-edit-title { font-size: 12px; color: var(--accent); font-weight: 700; margin-bottom: 5px; }
+
+/* 当前着装（换装卡片顶部） */
+.wd-current { font-size: 12.5px; color: var(--muted); line-height: 1.7; margin-bottom: 7px; padding: 6px 8px; background: var(--bg2); border: 1px dashed var(--border); border-radius: 8px; }
+.wd-current .chip { display: inline-block; background: var(--card); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; font-size: 12px; margin: 1px 2px; color: var(--text); }
 .tm-export-box { margin-top: 7px; width: 100%; min-height: 70px; max-height: 170px; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; color: var(--muted); font-size: 12px; padding: 7px; white-space: pre-wrap; overflow-y: auto; }
 
 /* 历史检索 */
@@ -294,3 +305,49 @@ footer textarea:focus { border-color: var(--accent); }
 }
 .tool-chip:hover { border-color: var(--accent); color: var(--text); }
 .tool-chip.on { background: var(--accent); border-color: var(--accent); color: #fff; box-shadow: 0 0 8px rgba(167, 139, 250, 0.35); }
+
+/* ---------- 背景 URL（自助美化） ---------- */
+body.with-bg {
+  background-image: linear-gradient(var(--scrim), var(--scrim)), var(--bg-url, none);
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
+}
+
+/* ---------- 情绪追踪 ---------- */
+.em-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; font-size: 12.5px; }
+.em-item { display: flex; gap: 6px; align-items: baseline; background: var(--bg2); border: 1px solid var(--border); border-radius: 7px; padding: 4px 8px; }
+.em-name { font-weight: 700; color: var(--accent); flex: none; }
+.em-text { color: var(--text); word-break: break-word; }
+.em-row { display: flex; gap: 6px; margin-top: 6px; }
+.em-row input { flex: 1; background: var(--bg2); border: 1px solid var(--border); color: var(--text); border-radius: 7px; padding: 5px 8px; font-size: 12.5px; outline: none; min-width: 0; }
+.em-row input:focus { border-color: var(--accent); }
+.em-hint { margin-top: 7px; font-size: 11.5px; color: var(--muted); line-height: 1.6; }
+.em-hint code { color: var(--gold, #f5c97b); }
+
+/* ---------- 自定义调色板 ---------- */
+.custom-skin { border-top: 1px dashed var(--border); margin-top: 8px; padding-top: 8px; }
+.custom-skin input[type="range"] { width: 100%; accent-color: var(--accent); }
+
+/* ---------- 新手导航 ---------- */
+.tour-overlay {
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(8, 10, 18, 0.72);
+  display: flex; align-items: center; justify-content: center;
+}
+/* hidden 必须覆盖 tour-overlay 的 display:flex（.hidden 定义在前，同特异性后者胜） */
+.tour-overlay.hidden { display: none; }
+.tour-box {
+  width: 420px; max-width: 90vw;
+  background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+  padding: 22px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55);
+}
+.tour-title { font-size: 16px; font-weight: 700; color: var(--accent); margin-bottom: 10px; }
+.tour-body { font-size: 13.5px; line-height: 1.75; color: var(--text); min-height: 70px; }
+.tour-actions { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
+.tour-actions .head-btn { padding: 6px 16px; }
+.tour-dots { flex: 1; display: flex; gap: 5px; justify-content: center; }
+.tour-dots .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border); }
+.tour-dots .dot.on { background: var(--accent); }
+.head-btn.ghost { background: transparent; border-color: transparent; color: var(--muted); }
+.tour-highlight { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 10px; }

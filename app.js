@@ -14,24 +14,43 @@ const els = {
 // 通用模式：不注入任何预设真值源，世界设定由用户自填
 const GENERIC = true;
 const WORLD_KEY = 'genericWorldSetting';
+const CHARS_KEY = 'genericCharsSetting';
+const RULES_KEY = 'genericRulesSetting';
 const worldInput = document.getElementById('world-setting');
+const charsInput = document.getElementById('chars-setting');
+const rulesInput = document.getElementById('rules-setting');
 const worldNote = document.getElementById('world-note');
 {
   const title = document.querySelector('.subtitle');
   if (title) title.textContent = '通用 RP 界面 · 设定自填';
   els.input.placeholder = '开始输入你的剧情……';
-  try { worldInput.value = localStorage.getItem(WORLD_KEY) || ''; } catch (e) { /* ignore */ }
-  let saveTimer = null;
-  worldInput.addEventListener('input', () => {
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      try {
-        localStorage.setItem(WORLD_KEY, worldInput.value);
-        worldNote.classList.remove('hidden');
-        setTimeout(() => worldNote.classList.add('hidden'), 1500);
-      } catch (e) { /* ignore */ }
-    }, 600);
-  });
+  // 三个设定区分别持久化（世界设定 / 角色卡 / 规则）
+  const setters = [
+    [worldInput, WORLD_KEY],
+    [charsInput, CHARS_KEY],
+    [rulesInput, RULES_KEY],
+  ];
+  for (const [input, key] of setters) {
+    try { input.value = localStorage.getItem(key) || ''; } catch (e) { /* ignore */ }
+    let saveTimer = null;
+    input.addEventListener('input', () => {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => {
+        try {
+          localStorage.setItem(key, input.value);
+          worldNote.classList.remove('hidden');
+          setTimeout(() => worldNote.classList.add('hidden'), 1500);
+        } catch (e) { /* ignore */ }
+      }, 600);
+    });
+  }
+}
+// 组装三段设定文本（供发送时注入 system）
+function collectSettings() {
+  const world = (worldInput.value || '').trim();
+  const chars = (charsInput.value || '').trim();
+  const rules = (rulesInput.value || '').trim();
+  return { world, chars, rules };
 }
 
 // 角色配色：任意角色名按哈希取色（稳定、无需名单）
@@ -243,7 +262,9 @@ async function generate() {
       body: JSON.stringify({
         messages: history,
         chatId,
-        worldSetting: worldInput.value,
+        worldSetting: collectSettings().world,
+        charsSetting: collectSettings().chars,
+        rulesSetting: collectSettings().rules,
       }),
     });
     if (!resp.ok) {
@@ -413,6 +434,7 @@ async function openChat(id) {
     loadChatList();
     loadTimeline();   // 剧情记忆按会话隔离，切会话后刷新
     loadInventory();
+    loadCurrentWardrobe();
   } catch (e) { /* 忽略 */ }
 }
 
@@ -442,6 +464,16 @@ apiBtn.addEventListener('click', async () => {
     document.getElementById('api-context').value = c.maxContext ?? 64000;
     document.getElementById('api-autosummary').value = String(c.autoSummary !== false);
     document.getElementById('api-sumthreshold').value = c.autoSummaryThreshold || 12000;
+    // 辅助 API（后台任务独立端点）
+    const ax = c.aux || {};
+    document.getElementById('api-aux-enabled').value = String(!!ax.enabled);
+    document.getElementById('api-aux-protocol').value = ax.protocol || 'anthropic';
+    document.getElementById('api-aux-base').value = ax.baseURL || '';
+    const auxKey = document.getElementById('api-aux-key');
+    auxKey.value = '';
+    auxKey.placeholder = `留空 = 沿用当前 Key（${ax.apiKeyMasked || '未配置'}）`;
+    document.getElementById('api-aux-model').value = ax.model || '';
+    document.getElementById('api-aux-fallback').value = String(!!ax.fallback);
     apiNow.textContent = `当前：${c.protocol === 'openai' ? 'OpenAI 兼容' : 'Anthropic 兼容'} · ${c.baseURL} · ${c.model}${c.apiKeyMasked ? ' · Key ' + c.apiKeyMasked : ''} · max_tokens ${c.maxTokens} · thinking ${c.thinking} · context ${c.maxContext ?? 64000}`;
   } catch (e) { /* 忽略 */ }
   apiModal.classList.remove('hidden');
@@ -467,6 +499,15 @@ document.getElementById('api-save').addEventListener('click', async () => {
         maxContext: Number(document.getElementById('api-context').value) || 0,
         autoSummary: document.getElementById('api-autosummary').value === 'true',
         autoSummaryThreshold: Number(document.getElementById('api-sumthreshold').value) || 12000,
+        // 辅助 API（后台任务独立端点）
+        aux: {
+          enabled: document.getElementById('api-aux-enabled').value === 'true',
+          protocol: document.getElementById('api-aux-protocol').value,
+          baseURL: document.getElementById('api-aux-base').value.trim(),
+          apiKey: document.getElementById('api-aux-key').value.trim(),
+          model: document.getElementById('api-aux-model').value.trim(),
+          fallback: document.getElementById('api-aux-fallback').value === 'true',
+        },
       }),
     })).json();
     if (r.ok) {
@@ -543,11 +584,69 @@ modelInput.addEventListener('change', async () => {
   } catch (e) { alert('模型切换失败：' + e.message); loadModel(); }
 });
 
-// ---------- 皮肤（主题，无外部素材） ----------
+// ---------- 皮肤 & 背景（主题 + 自定义调色板 + 背景 URL） ----------
 const themeSelect = document.getElementById('theme-select');
+
+// localStorage key 迁移：旧 rw- 前缀（早期版本）→ mr-（当前）
+function migrateKey(oldKey, newKey) {
+  try {
+    if (!localStorage.getItem(newKey) && localStorage.getItem(oldKey)) {
+      localStorage.setItem(newKey, localStorage.getItem(oldKey));
+      localStorage.removeItem(oldKey);
+    }
+  } catch (e) { /* ignore */ }
+}
+migrateKey('rw-custom-skin', 'mr-custom-skin');
+migrateKey('rw-op-view', 'mr-op-view');
+migrateKey('rw-op-expand', 'mr-op-expand');
+migrateKey('rw-op-tools', 'mr-op-tools');
+migrateKey('rw-tour-done-v1', 'mr-tour-done-v1');
+
+// 自定义调色板：色相/饱和度/亮度 → HSL 派生 CSS 变量
+const CUSTOM_SKIN_DEFAULT = { mode: 'dark', hue: 250, sat: 55, light: 45 };
+let customSkin = { ...CUSTOM_SKIN_DEFAULT };
+try { customSkin = { ...CUSTOM_SKIN_DEFAULT, ...(JSON.parse(localStorage.getItem('mr-custom-skin')) || {}) }; } catch (e) { /* 首次 */ }
+function saveCustomSkin() { localStorage.setItem('mr-custom-skin', JSON.stringify(customSkin)); }
+
+function applyCustomSkin() {
+  const { mode, hue, sat, light } = customSkin;
+  const root = document.documentElement;
+  const H = hue, S = sat / 100, L = light / 100;
+  const hsl = (h, s, l) => `hsl(${h} ${s * 100}% ${l * 100}%)`;
+  const base = mode === 'light'
+    ? { bg: [H, S * 0.55, 0.90], bg2: [H, S * 0.45, 0.95], card: [H, S * 0.4, 1.0], border: [H, S * 0.25, 0.78], text: [H, S * 0.3, 0.18], muted: [H, S * 0.2, 0.45], accent: [H, S * 0.65, 0.42] }
+    : { bg: [H, S * 0.5, L * 0.5], bg2: [H, S * 0.45, L * 0.58], card: [H, S * 0.42, L * 0.68], border: [H, S * 0.3, L * 0.85], text: [H, S * 0.2, 0.93], muted: [H, S * 0.15, 0.72], accent: [H, S * 0.75, Math.min(0.68, L * 1.1 + 0.25)] };
+  const set = (name, v) => root.style.setProperty(name, hsl(...v));
+  set('--bg', base.bg); set('--bg2', base.bg2); set('--card', base.card);
+  set('--border', base.border); set('--text', base.text); set('--muted', base.muted);
+  set('--accent', base.accent);
+  root.style.setProperty('--user-bubble', hsl(H, S * 0.5, L * 0.72));
+  root.style.setProperty('--user-border', hsl(H, S * 0.55, L * 0.9));
+  root.style.setProperty('--scrim', mode === 'light' ? 'rgba(245, 241, 231, 0.55)' : 'rgba(12, 14, 24, 0.72)');
+}
+
 function applySkin() {
-  document.body.dataset.theme = prefs.theme || 'default';
+  if (prefs.theme === 'custom') {
+    document.body.dataset.theme = 'default';   // 走默认结构，CSS 变量由 applyCustomSkin 覆盖
+    applyCustomSkin();
+  } else {
+    document.documentElement.style.cssText = '';   // 清除自定义变量（还原主题定义）
+    document.body.dataset.theme = prefs.theme || 'default';
+  }
+  // 背景 URL（自助美化）
+  if (prefs.bgUrl && prefs.bgUrl.trim()) {
+    document.body.style.setProperty('--bg-url', `url('${prefs.bgUrl.trim()}')`);
+    document.body.classList.add('with-bg');
+    document.body.classList.remove('bg-contain');
+  } else {
+    document.body.classList.remove('with-bg');
+    document.body.style.removeProperty('--bg-url');
+  }
   themeSelect.value = prefs.theme || 'default';
+  const csBox = document.getElementById('custom-skin');
+  if (csBox) csBox.classList.toggle('hidden', prefs.theme !== 'custom');
+  const bgUrlInput = document.getElementById('bg-url-input');
+  if (bgUrlInput) bgUrlInput.value = prefs.bgUrl || '';
 }
 themeSelect.addEventListener('change', () => {
   prefs.theme = themeSelect.value;
@@ -555,9 +654,51 @@ themeSelect.addEventListener('change', () => {
   applySkin();
 });
 
+// 自定义调色板控件（仅 theme=custom 时显示）
+function bindCustomSkin() {
+  const csMode = document.getElementById('cs-mode');
+  const csHue = document.getElementById('cs-hue');
+  const csSat = document.getElementById('cs-sat');
+  const csLight = document.getElementById('cs-light');
+  const csNote = document.getElementById('cs-note');
+  if (!csMode) return;
+  csMode.value = customSkin.mode;
+  csHue.value = customSkin.hue;
+  csSat.value = customSkin.sat;
+  csLight.value = customSkin.light;
+  const apply = () => {
+    customSkin = { mode: csMode.value, hue: Number(csHue.value), sat: Number(csSat.value), light: Number(csLight.value) };
+    saveCustomSkin();
+    if (prefs.theme === 'custom') applyCustomSkin();
+    csNote.classList.remove('hidden');
+    setTimeout(() => csNote.classList.add('hidden'), 1500);
+  };
+  csMode.addEventListener('change', apply);
+  csHue.addEventListener('input', apply);
+  csSat.addEventListener('input', apply);
+  csLight.addEventListener('input', apply);
+  document.getElementById('cs-reset').addEventListener('click', () => {
+    customSkin = { ...CUSTOM_SKIN_DEFAULT };
+    csMode.value = customSkin.mode;
+    csHue.value = customSkin.hue;
+    csSat.value = customSkin.sat;
+    csLight.value = customSkin.light;
+    saveCustomSkin();
+    if (prefs.theme === 'custom') applyCustomSkin();
+  });
+  const bgUrlInput = document.getElementById('bg-url-input');
+  if (bgUrlInput) {
+    bgUrlInput.addEventListener('change', () => {
+      prefs.bgUrl = bgUrlInput.value.trim();
+      savePrefs();
+      applySkin();
+    });
+  }
+}
+
 // ---------- 显示设置（localStorage 持久化） ----------
 const PREFS_KEY = 'moonrabbitPrefs';
-let prefs = { hlEnabled: true, theme: 'default', showThinking: true, peakConfirm: true };
+let prefs = { hlEnabled: true, theme: 'default', showThinking: true, peakConfirm: true, bgUrl: '' };
 try {
   prefs = { ...prefs, ...(JSON.parse(localStorage.getItem(PREFS_KEY)) || {}) };
 } catch (e) { /* 首次使用 */ }
@@ -585,19 +726,62 @@ document.getElementById('settings-toggle').addEventListener('click', () => {
   panel.classList.toggle('hidden');
 });
 
-// ---------- 剧情记忆：时间线 / 物品栏 / 历史检索 / 导出 ----------
+// ---------- 剧情记忆：时间线 / 物品栏 / 历史检索 / 情绪 / 导出 ----------
 const tmTabTl = document.getElementById('tm-tab-tl');
 const tmTabInv = document.getElementById('tm-tab-inv');
 const tmTabHs = document.getElementById('tm-tab-hs');
+const tmTabEm = document.getElementById('tm-tab-em');
 const tmTimeline = document.getElementById('tm-timeline');
 const tmInventory = document.getElementById('tm-inventory');
 const tmHistSearch = document.getElementById('tm-histsearch');
+const tmEmotions = document.getElementById('tm-emotions');
 const tmExport = document.getElementById('tm-export');
 const tmExportBox = document.getElementById('tm-export-box');
 
+async function loadEmotions() {
+  const box = document.getElementById('em-list');
+  const nameInput = document.getElementById('em-name');
+  try {
+    const { emotions } = await (await fetch(`/api/emotions?chatId=${encodeURIComponent(chatId || '')}`)).json();
+    const names = Object.keys(emotions || {});
+    box.innerHTML = '';
+    if (!names.length) {
+      box.innerHTML = '（暂无情绪记录）';
+      return;
+    }
+    for (const n of names) {
+      const d = document.createElement('div');
+      d.className = 'em-item';
+      d.innerHTML = `<span class="em-name">${n}</span><span class="em-text">${emotions[n]}</span>`;
+      box.appendChild(d);
+    }
+    if (nameInput) nameInput.value = names[0] || '';
+  } catch (e) { box.textContent = '情绪读取失败：' + e.message; }
+}
+document.getElementById('em-btn').addEventListener('click', async () => {
+  const name = document.getElementById('em-name').value.trim();
+  const emotion = document.getElementById('em-text').value.trim();
+  const note = document.getElementById('em-note');
+  if (!name) { note.textContent = '请填写角色名'; note.classList.remove('hidden'); return; }
+  try {
+    const r = await (await fetch('/api/op/emotion', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId, name, emotion }),
+    })).json();
+    note.textContent = r.error ? `✗ ${r.error}` : `✓ ${r.note}`;
+    if (!r.error) {
+      document.getElementById('em-text').value = '';
+      loadEmotions();
+    }
+  } catch (e) { note.textContent = `✗ ${e.message}`; }
+  note.classList.remove('hidden');
+  setTimeout(() => note.classList.add('hidden'), 6000);
+});
+
 async function loadTimeline() {
   try {
-    const { turns } = await (await fetch(`/api/timeline?limit=10&chatId=${encodeURIComponent(chatId || '')}`)).json();
+    const { turns } = await (await fetch(`/api/timeline?limit=15&chatId=${encodeURIComponent(chatId || '')}`)).json();
     tmTimeline.innerHTML = turns.length ? '' : '（暂无回合记录）';
     for (const t of turns) {
       const d = document.createElement('div');
@@ -606,7 +790,27 @@ async function loadTimeline() {
       const loc = t.location ? `<span class="loc">${t.location}</span>` : '';
       const gain = t.items_gain.length ? `<span class="gain"> ＋${t.items_gain.map((g) => g.name).join('、')}</span>` : '';
       const loss = t.items_loss.length ? `<span class="loss"> －${t.items_loss.join('、')}</span>` : '';
-      d.innerHTML = `<div class="t">${t.story_time || '?'}｜${ev || '（无事件摘要）'}</div>${loc}${gain}${loss}`;
+      const emo = t.emotion && Object.keys(t.emotion).length ? `<span class="emotag"> 💗${Object.entries(t.emotion).map(([n, v]) => `${n}=${v}`).join('、')}</span>` : '';
+      d.innerHTML = `<div class="t">${t.story_time || '?'}｜${ev || '（无事件摘要）'}</div>${loc}${gain}${loss}${emo}`;
+      if (t.id) {
+        const del = document.createElement('button');
+        del.className = 'ma-btn tm-del';
+        del.textContent = '✕ 删';
+        del.title = '删除该条回合记录';
+        del.addEventListener('click', async () => {
+          if (!confirm('删除该条回合记录？')) return;
+          try {
+            await fetch('/api/timeline/delete', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ chatId, id: t.id }),
+            });
+            loadTimeline();
+            loadInventory();
+          } catch (e) { /* 忽略 */ }
+        });
+        d.appendChild(del);
+      }
       tmTimeline.appendChild(d);
     }
   } catch (e) { tmTimeline.textContent = '时间线读取失败'; }
@@ -642,19 +846,91 @@ async function loadInventory() {
 }
 
 tmTabTl.addEventListener('click', () => {
-  tmTabTl.classList.add('active'); tmTabInv.classList.remove('active'); tmTabHs.classList.remove('active');
-  tmTimeline.classList.remove('hidden'); tmInventory.classList.add('hidden'); tmHistSearch.classList.add('hidden');
+  tmTabTl.classList.add('active'); tmTabInv.classList.remove('active'); tmTabHs.classList.remove('active'); tmTabEm.classList.remove('active');
+  tmTimeline.classList.remove('hidden'); tmInventory.classList.add('hidden'); tmHistSearch.classList.add('hidden'); tmEmotions.classList.add('hidden');
 });
 tmTabInv.addEventListener('click', () => {
-  tmTabInv.classList.add('active'); tmTabTl.classList.remove('active'); tmTabHs.classList.remove('active');
-  tmInventory.classList.remove('hidden'); tmTimeline.classList.add('hidden'); tmHistSearch.classList.add('hidden');
+  tmTabInv.classList.add('active'); tmTabTl.classList.remove('active'); tmTabHs.classList.remove('active'); tmTabEm.classList.remove('active');
+  tmInventory.classList.remove('hidden'); tmTimeline.classList.add('hidden'); tmHistSearch.classList.add('hidden'); tmEmotions.classList.add('hidden');
+  document.getElementById('inv-edit').classList.remove('hidden');
   loadInventory();
 });
 tmTabHs.addEventListener('click', () => {
-  tmTabHs.classList.add('active'); tmTabTl.classList.remove('active'); tmTabInv.classList.remove('active');
-  tmHistSearch.classList.remove('hidden'); tmTimeline.classList.add('hidden'); tmInventory.classList.add('hidden');
+  tmTabHs.classList.add('active'); tmTabTl.classList.remove('active'); tmTabInv.classList.remove('active'); tmTabEm.classList.remove('active');
+  tmHistSearch.classList.remove('hidden'); tmTimeline.classList.add('hidden'); tmInventory.classList.add('hidden'); tmEmotions.classList.add('hidden');
   document.getElementById('hs-input').focus();
 });
+tmTabEm.addEventListener('click', () => {
+  tmTabEm.classList.add('active'); tmTabTl.classList.remove('active'); tmTabInv.classList.remove('active'); tmTabHs.classList.remove('active');
+  tmEmotions.classList.remove('hidden'); tmTimeline.classList.add('hidden'); tmInventory.classList.add('hidden'); tmHistSearch.classList.add('hidden');
+  loadEmotions();
+});
+
+// ---------- 剧情记忆手动编辑：时间线补记 / 物品栏增删 / 当前着装 ----------
+// 手动补记一条回合
+document.getElementById('mt-btn').addEventListener('click', async () => {
+  const note = document.getElementById('mt-note');
+  const payload = {
+    chatId,
+    story_time: document.getElementById('mt-time').value.trim(),
+    location: document.getElementById('mt-loc').value.trim(),
+    characters: document.getElementById('mt-char').value.trim(),
+    costume: document.getElementById('mt-cos').value.trim(),
+    event: document.getElementById('mt-event').value.trim(),
+  };
+  if (!payload.story_time && !payload.event) { note.textContent = '至少填时间或事件'; note.classList.remove('hidden'); return; }
+  try {
+    const r = await (await fetch('/api/timeline/manual', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    })).json();
+    note.textContent = r.ok ? `✓ 已补记（${r.rec.story_time || '时间未填'}）` : `✗ ${r.error || '失败'}`;
+    if (r.ok) {
+      document.getElementById('mt-time').value = ''; document.getElementById('mt-loc').value = '';
+      document.getElementById('mt-char').value = ''; document.getElementById('mt-cos').value = '';
+      document.getElementById('mt-event').value = '';
+      loadTimeline();
+    }
+  } catch (e) { note.textContent = `✗ ${e.message}`; }
+  note.classList.remove('hidden');
+  setTimeout(() => note.classList.add('hidden'), 5000);
+});
+// 手动添加 / 消耗物品
+document.getElementById('inv-btn').addEventListener('click', async () => {
+  const note = document.getElementById('inv-note');
+  const name = document.getElementById('inv-name').value.trim();
+  const holder = document.getElementById('inv-holder').value.trim();
+  const action = document.getElementById('inv-act').value;
+  if (!name) { note.textContent = '请填写物品名'; note.classList.remove('hidden'); return; }
+  try {
+    const r = await (await fetch('/api/inventory/manual', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId, action, name, holder }),
+    })).json();
+    note.textContent = r.ok ? `✓ ${r.note}` : `✗ ${r.error || '失败'}`;
+    if (r.ok) {
+      document.getElementById('inv-name').value = '';
+      document.getElementById('inv-holder').value = '';
+      loadInventory();
+    }
+  } catch (e) { note.textContent = `✗ ${e.message}`; }
+  note.classList.remove('hidden');
+  setTimeout(() => note.classList.add('hidden'), 5000);
+});
+// 当前着装聚合显示（换装卡片顶部）
+async function loadCurrentWardrobe() {
+  const box = document.getElementById('wd-current');
+  if (!box) return;
+  try {
+    const { wardrobes } = await (await fetch(`/api/wardrobe/current?chatId=${encodeURIComponent(chatId || '')}`)).json();
+    const names = Object.keys(wardrobes || {});
+    box.innerHTML = names.length
+      ? '当前着装：' + names.map((n) => `<span class="chip">${n}：${wardrobes[n]}</span>`).join(' ')
+      : '当前着装：未记录（换装后自动更新）';
+  } catch (e) { box.textContent = '当前着装：读取失败'; }
+}
 
 // 历史消息检索（本地关键词，零 API）：高亮命中词 + 点击展开全文
 function hsHighlight(text, ranges) {
@@ -733,7 +1009,7 @@ const wdBtn = document.getElementById('wd-btn');
 const wdNote = document.getElementById('wd-note');
 
 // 恢复持久化的当前视角（localStorage，跨刷新）
-let opView = localStorage.getItem('rw-op-view') || '';
+let opView = localStorage.getItem('mr-op-view') || '';
 if (opView && [...viewSelect.options].some((o) => o.value === opView)) viewSelect.value = opView;
 
 viewBtn.addEventListener('click', async () => {
@@ -751,7 +1027,7 @@ viewBtn.addEventListener('click', async () => {
     if (r.error) { viewNote.textContent = `✗ ${r.error}`; }
     else {
       opView = v;
-      localStorage.setItem('rw-op-view', v);
+      localStorage.setItem('mr-op-view', v);
       viewNote.textContent = `✓ ${r.note}`;
     }
   } catch (e) { viewNote.textContent = `✗ ${e.message}`; }
@@ -762,7 +1038,7 @@ viewBtn.addEventListener('click', async () => {
 
 // 扩写按钮（胶囊开关）
 const setExpand = (en) => els.expandBtn.classList.toggle('on', en);
-if (localStorage.getItem('rw-op-expand') === '1') setExpand(true);
+if (localStorage.getItem('mr-op-expand') === '1') setExpand(true);
 els.expandBtn.addEventListener('click', async () => {
   const en = !els.expandBtn.classList.contains('on');
   els.expandBtn.disabled = true;
@@ -773,7 +1049,7 @@ els.expandBtn.addEventListener('click', async () => {
       body: JSON.stringify({ chatId, enabled: en }),
     })).json();
     if (r.error) { els.opNote.textContent = '✗ ' + r.error; }
-    else { setExpand(en); localStorage.setItem('rw-op-expand', en ? '1' : '0'); els.opNote.textContent = '✓ ' + r.note; }
+    else { setExpand(en); localStorage.setItem('mr-op-expand', en ? '1' : '0'); els.opNote.textContent = '✓ ' + r.note; }
   } catch (e) { els.opNote.textContent = '✗ ' + e.message; }
   els.opNote.classList.remove('hidden');
   els.expandBtn.disabled = false;
@@ -783,7 +1059,7 @@ els.expandBtn.addEventListener('click', async () => {
 // 工具桥：自由勾选工具（通用版 = 仅联网）
 const toolNames = () => els.toolChips.filter((c) => c.classList.contains('on')).map((c) => c.dataset.tool);
 const setTools = (names) => els.toolChips.forEach((c) => c.classList.toggle('on', names.includes(c.dataset.tool)));
-try { setTools(JSON.parse(localStorage.getItem('rw-op-tools') || '[]')); } catch (e) { setTools([]); }
+try { setTools(JSON.parse(localStorage.getItem('mr-op-tools') || '[]')); } catch (e) { setTools([]); }
 els.toolChips.forEach((chip) => {
   chip.addEventListener('click', async () => {
     chip.classList.toggle('on');
@@ -798,7 +1074,7 @@ els.toolChips.forEach((chip) => {
       if (r.error) { chip.classList.toggle('on'); els.opNote.textContent = '✗ ' + r.error; }
       else {
         setTools(r.tools || []);
-        localStorage.setItem('rw-op-tools', JSON.stringify(r.tools || []));
+        localStorage.setItem('mr-op-tools', JSON.stringify(r.tools || []));
         els.opNote.textContent = '✓ ' + r.note;
       }
     } catch (e) { chip.classList.toggle('on'); els.opNote.textContent = '✗ ' + e.message; }
@@ -819,7 +1095,7 @@ wdBtn.addEventListener('click', async () => {
       body: JSON.stringify({ chatId, character: ch, outfit, worn: day }),
     })).json();
     wdNote.textContent = r.error ? `✗ ${r.error}` : `✓ ${r.note}`;
-    if (!r.error) { wdOutfit.value = ''; wdDay.value = ''; }
+    if (!r.error) { wdOutfit.value = ''; wdDay.value = ''; loadCurrentWardrobe(); }
   } catch (e) { wdNote.textContent = `✗ ${e.message}`; }
   wdNote.classList.remove('hidden');
   wdBtn.disabled = false;
@@ -859,6 +1135,56 @@ function updatePeakBanner() {
   if (b) b.classList.toggle('hidden', !(peakEligible && isPeakHours(new Date())));
 }
 
+// ---------- 新手导航（首次使用交互式导览） ----------
+const TOUR_KEY = 'mr-tour-done-v1';
+const tourSteps = [
+  { title: '👋 欢迎', body: '这是通用多角色 RP 界面：多角色对话、头像渲染、世界设定自填、回合自动记账。首次使用带你看一圈～', target: null },
+  { title: '🌍 世界设定', body: '在右侧「世界设定」里填写你的世界观 / 角色卡 / 规则。保存在本浏览器，对话时注入 system。', target: 'card-world' },
+  { title: '📜 剧情记忆', body: '回合自动记账：时间线 / 物品栏 / 历史检索 / 情绪。可导出 markdown 自行归档。', target: 'card-tm' },
+  { title: '✍️ 输入区', body: '底部输入区支持「角色名：台词」格式；可切换视角、开扩写、勾选联网工具。Enter 发送，Shift+Enter 换行。', target: 'input' },
+  { title: '⚙ API 设置', body: '右上角「⚙ API」可配置端点 / 模型 / 上下文预算 / 辅助 API（后台任务独立端点）。', target: 'api-btn' },
+];
+let tourIdx = 0;
+function tourShow() {
+  const overlay = document.getElementById('tour-overlay');
+  const body = document.getElementById('tour-body');
+  const dots = document.getElementById('tour-dots');
+  const prev = document.getElementById('tour-prev');
+  const next = document.getElementById('tour-next');
+  const step = tourSteps[tourIdx];
+  if (!step) return;
+  body.textContent = step.body;
+  dots.innerHTML = tourSteps.map((_, i) => `<span class="dot ${i === tourIdx ? 'on' : ''}"></span>`).join('');
+  prev.classList.toggle('hidden', tourIdx === 0);
+  next.textContent = tourIdx === tourSteps.length - 1 ? '开始使用' : '下一步';
+  document.querySelectorAll('.tour-highlight').forEach((el) => el.classList.remove('tour-highlight'));
+  if (step.target) {
+    const el = document.getElementById(step.target);
+    if (el) {
+      el.classList.add('tour-highlight');
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  }
+}
+function tourDone() {
+  localStorage.setItem(TOUR_KEY, '1');
+  document.getElementById('tour-overlay').classList.add('hidden');
+  document.querySelectorAll('.tour-highlight').forEach((el) => el.classList.remove('tour-highlight'));
+}
+document.getElementById('tour-next').addEventListener('click', () => {
+  if (tourIdx < tourSteps.length - 1) { tourIdx += 1; tourShow(); } else tourDone();
+});
+document.getElementById('tour-prev').addEventListener('click', () => {
+  if (tourIdx > 0) { tourIdx -= 1; tourShow(); }
+});
+document.getElementById('tour-skip').addEventListener('click', tourDone);
+function maybeStartTour() {
+  if (localStorage.getItem(TOUR_KEY)) return;
+  tourIdx = 0;
+  document.getElementById('tour-overlay').classList.remove('hidden');
+  tourShow();
+}
+
 // ---------- 事件 ----------
 els.send.addEventListener('click', send);
 els.input.addEventListener('keydown', (e) => {
@@ -869,11 +1195,14 @@ els.input.addEventListener('keydown', (e) => {
 document.getElementById('card-world').style.display = '';
 renderSettings();
 applySkin();
+bindCustomSkin();
 updatePeakBanner();
 setInterval(updatePeakBanner, 60000);
 loadTimeline();
+loadCurrentWardrobe();
 loadStats();
 loadModel();
+maybeStartTour();
 setInterval(loadStats, 15000);
 
 // 会话恢复：有当前会话则打开，否则新建

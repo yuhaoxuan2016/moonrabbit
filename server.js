@@ -23,6 +23,29 @@ let ENDPOINT = {
   autoSummaryThreshold: 12000,  // 历史消息字符数超过该值触发压缩
 };
 
+// 辅助 API（后台任务独立端点）：自动摘要 / 工具桥 / 联网搜索走独立端点，不抢主对话 API；
+// 请求串行排队防 429；失败默认不回退主 API（可手动开启回退）。
+let AUX = {
+  enabled: false,        // 是否启用辅助端点（未启用 = 后台任务仍走主端点）
+  protocol: 'anthropic',
+  baseURL: '',
+  apiKey: '',
+  model: '',
+  fallback: false,       // 辅助端点失败时是否回退主端点
+};
+// 辅助请求串行队列：一次只发一个，避免后台任务并发撞限流
+let auxQueue = Promise.resolve();
+function auxEnqueue(task) {
+  const run = auxQueue.then(task, task);   // 前一任务失败也继续执行下一任务
+  auxQueue = run.catch(() => {});
+  return run;
+}
+// 读取辅助端点实际生效配置（未启用或无配置 → 用主端点）
+function auxEffective() {
+  if (AUX.enabled && AUX.baseURL && AUX.model && AUX.apiKey) return AUX;
+  return null;
+}
+
 function readText(file) {
   try {
     let s = fs.readFileSync(file, 'utf8');
@@ -33,6 +56,36 @@ function readText(file) {
   } catch (e) { return ''; }
 }
 
+// ---------- 变化驱动省 token：文件内容 hash 缓存（未变化不重读） ----------
+const readCache = new Map();   // file -> {key, hash, text}
+function hashText(s) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return h.toString(16);
+}
+function readTextCached(file) {
+  try {
+    const st = fs.statSync(file);
+    const key = file + ':' + st.mtimeMs + ':' + st.size;
+    const hit = readCache.get(file);
+    if (hit && hit.key === key) return hit.text;
+    const text = readText(file);
+    if (readCache.size > 200) {
+      const first = readCache.keys().next().value;
+      if (first) readCache.delete(first);
+    }
+    readCache.set(file, { key, hash: hashText(text), text });
+    return text;
+  } catch (e) { return readText(file); }
+}
+function readHash(file) {
+  const hit = readCache.get(file);
+  return hit ? hit.hash : hashText(readTextCached(file));
+}
+function safeParse(s) {
+  try { return JSON.parse(s); } catch (e) { return {}; }
+}
+
 function loadApiKey() {
   if (process.env.MOONRABBIT_API_KEY) return process.env.MOONRABBIT_API_KEY;
   return '';
@@ -40,8 +93,8 @@ function loadApiKey() {
 const API_KEY = loadApiKey();
 ENDPOINT.apiKey = ENDPOINT.apiKey || API_KEY;
 
-// ---------- system prompt 组装（通用版：世界设定由用户自填） ----------
-function buildSystemPrompt(worldSetting, chatId) {
+// ---------- system prompt 组装（通用版：世界设定 / 角色卡 / 规则 由用户自填，三段分别注入） ----------
+function buildSystemPrompt(setting, chatId) {
   const parts = [];
   parts.push('你是叙事者与全员扮演者，正在与用户共同创作一部互动小说。用户扮演其中一位角色（具体身份由设定或对话确定）；多角色在场时，你同时扮演其余所有角色。');
   parts.push(`【创作自由】
@@ -59,14 +112,20 @@ function buildSystemPrompt(worldSetting, chatId) {
 - 展示而非讲述：对话、动作、心理、环境描写并重；
 - 推动剧情发展，避免原地踏步或重复描述；
 - 不在回复开头重复角色名或上一轮内容，直接开始叙述。`);
-  parts.push(`【回合记账协议】（便于时间线/物品栏自动累积；无变化可省略）
-- 每次回复末尾可输出 <storyevent>...</storyevent>：time 剧情时间 / location 地点 / atmosphere 氛围 / characters 在场角色顿号分隔 / costume 着装变化（无则"同上"）/ event 事件一句话；
+  parts.push(`【回合记账协议】（便于时间线/物品栏/情绪自动累积；无变化可省略）
+- 每次回复末尾可输出 <storyevent>...</storyevent>：time 剧情时间 / location 地点 / atmosphere 氛围 / characters 在场角色顿号分隔 / costume 着装变化（无则"同上"）/ event 事件一句话；可选 emotion 角色情绪（如「emotion: 艾琳=平静带笑意」，多角色用分号分隔）；
 - 物品变更输出 <items>...</items>：获得/赠予 item: 物品名=持有者、消耗/丢失 item-: 物品名，一行一个；
 - 状态更新可输出【更新】条目：如「【更新】当前视角：艾琳」。`);
-  if (worldSetting && worldSetting.trim()) {
-    parts.push(`【世界设定】（用户填写，以此为准）\n${worldSetting.trim()}`);
+  if (setting && setting.world && setting.world.trim()) {
+    parts.push(`【世界设定】（用户填写，以此为准）\n${setting.world.trim()}`);
   } else {
     parts.push('【世界设定】（用户尚未填写；从对话上下文逐步建立设定，不臆造未提及的内容）');
+  }
+  if (setting && setting.chars && setting.chars.trim()) {
+    parts.push(`【角色卡】（用户填写，角色设定以此为准；逐段对应各角色，按需参考）\n${setting.chars.trim()}`);
+  }
+  if (setting && setting.rules && setting.rules.trim()) {
+    parts.push(`【规则】（用户填写，必须遵守）\n${setting.rules.trim()}`);
   }
   const enabledNames = toolsEnabled(chatId || '');
   if (enabledNames.length) {
@@ -84,7 +143,7 @@ fs.mkdirSync(TURNS_DIR, { recursive: true });
 function sanitizeId(id) { return String(id || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 60) || 'default'; }
 function turnsFile(chatId) { return path.join(TURNS_DIR, `${sanitizeId(chatId)}.jsonl`); }
 
-// 端点配置持久化（覆盖启动时的默认值；含自定义 API 设置）
+// 端点配置持久化（覆盖启动时的默认值；含自定义 API 设置 + 辅助 API）
 const MODEL_FILE = path.join(DATA_DIR, 'model.json');
 try {
   const m = JSON.parse(fs.readFileSync(MODEL_FILE, 'utf8'));
@@ -98,11 +157,20 @@ try {
   if (Number.isFinite(m.maxContext) && m.maxContext >= 0 && m.maxContext <= 256000) ENDPOINT.maxContext = m.maxContext;
   if (typeof m.autoSummary === 'boolean') ENDPOINT.autoSummary = m.autoSummary;
   if (Number.isFinite(m.autoSummaryThreshold) && m.autoSummaryThreshold >= 2000 && m.autoSummaryThreshold <= 100000) ENDPOINT.autoSummaryThreshold = m.autoSummaryThreshold;
+  // 辅助 API（后台任务独立端点）
+  if (m.aux && typeof m.aux === 'object') {
+    if (typeof m.aux.enabled === 'boolean') AUX.enabled = m.aux.enabled;
+    if (m.aux.protocol === 'anthropic' || m.aux.protocol === 'openai') AUX.protocol = m.aux.protocol;
+    if (m.aux.baseURL && typeof m.aux.baseURL === 'string' && m.aux.baseURL.trim()) AUX.baseURL = m.aux.baseURL.trim().replace(/\/+$/, '');
+    if (m.aux.apiKey && typeof m.aux.apiKey === 'string' && m.aux.apiKey.trim()) AUX.apiKey = m.aux.apiKey.trim();
+    if (m.aux.model && typeof m.aux.model === 'string' && m.aux.model.trim()) AUX.model = m.aux.model.trim();
+    if (typeof m.aux.fallback === 'boolean') AUX.fallback = m.aux.fallback;
+  }
 } catch (e) { /* 首次使用 */ }
 
 // 解析 AI 回复中的 <storyevent>/<items>/【更新】标签 → 结构化回合记录
 function parseTurnTags(content) {
-  const rec = { story_time: '', location: '', atmosphere: '', characters: [], costume: '', event: '', items_gain: [], items_loss: [], updates: [] };
+  const rec = { story_time: '', location: '', atmosphere: '', characters: [], costume: '', event: '', items_gain: [], items_loss: [], updates: [], emotion: {} };
   const evRe = /<storyevent>([\s\S]*?)<\/storyevent>/gi;
   let m;
   while ((m = evRe.exec(content))) {
@@ -117,6 +185,13 @@ function parseTurnTags(content) {
       else if (k.includes('characters')) rec.characters = v.split(/[、,，/]+/).map((s) => s.trim()).filter(Boolean);
       else if (k.includes('costume')) rec.costume = v;
       else if (k.includes('event')) rec.event = v;
+      else if (k.includes('emotion') || k.includes('mood')) {
+        // emotion: 角色=情绪 / emotion: 角色：情绪（多角色用分号或换行分隔）
+        for (const pair of v.split(/[;；\n]/)) {
+          const pm = pair.match(/^\s*([^=：:]+)[=：:]\s*(.+)$/);
+          if (pm && pm[2].trim()) rec.emotion[pm[1].trim()] = pm[2].trim();
+        }
+      }
     }
   }
   const hRe = /<items>([\s\S]*?)<\/items>/gi;
@@ -274,32 +349,51 @@ async function callLLM(messages, system, onDelta, onMeta, onThinking) {
   }
 }
 
-// 自动压缩总结：把最旧一批消息压成剧情摘要（300 字内），复用当前端点配置
-async function summarizeOldMessages(messages) {
-  const ep = ENDPOINT;
-  const text = messages.map((m) => `${m.role === 'user' ? '用户' : 'AI'}: ${m.content}`).join('\n\n');
-  const sys = '你是互动小说的上下文压缩助手。把以下历史对话压缩成一段中文剧情摘要（300字内），必须保留：关键事件/时间地点/在场人物/物品变化/情感与关系节点/伏笔。不写过程与寒暄，只输出摘要正文。';
+// ---------- 辅助 API 调用（后台任务走独立端点，串行队列防 429；失败按 fallback 决定是否回退主端点） ----------
+// 统一完成一次非流式调用（openai/anthropic 双协议），返回文本
+async function completeText(ep, sys, userText, maxTokens, extraBody) {
   if (ep.protocol === 'openai') {
     const r = await fetch(`${ep.baseURL}/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${ep.apiKey}` },
-      body: JSON.stringify({ model: ep.model, messages: [{ role: 'system', content: sys }, { role: 'user', content: text }], max_tokens: 800 }),
-      signal: AbortSignal.timeout(60000),
+      body: JSON.stringify({ model: ep.model, messages: [{ role: 'system', content: sys }, { role: 'user', content: userText }], max_tokens: maxTokens, ...(extraBody || {}) }),
+      signal: AbortSignal.timeout(90000),
     });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
     const d = await r.json();
     return (d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content || '').trim();
   }
-  // 摘要任务禁用 thinking：避免 thinking 吃光 max_tokens 预算导致 text 为空
   const r = await fetch(`${ep.baseURL}/messages`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-api-key': ep.apiKey, 'anthropic-version': '2023-06-01' },
-    body: JSON.stringify({ model: ep.model, system: sys, messages: [{ role: 'user', content: text }], max_tokens: 800, thinking: { type: 'disabled' } }),
-    signal: AbortSignal.timeout(60000),
+    body: JSON.stringify({ model: ep.model, system: sys, messages: [{ role: 'user', content: userText }], max_tokens: maxTokens, ...(extraBody || {}) }),
+    signal: AbortSignal.timeout(90000),
   });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
   const d = await r.json();
   return (d.content || []).map((b) => b.text || '').join('').trim();
+}
+
+// 后台任务统一入口：优先辅助端点（串行队列），未启用/失败时按 AUX.fallback 回退主端点
+async function auxCall(sys, userText, maxTokens, extraBody) {
+  const aux = auxEffective();
+  if (aux) {
+    try {
+      return await auxEnqueue(() => completeText(aux, sys, userText, maxTokens, extraBody));
+    } catch (e) {
+      if (!AUX.fallback) throw new Error(`辅助 API 失败（未回退主端点）: ${e.message}`);
+      console.log('[aux] 辅助端点失败，回退主端点:', e.message);
+    }
+  }
+  return completeText(ENDPOINT, sys, userText, maxTokens, extraBody);
+}
+
+// 自动压缩总结：把最旧一批消息压成剧情摘要（300 字内），走辅助 API（独立端点 + 串行队列；未配置时回退主端点）
+async function summarizeOldMessages(messages) {
+  const text = messages.map((m) => `${m.role === 'user' ? '用户' : 'AI'}: ${m.content}`).join('\n\n');
+  const sys = '你是互动小说的上下文压缩助手。把以下历史对话压缩成一段中文剧情摘要（300字内），必须保留：关键事件/时间地点/在场人物/物品变化/情感与关系节点/伏笔。不写过程与寒暄，只输出摘要正文。';
+  // 摘要任务禁用 thinking：避免 thinking 吃光 max_tokens 预算导致 text 为空
+  return auxCall(sys, text, 800, { thinking: { type: 'disabled' } });
 }
 
 // 端点探测（max_tokens:1），返回实际生效的模型名
@@ -381,6 +475,123 @@ function appendOpRecord(chatId, entry, content) {
     fs.appendFileSync(turnsFile(chatId), JSON.stringify(rec) + '\n', 'utf8');
   } catch (e) { console.error('[op-record] 失败:', e.message); }
 }
+
+// ---------- 剧情记忆手动编辑（时间线 / 物品栏 / 换装，界面可改） ----------
+// 手动记一条物品变更回合（gain/loss），复用物品栏聚合
+function appendItemRecord(chatId, action, name, holder) {
+  try {
+    const rec = { story_time: '', location: '', atmosphere: '', characters: [], costume: '', event: '', items_gain: [], items_loss: [], updates: [], emotion: {} };
+    rec.id = Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+    rec.ts = new Date().toISOString();
+    rec.chatId = sanitizeId(chatId);
+    if (action === 'gain') rec.items_gain.push({ name, holder: holder || '' });
+    else rec.items_loss.push(name);
+    fs.appendFileSync(turnsFile(chatId), JSON.stringify(rec) + '\n', 'utf8');
+  } catch (e) { console.error('[item-record] 失败:', e.message); }
+}
+// 手动补记一条回合（时间/地点/事件等），写入 turns jsonl
+function appendManualTurn(chatId, fields) {
+  try {
+    const rec = {
+      story_time: String(fields.story_time || '').trim().slice(0, 40),
+      location: String(fields.location || '').trim().slice(0, 40),
+      atmosphere: String(fields.atmosphere || '').trim().slice(0, 60),
+      characters: (fields.characters || '').split(/[、,，/]+/).map((s) => s.trim()).filter(Boolean).slice(0, 10),
+      costume: String(fields.costume || '').trim().slice(0, 80),
+      event: String(fields.event || '').trim().slice(0, 300),
+      items_gain: [], items_loss: [], updates: [], emotion: {},
+    };
+    rec.id = Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+    rec.ts = new Date().toISOString();
+    rec.chatId = sanitizeId(chatId);
+    fs.appendFileSync(turnsFile(chatId), JSON.stringify(rec) + '\n', 'utf8');
+    return rec;
+  } catch (e) { console.error('[manual-turn] 失败:', e.message); return null; }
+}
+// 删除单条回合记录（按 id 重写 jsonl）
+function deleteTurnRecord(chatId, id) {
+  const file = turnsFile(chatId);
+  if (!fs.existsSync(file)) return false;
+  const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+  const kept = lines.filter((l) => {
+    try { const o = JSON.parse(l); return o.id !== id; } catch (e) { return true; }
+  });
+  if (kept.length === lines.length) return false;
+  fs.writeFileSync(file, kept.join('\n') + (kept.length ? '\n' : ''), 'utf8');
+  return true;
+}
+// 聚合当前着装：扫描回合记录（costume 字段 + updates「衣柜」）+ 手动换装覆盖（opState.wardrobes），取每个角色最新
+function buildCurrentWardrobe(chatId) {
+  const cid = sanitizeId(chatId);
+  const out = {};
+  for (const rec of readTurns(chatId)) {
+    if (rec.costume && rec.costume !== '同上') {
+      const m = String(rec.costume).match(/^([^：:]+)[：:]\s*(.+)$/);
+      if (m) out[m[1].trim()] = m[2].trim();
+    }
+    for (const u of (rec.updates || [])) {
+      if (u.entry && String(u.entry).includes('衣柜')) {
+        const m = String(u.content).match(/^([^：:]+)[：:]\s*(.+)$/);
+        if (m && m[2].trim()) out[m[1].trim()] = m[2].trim();
+      }
+    }
+  }
+  if (opState.wardrobes[cid]) {
+    const m = String(opState.wardrobes[cid]).match(/^([^：:]+)[：:]\s*(.+)$/);
+    if (m) out[m[1].trim()] = m[2].trim();
+  }
+  return out;
+}
+// ---------- 情绪追踪（按会话记录各角色当前情绪，注入 system 保持情绪连续） ----------
+const EMOTIONS_FILE = path.join(DATA_DIR, 'emotions.json');
+let emotions = {};   // {chatId: {角色名: 情绪描述}}
+try { emotions = JSON.parse(fs.readFileSync(EMOTIONS_FILE, 'utf8')); } catch (e) { /* 首次 */ }
+function saveEmotions() {
+  try { fs.writeFileSync(EMOTIONS_FILE, JSON.stringify(emotions), 'utf8'); } catch (e) { /* 忽略 */ }
+}
+// 从回合记录聚合各角色最新情绪：优先显式 emotion 字段，回退 updates 中「情绪」条目
+function buildEmotions(chatId) {
+  const cid = sanitizeId(chatId);
+  const out = {};
+  const manual = (emotions[cid] || {});
+  for (const rec of readTurns(chatId)) {
+    if (rec.emotion) {
+      for (const [name, emo] of Object.entries(rec.emotion)) {
+        if (emo && emo.trim()) out[name] = emo.trim();
+      }
+    }
+    for (const u of (rec.updates || [])) {
+      if (u.entry && String(u.entry).includes('情绪')) {
+        const m = String(u.content).match(/^([^：:]+)[：:]\s*(.+)$/);
+        if (m && m[2].trim()) out[m[1].trim()] = m[2].trim();
+      }
+    }
+  }
+  for (const [name, emo] of Object.entries(manual)) {
+    if (emo && emo.trim()) out[name] = emo.trim();
+  }
+  return out;
+}
+// 情绪注入段（放在界面操作覆盖之后，帮助 AI 保持情绪连续）
+function emotionInject(chatId) {
+  const cid = sanitizeId(chatId || '');
+  if (!cid) return '';
+  const emo = buildEmotions(cid);
+  const names = Object.keys(emo);
+  if (!names.length) return '';
+  const lines = names.map((n) => `- ${n}：${emo[n]}`);
+  return `## 当前情绪（界面追踪，冲突时以此为准）\n${lines.join('\n')}`;
+}
+// 设置/清除某个角色的情绪（手动，记账；清空该角色时传空字符串）
+function setEmotion(chatId, name, emo) {
+  const cid = sanitizeId(chatId || '');
+  if (!emotions[cid]) emotions[cid] = {};
+  if (emo && emo.trim()) emotions[cid][name] = emo.trim();
+  else delete emotions[cid][name];
+  saveEmotions();
+  appendOpRecord(cid, '情绪', `${name}：${emo.trim() || '（清除）'}`);
+}
+
 // 界面操作注入段（作为持续生效的覆盖指令）
 function opInject(chatId) {
   const cid = sanitizeId(chatId);
@@ -397,7 +608,7 @@ function opInject(chatId) {
 
 
 
-// ---------- 工具桥：对话内工具（通用版 = 仅联网搜索；RW 专属工具在正式版） ----------
+// ---------- 工具桥：对话内工具（仅联网搜索；通用工具集可扩展） ----------
 const BRIDGE_TOOL_NAMES = ['web_search'];
 const BRIDGE_TOOL_LABELS = { web_search: '联网搜索' };
 const BRIDGE_TOOLS = [
@@ -417,20 +628,26 @@ normalizeToolsState();
 function toolsEnabled(chatId) { return (opState.tools && opState.tools[sanitizeId(chatId)]) || []; }
 async function executeBridgeTool(name, input) {
   if (name !== 'web_search') return '未知工具: ' + name;
-  const ep = ENDPOINT;
   const q = String(input.query || '').slice(0, 200);
   const toolDef = { name: 'web_search', description: 'Search the web', input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } };
-  const headers = { 'content-type': 'application/json', 'x-api-key': ep.apiKey, 'anthropic-version': '2023-06-01' };
   const msgs = [{ role: 'user', content: 'Perform a web search for the query: ' + q }];
   const seenUrls = new Set();
-  for (let i = 0; i < 3; i++) {
-    const r = await fetch(ep.baseURL + '/messages', {
-      method: 'POST', headers,
-      body: JSON.stringify({ model: ep.model, max_tokens: 1024, thinking: { type: 'disabled' }, tools: [toolDef], messages: msgs }),
-      signal: AbortSignal.timeout(60000),
+  // 自动跟随：模型可能"换个搜索再试"，最多 3 轮；走辅助端点（串行队列防 429）
+  const doRound = (ep, msgs2) => {
+    const headers = ep.protocol === 'openai'
+      ? { 'content-type': 'application/json', authorization: `Bearer ${ep.apiKey}` }
+      : { 'content-type': 'application/json', 'x-api-key': ep.apiKey, 'anthropic-version': '2023-06-01' };
+    const body = ep.protocol === 'openai'
+      ? { model: ep.model, max_tokens: 1024, tools: [toolDef], messages: msgs2 }
+      : { model: ep.model, max_tokens: 1024, thinking: { type: 'disabled' }, tools: [toolDef], messages: msgs2 };
+    return fetch(`${ep.baseURL}${ep.protocol === 'openai' ? '/chat/completions' : '/messages'}`, {
+      method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(60000),
     });
-    if (!r.ok) return '联网搜索失败 HTTP ' + r.status + ': ' + (await r.text()).slice(0, 120);
-    const d = await r.json();
+  };
+  const parseResp = (d) => {
+    if (d.choices) {
+      return { text: (d.choices[0]?.message?.content || '').trim(), toolCalls: (d.choices[0]?.message?.tool_calls || []) };
+    }
     const blocks = d.content || [];
     const out = [];
     for (const b of blocks) {
@@ -450,10 +667,42 @@ async function executeBridgeTool(name, input) {
         }
       }
     }
-    if (out.length) return out.join('\n');
-    const tu = blocks.find((b) => b.type === 'tool_use');
-    if (!tu) return '（搜索未返回结果）';
-    msgs.push({ role: 'assistant', content: blocks }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: tu.id, content: '' }] });
+    return { text: blocks.map((b) => b.text || '').join('').trim(), toolCalls: blocks.filter((b) => b.type === 'tool_use'), out };
+  };
+  for (let i = 0; i < 3; i++) {
+    const useAux = !!auxEffective();
+    const run = () => doRound(useAux ? AUX : ENDPOINT, msgs);
+    let d;
+    try {
+      const r = await (useAux ? auxEnqueue(run) : run());
+      if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`);
+      d = await r.json();
+    } catch (e) {
+      if (useAux && AUX.fallback) {
+        const r = await doRound(ENDPOINT, msgs);
+        if (!r.ok) return '联网搜索失败 HTTP ' + r.status;
+        d = await r.json();
+      } else if (useAux) {
+        return '联网搜索失败（辅助 API：' + e.message + '）';
+      } else {
+        return '联网搜索失败 HTTP: ' + e.message;
+      }
+    }
+    const { text, toolCalls, out } = parseResp(d);
+    if (out && out.length) return out.join('\n');
+    if (text && text.trim() && !toolCalls.length) return text.slice(0, 1500);
+    if (!toolCalls || !toolCalls.length) return '（搜索未返回结果）';
+    if (d.choices) {
+      msgs.push({ role: 'assistant', content: text || null, tool_calls: toolCalls.map((tc) => ({ id: tc.id, type: 'function', function: { name: tc.function?.name, arguments: tc.function?.arguments } })) });
+      const results = [];
+      for (const tc of toolCalls) {
+        results.push({ role: 'tool', tool_call_id: tc.id, content: '（继续搜索）' });
+      }
+      msgs.push(...results);
+      continue;
+    }
+    const tu = toolCalls[0];
+    msgs.push({ role: 'assistant', content: d.content }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: tu.id, content: '' }] });
   }
   return '（搜索多次未返回结果）';
 }
@@ -467,33 +716,79 @@ async function bridgeDirectTool(lastUserText) {
   return res;
 }
 async function runBridgeToolLoop(messages, system, enabledNames) {
-  const ep = ENDPOINT;
   const enabledSet = new Set(enabledNames || []);
   const tools = BRIDGE_TOOLS.filter((t) => enabledSet.has(t.name));
   if (!tools.length) return { messages: messages.slice(), trace: [], finalText: '' };
   let msgs = messages.slice();
   const trace = [];
-  for (let round = 0; round < 4; round++) {
-    const r = await fetch(ep.baseURL + '/messages', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-api-key': ep.apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: ep.model, system, max_tokens: 1024, thinking: { type: 'disabled' }, tools, messages: msgs }),
-      signal: AbortSignal.timeout(90000),
+  // 工具回合走辅助端点（串行队列防 429）；未启用辅助端点时用主端点
+  const doRound = (ep, msgs2) => {
+    const headers = ep.protocol === 'openai'
+      ? { 'content-type': 'application/json', authorization: `Bearer ${ep.apiKey}` }
+      : { 'content-type': 'application/json', 'x-api-key': ep.apiKey, 'anthropic-version': '2023-06-01' };
+    const body = ep.protocol === 'openai'
+      ? { model: ep.model, system, max_tokens: 1024, tools, messages: msgs2 }
+      : { model: ep.model, system, max_tokens: 1024, thinking: { type: 'disabled' }, tools, messages: msgs2 };
+    return fetch(`${ep.baseURL}${ep.protocol === 'openai' ? '/chat/completions' : '/messages'}`, {
+      method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(90000),
     });
-    if (!r.ok) throw new Error('工具回合失败 HTTP ' + r.status + ': ' + (await r.text()).slice(0, 120));
-    const d = await r.json();
+  };
+  const parseBlocks = (d) => {
+    if (d.choices) {
+      const msg = d.choices[0]?.message || {};
+      return {
+        text: String(msg.content || '').trim(),
+        toolUses: (msg.tool_calls || []).filter((tc) => tc.type === 'function').map((tc) => ({ id: tc.id, name: tc.function?.name || '', input: safeParse(tc.function?.arguments) })),
+      };
+    }
     const blocks = d.content || [];
-    const toolUses = blocks.filter((b) => b.type === 'tool_use');
-    if (!toolUses.length) return { messages: msgs, trace, finalText: blocks.map((b) => b.text || '').join('') };
-    msgs = msgs.concat([{ role: 'assistant', content: blocks }]);
+    return {
+      text: blocks.map((b) => b.text || '').join('').trim(),
+      toolUses: blocks.filter((b) => b.type === 'tool_use').map((b) => ({ id: b.id, name: b.name, input: b.input || {} })),
+    };
+  };
+  for (let round = 0; round < 4; round++) {
+    const useAux = !!auxEffective();
+    const run = () => doRound(useAux ? AUX : ENDPOINT, msgs);
+    let d;
+    try {
+      const r = await (useAux ? auxEnqueue(run) : run());
+      if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + (await r.text()).slice(0, 120));
+      d = await r.json();
+    } catch (e) {
+      if (useAux && AUX.fallback) {
+        const r = await doRound(ENDPOINT, msgs);
+        if (!r.ok) throw new Error('工具回合失败（主端点）HTTP ' + r.status + ': ' + (await r.text()).slice(0, 120));
+        d = await r.json();
+      } else {
+        throw new Error('工具回合失败' + (useAux ? '（辅助 API，未回退）' : '') + ': ' + e.message);
+      }
+    }
+    const { text, toolUses } = parseBlocks(d);
+    if (!toolUses.length) return { messages: msgs, trace, finalText: text };
+    if (d.choices) {
+      const assistantMsg = d.choices[0].message;
+      msgs = msgs.concat([{ role: 'assistant', content: assistantMsg.content || '', tool_calls: (assistantMsg.tool_calls || []).map((tc) => ({ id: tc.id, type: 'function', function: { name: tc.function?.name || '', arguments: tc.function?.arguments || '{}' } })) }]);
+      const results = [];
+      for (const tu of toolUses) {
+        let resultText;
+        if (!enabledSet.has(tu.name)) resultText = '工具不可用：' + tu.name + '（未在本会话开启）';
+        else try { resultText = await executeBridgeTool(tu.name, tu.input); }
+        catch (e) { resultText = '工具执行失败: ' + e.message; }
+        trace.push({ name: tu.name, input: tu.input, resultHead: resultText.slice(0, 120) });
+        results.push({ role: 'tool', tool_call_id: tu.id, content: String(resultText).slice(0, 5000) });
+      }
+      msgs = msgs.concat(results);
+      continue;
+    }
+    msgs = msgs.concat([{ role: 'assistant', content: d.content }]);
     const results = [];
     for (const tu of toolUses) {
-      const input = (typeof tu.input === 'object' && tu.input) ? tu.input : {};
       let resultText;
       if (!enabledSet.has(tu.name)) resultText = '工具不可用：' + tu.name + '（未在本会话开启）';
-      else try { resultText = await executeBridgeTool(tu.name, input); }
+      else try { resultText = await executeBridgeTool(tu.name, tu.input); }
       catch (e) { resultText = '工具执行失败: ' + e.message; }
-      trace.push({ name: tu.name, input, resultHead: resultText.slice(0, 120) });
+      trace.push({ name: tu.name, input: tu.input, resultHead: resultText.slice(0, 120) });
       results.push({ type: 'tool_result', tool_use_id: tu.id, content: String(resultText).slice(0, 5000) });
     }
     msgs = msgs.concat([{ role: 'user', content: results }]);
@@ -632,6 +927,7 @@ const server = http.createServer(async (req, res) => {
   // 模型 / API 端点查看与切换（持久化 data/model.json；POST 时探测验证）
   if (p === '/api/model' && req.method === 'GET') {
     const k = ENDPOINT.apiKey || '';
+    const ak = AUX.apiKey || '';
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify({
       model: ENDPOINT.model,
@@ -645,6 +941,15 @@ const server = http.createServer(async (req, res) => {
       maxContext: ENDPOINT.maxContext,
       autoSummary: ENDPOINT.autoSummary,
       autoSummaryThreshold: ENDPOINT.autoSummaryThreshold,
+      // 辅助 API（后台任务独立端点）
+      aux: {
+        enabled: AUX.enabled,
+        protocol: AUX.protocol,
+        baseURL: AUX.baseURL,
+        apiKeyMasked: ak ? '...' + ak.slice(-4) : '',
+        model: AUX.model,
+        fallback: AUX.fallback,
+      },
       // 峰谷定价仅官方直连渠道适用（DeepSeek 官方：高峰 9-12 / 14-18 翻倍）
       peakEligible: /api\.deepseek\.com/i.test(ENDPOINT.baseURL || ''),
     }));
@@ -653,7 +958,7 @@ const server = http.createServer(async (req, res) => {
     let body = '';
     for await (const c of req) body += c;
     try {
-      const { model, baseURL, apiKey, protocol, maxTokens, thinking, thinkingBudget, maxContext, autoSummary, autoSummaryThreshold } = JSON.parse(body);
+      const { model, baseURL, apiKey, protocol, maxTokens, thinking, thinkingBudget, maxContext, autoSummary, autoSummaryThreshold, aux } = JSON.parse(body);
       const next = { ...ENDPOINT };
       if (protocol === 'anthropic' || protocol === 'openai') next.protocol = protocol;
       if (baseURL && baseURL.trim()) next.baseURL = baseURL.trim().replace(/\/+$/, '');
@@ -669,16 +974,28 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok: false, error: '缺少 API Key' }));
       }
+      // 辅助 API 配置（可选：不填 = 保持原值）
+      const nextAux = { ...AUX };
+      if (aux && typeof aux === 'object') {
+        if (typeof aux.enabled === 'boolean') nextAux.enabled = aux.enabled;
+        if (aux.protocol === 'anthropic' || aux.protocol === 'openai') nextAux.protocol = aux.protocol;
+        if (aux.baseURL && typeof aux.baseURL === 'string' && aux.baseURL.trim()) nextAux.baseURL = aux.baseURL.trim().replace(/\/+$/, '');
+        if (aux.apiKey && typeof aux.apiKey === 'string' && aux.apiKey.trim()) nextAux.apiKey = aux.apiKey.trim();
+        if (aux.model && typeof aux.model === 'string' && aux.model.trim()) nextAux.model = aux.model.trim();
+        if (typeof aux.fallback === 'boolean') nextAux.fallback = aux.fallback;
+      }
       const requested = next.model;
       // 轻量探测（max_tokens:1）：验证端点/Key/模型，端点会把不存在的模型名静默映射到实际模型
       const probed = await probeEndpoint(next);
       next.model = probed.model;
       ENDPOINT = next;
+      AUX = nextAux;
       fs.writeFileSync(MODEL_FILE, JSON.stringify({
         protocol: ENDPOINT.protocol, baseURL: ENDPOINT.baseURL, apiKey: ENDPOINT.apiKey,
         model: ENDPOINT.model, maxTokens: ENDPOINT.maxTokens, thinking: ENDPOINT.thinking,
         thinkingBudget: ENDPOINT.thinkingBudget, maxContext: ENDPOINT.maxContext,
         autoSummary: ENDPOINT.autoSummary, autoSummaryThreshold: ENDPOINT.autoSummaryThreshold,
+        aux: { enabled: AUX.enabled, protocol: AUX.protocol, baseURL: AUX.baseURL, apiKey: AUX.apiKey, model: AUX.model, fallback: AUX.fallback },
         updatedAt: new Date().toISOString(),
       }), 'utf8');
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
@@ -813,6 +1130,30 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // 情绪追踪：查看（按会话聚合） / 设置 / 清除
+  if (p === '/api/emotions' && req.method === 'GET') {
+    const emo = buildEmotions(sanitizeId(url.searchParams.get('chatId') || ''));
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ emotions: emo }));
+  }
+  if (p === '/api/op/emotion' && req.method === 'POST') {
+    let body = '';
+    for await (const c of req) body += c;
+    try {
+      const { chatId, name, emotion } = JSON.parse(body);
+      const cid = sanitizeId(chatId || '');
+      const nm = String(name || '').trim().slice(0, 20);
+      if (!nm) throw new Error('缺少角色名');
+      setEmotion(cid, nm, String(emotion || '').trim().slice(0, 120));
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      const cur = buildEmotions(cid);
+      return res.end(JSON.stringify({ ok: true, emotions: cur, note: emotion && String(emotion).trim() ? `已记录 ${nm} 的情绪（已记账，可导出回合记录）` : `已清除 ${nm} 的情绪记录` }));
+    } catch (e) {
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ error: String(e) }));
+    }
+  }
+
   // 历史消息检索（本地关键词，零 API）
   if (p === '/api/history/search' && req.method === 'GET') return handleHistorySearch(url, res);
 
@@ -839,9 +1180,60 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify({ turns, total: readTurns(chatIdOf()).length }));
   }
+  // 手动补记一条回合（界面编辑）
+  if (p === '/api/timeline/manual' && req.method === 'POST') {
+    let body = '';
+    for await (const c of req) body += c;
+    try {
+      const { chatId, story_time, location, atmosphere, characters, costume, event } = JSON.parse(body);
+      const rec = appendManualTurn(sanitizeId(chatId || ''), { story_time, location, atmosphere, characters, costume, event });
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(rec ? { ok: true, rec } : { ok: false, error: '写入失败' }));
+    } catch (e) {
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ error: String(e) }));
+    }
+  }
+  // 删除单条回合记录
+  if (p === '/api/timeline/delete' && req.method === 'POST') {
+    let body = '';
+    for await (const c of req) body += c;
+    try {
+      const { chatId, id } = JSON.parse(body);
+      const ok = deleteTurnRecord(sanitizeId(chatId || ''), String(id || ''));
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(ok ? { ok: true, note: '已删除该条记录' } : { ok: false, error: '未找到该记录' }));
+    } catch (e) {
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ error: String(e) }));
+    }
+  }
   if (p === '/api/inventory' && req.method === 'GET') {
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(buildInventory(chatIdOf())));
+  }
+  // 手动添加 / 消耗物品（界面编辑，记账）
+  if (p === '/api/inventory/manual' && req.method === 'POST') {
+    let body = '';
+    for await (const c of req) body += c;
+    try {
+      const { chatId, action, name, holder } = JSON.parse(body);
+      const cid = sanitizeId(chatId || '');
+      const nm = String(name || '').trim().slice(0, 40);
+      const act = action === 'loss' ? 'loss' : 'gain';
+      if (!nm) throw new Error('缺少物品名');
+      appendItemRecord(cid, act, nm, String(holder || '').trim().slice(0, 20));
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok: true, note: act === 'gain' ? `已添加物品：${nm}` : `已消耗/移除物品：${nm}` }));
+    } catch (e) {
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ error: String(e) }));
+    }
+  }
+  // 当前着装聚合（界面显示 + 可改：改动走 /api/op/wardrobe）
+  if (p === '/api/wardrobe/current' && req.method === 'GET') {
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ wardrobes: buildCurrentWardrobe(chatIdOf()) }));
   }
   if (p === '/api/timeline/export' && req.method === 'GET') {
     const turns = readTurns(chatIdOf());
@@ -855,6 +1247,9 @@ const server = http.createServer(async (req, res) => {
       if (t.costume && t.costume !== '同上') lines.push(`- 着装：${t.costume}`);
       if (t.atmosphere) lines.push(`- 氛围：${t.atmosphere}`);
       if (t.event) lines.push(`- 事件：${t.event}`);
+      if (t.emotion) {
+        for (const [en, ev] of Object.entries(t.emotion)) lines.push(`- 情绪：${en} = ${ev}`);
+      }
       for (const g of t.items_gain) lines.push(`- 物品获得：${g.name}${g.holder ? ` = ${g.holder}` : ''}`);
       for (const n of t.items_loss) lines.push(`- 物品消耗/丢失：${n}`);
       for (const u of t.updates) lines.push(`- 【更新】${u.entry}：${u.content}`);
@@ -885,10 +1280,16 @@ const server = http.createServer(async (req, res) => {
     }
     if (!merged.length || merged[0].role !== 'user') merged.unshift({ role: 'user', content: '（开场）' });
 
-    // system：世界设定（用户自填）+ 界面操作覆盖
-    let system = buildSystemPrompt(payload.worldSetting || '', payload.chatId || '');
+    // system：世界设定（用户自填：世界/角色卡/规则 三段）+ 界面操作覆盖 + 当前情绪
+    let system = buildSystemPrompt({
+      world: payload.worldSetting || '',
+      chars: payload.charsSetting || '',
+      rules: payload.rulesSetting || '',
+    }, payload.chatId || '');
     const op = opInject(payload.chatId || '');
     if (op) system += '\n\n---\n\n' + op;
+    const emo = emotionInject(payload.chatId || '');
+    if (emo) system += '\n\n---\n\n' + emo;
 
     // 上下文预算裁剪：system + 历史 ≤ maxContext（0 = 不裁剪）；从最旧消息开始丢弃，至少保留 1 条
     if (ENDPOINT.maxContext && ENDPOINT.maxContext > 0) {
