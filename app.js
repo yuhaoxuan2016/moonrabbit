@@ -136,6 +136,12 @@ function reroll(seq) {
   const idx = history.findIndex((m) => m.seq === seq);
   if (idx < 0) return;
   history = history.slice(0, idx);          // 截断：该条及其后全部作废
+  // 同步清理回合记录：删除 seq >= n 的记账（旧回复的账本不残留）
+  fetch('/api/timeline/truncate', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ chatId, seq, mode: 'gte' }),
+  }).catch(() => {});
   const wrap = els.messages.querySelector(`.msg-wrap[data-seq="${seq}"]`);
   if (wrap) {
     let node = wrap;
@@ -148,7 +154,16 @@ function deleteMsg(seq) {
   if (streaming) return;
   const idx = history.findIndex((m) => m.seq === seq);
   if (idx < 0) return;
+  const removed = history[idx];
   history.splice(idx, 1);
+  // 删除的是 AI 回复 → 同步清理其回合记录（eq 只删该条）
+  if (removed && removed.role === 'assistant') {
+    fetch('/api/timeline/truncate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId, seq, mode: 'eq' }),
+    }).catch(() => {});
+  }
   const wrap = els.messages.querySelector(`.msg-wrap[data-seq="${seq}"]`);
   if (wrap) wrap.remove();
   saveChat();
@@ -262,6 +277,7 @@ async function generate() {
       body: JSON.stringify({
         messages: history,
         chatId,
+        seq,                       // 当前消息序号（回合记录关联，重roll/删除时清理用）
         worldSetting: collectSettings().world,
         charsSetting: collectSettings().chars,
         rulesSetting: collectSettings().rules,

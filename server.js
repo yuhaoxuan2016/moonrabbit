@@ -223,7 +223,7 @@ function parseTurnTags(content) {
   return rec;
 }
 
-function appendTurnRecord(content, chatId) {
+function appendTurnRecord(content, chatId, seq) {
   try {
     const rec = parseTurnTags(content);
     const hasAny = rec.story_time || rec.location || rec.atmosphere || rec.event || rec.items_gain.length || rec.items_loss.length || rec.updates.length;
@@ -231,8 +231,28 @@ function appendTurnRecord(content, chatId) {
     rec.id = Date.now() + '-' + Math.random().toString(36).slice(2, 6);
     rec.ts = new Date().toISOString();
     rec.chatId = sanitizeId(chatId);
+    if (seq) rec.seq = seq;   // 关联消息序号（重roll/删除时按 seq 清理）
     fs.appendFileSync(turnsFile(chatId), JSON.stringify(rec) + '\n', 'utf8');
   } catch (e) { console.error('[turn-record] 失败:', e.message); }
+}
+
+// 按消息序号截断/删除回合记录（重roll = 删 seq>=n；删单条 = 删 seq==n）
+// 只删带 seq 的记录（手动补记/操作记录无 seq，不受影响）
+function truncateTurnsBySeq(chatId, seq, mode) {
+  const file = turnsFile(chatId);
+  if (!fs.existsSync(file)) return 0;
+  const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+  const kept = lines.filter((l) => {
+    try {
+      const o = JSON.parse(l);
+      if (!o.seq) return true;   // 无 seq 的记录（手动/操作）保留
+      if (mode === 'eq') return o.seq !== seq;
+      return o.seq < seq;        // gte：删除 seq >= n
+    } catch (e) { return true; }
+  });
+  const removed = lines.length - kept.length;
+  if (removed) fs.writeFileSync(file, kept.join('\n') + (kept.length ? '\n' : ''), 'utf8');
+  return removed;
 }
 
 function readTurns(chatId) {
@@ -1240,6 +1260,22 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ error: String(e) }));
     }
   }
+  // 按消息序号清理回合记录（重roll：mode=gte 删 seq>=n；删单条消息：mode=eq 删 seq==n）
+  if (p === '/api/timeline/truncate' && req.method === 'POST') {
+    let body = '';
+    for await (const c of req) body += c;
+    try {
+      const { chatId, seq, mode } = JSON.parse(body);
+      const n = Number(seq);
+      if (!Number.isFinite(n) || n <= 0) throw new Error('缺少有效 seq');
+      const removed = truncateTurnsBySeq(sanitizeId(chatId || ''), n, mode === 'eq' ? 'eq' : 'gte');
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok: true, removed, note: `已清理 ${removed} 条回合记录` }));
+    } catch (e) {
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ error: String(e) }));
+    }
+  }
   if (p === '/api/inventory' && req.method === 'GET') {
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(buildInventory(chatIdOf())));
@@ -1431,7 +1467,7 @@ const server = http.createServer(async (req, res) => {
       b.cacheRead += cacheRead;
       b.cacheMiss += inTok + cacheCreate;
       saveStats();
-      appendTurnRecord(acc, payload.chatId);  // 剧情记忆：按会话自动记账
+      appendTurnRecord(acc, payload.chatId, payload.seq);  // 剧情记忆：按会话自动记账（带消息序号）
       if (toolTrace && toolTrace.length) appendOpRecord(payload.chatId, '工具调用', toolTrace.map((t) => t.name + ':' + String(t.input.query || '').slice(0, 40)).join('；'));
       send({ type: 'done' });
     } catch (e) {
