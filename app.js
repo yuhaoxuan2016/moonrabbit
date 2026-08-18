@@ -135,17 +135,34 @@ function reroll(seq) {
   if (streaming) return;
   const idx = history.findIndex((m) => m.seq === seq);
   if (idx < 0) return;
-  history = history.slice(0, idx);          // 截断：该条及其后全部作废
+  history = history.slice(0, idx);          // 截断：该条及其后全部作废（旧文本不进 AI 上下文）
   // 同步清理回合记录：删除 seq >= n 的记账（旧回复的账本不残留）
   fetch('/api/timeline/truncate', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ chatId, seq, mode: 'gte' }),
   }).catch(() => {});
+  // 旧气泡保留为「旧版本」样式（仅对比用，可删除；不参与后续上下文）
   const wrap = els.messages.querySelector(`.msg-wrap[data-seq="${seq}"]`);
   if (wrap) {
-    let node = wrap;
-    while (node) { const next = node.nextSibling; node.remove(); node = next; }
+    let node = wrap.nextSibling;
+    while (node) { const next = node.nextSibling; node.remove(); node = next; }   // 其后气泡删除
+    wrap.classList.add('alt-version');
+    const bar = wrap.querySelector('.msg-actions');
+    if (bar) {
+      bar.innerHTML = '';
+      const tag = document.createElement('span');
+      tag.className = 'alt-tag';
+      tag.textContent = '旧版本';
+      tag.title = '重roll 前的回复（不进上下文，仅对比）';
+      bar.appendChild(tag);
+      const del = document.createElement('button');
+      del.className = 'ma-btn del';
+      del.textContent = '✕ 删旧版';
+      del.title = '删除旧版本（仅移除对比气泡，不影响对话）';
+      del.addEventListener('click', () => wrap.remove());
+      bar.appendChild(del);
+    }
   }
   generate();
 }

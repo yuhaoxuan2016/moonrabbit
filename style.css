@@ -148,6 +148,11 @@ main { flex: 1; display: flex; min-height: 0; }
 }
 .ma-btn:hover { border-color: var(--accent); color: var(--text); }
 .ma-btn.del:hover { border-color: #f0a3a3; color: #f0a3a3; }
+/* 重roll 旧版本（保留对比，不进上下文） */
+.msg-wrap.alt-version { opacity: 0.62; }
+.msg-wrap.alt-version .bubble { border-style: dashed; background: var(--bg2); }
+.msg-wrap.alt-version .char-name { text-decoration: line-through; text-decoration-style: dotted; }
+.alt-tag { font-size: 11px; color: var(--muted); background: var(--bg2); border: 1px dashed var(--border); border-radius: 6px; padding: 1px 7px; }
 
 .msg { display: flex; gap: 10px; margin-bottom: 12px; align-items: flex-start; }
 .msg.user { flex-direction: row-reverse; }
