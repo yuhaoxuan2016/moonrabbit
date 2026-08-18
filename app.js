@@ -310,7 +310,8 @@ async function generate() {
     }
     if (acc.trim()) {
       renderAssistant(acc.trim(), seq);
-      history.push({ role: 'assistant', content: acc.trim(), seq });
+      // 思考记录一并存进 history（刷新/切会话后恢复显示）
+      history.push({ role: 'assistant', content: acc.trim(), seq, thinking: thinkAcc.trim() || undefined });
     }
   } catch (e) {
     tempWrap.remove();
@@ -429,7 +430,11 @@ async function openChat(id) {
       if (!m.seq) m.seq = ++msgSeq;
       else msgSeq = Math.max(msgSeq, m.seq);
       if (m.role === 'user') renderUser(m.content, m.seq);
-      else if (m.role === 'assistant') renderAssistant(m.content, m.seq);
+      else if (m.role === 'assistant') {
+        // 先渲染思考块（与实时生成顺序一致：思考在回复内容上方）
+        if (m.thinking && prefs.showThinking !== false) renderThinking(m.thinking);
+        renderAssistant(m.content, m.seq);
+      }
     }
     loadChatList();
     loadTimeline();   // 剧情记忆按会话隔离，切会话后刷新
