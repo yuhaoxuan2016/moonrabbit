@@ -143,11 +143,11 @@ fs.mkdirSync(TURNS_DIR, { recursive: true });
 // ---------- 调试：最近提示词记录（查看每轮发给 AI 的 system prompt） ----------
 const PROMPT_DIR = path.join(DATA_DIR, 'prompts');
 fs.mkdirSync(PROMPT_DIR, { recursive: true });
-let lastPrompt = { chatId: '', ts: '', system: '', historyCount: 0, extraContext: false, tools: [] };
-function recordPrompt(chatId, system, historyCount, extraContext) {
-  lastPrompt = { chatId: sanitizeId(chatId), ts: new Date().toISOString(), system, historyCount: historyCount || 0, extraContext: !!extraContext, tools: toolsEnabled(chatId) };
+let lastPrompt = { chatId: '', ts: '', system: '', historyCount: 0, tools: [] };
+function recordPrompt(chatId, system, historyCount) {
+  lastPrompt = { chatId: sanitizeId(chatId), ts: new Date().toISOString(), system, historyCount: historyCount || 0, tools: toolsEnabled(chatId) };
   try {
-    const line = JSON.stringify({ ts: lastPrompt.ts, historyCount: lastPrompt.historyCount, extraContext: lastPrompt.extraContext, tools: lastPrompt.tools, system });
+    const line = JSON.stringify({ ts: lastPrompt.ts, historyCount: lastPrompt.historyCount, tools: lastPrompt.tools, system });
     fs.appendFileSync(path.join(PROMPT_DIR, `${lastPrompt.chatId}.jsonl`), line + '\n', 'utf8');
     const file = path.join(PROMPT_DIR, `${lastPrompt.chatId}.jsonl`);
     const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
@@ -1323,7 +1323,7 @@ const server = http.createServer(async (req, res) => {
     const emo = emotionInject(payload.chatId || '');
     if (emo) system += '\n\n---\n\n' + emo;
     // 调试：记录本轮 system prompt（落盘 data/prompts/）
-    recordPrompt(payload.chatId || '', system, merged.length, false);
+    recordPrompt(payload.chatId || '', system, merged.length);
 
     // 上下文预算裁剪：system + 历史 ≤ maxContext（0 = 不裁剪）；从最旧消息开始丢弃，至少保留 1 条
     if (ENDPOINT.maxContext && ENDPOINT.maxContext > 0) {
