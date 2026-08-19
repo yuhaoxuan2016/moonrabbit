@@ -1353,6 +1353,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (p === '/api/chat' && req.method === 'POST') {
+    const OPENING_PIN_MIN_CHARS = 300;   // 首条消息保底注入 system 的最小长度（开局注入/长提示词；短问候不 pin）
     let body = '';
     for await (const c of req) body += c;
     let payload;
@@ -1364,7 +1365,12 @@ const server = http.createServer(async (req, res) => {
       return res.end('未找到 API Key（请在 header「API」设置里配置）');
     }
     // 规范化历史：Anthropic 要求 user/assistant 交替、首条为 user
-    const history = (payload.messages || []).filter((m) => m.role === 'user' || m.role === 'assistant').slice(-30);
+    // 开局提示词保底（2026-08-20）：首条 user 消息若为长文本（≥300 字，如开局注入/长提示词），
+    // 移入 system 常驻、不参与历史截断——长对话后设定仍在；历史上限放宽到 60 条（预算由 maxContext 兜底）
+    const rawHistory = (payload.messages || []).filter((m) => m.role === 'user' || m.role === 'assistant');
+    const firstMsg = rawHistory[0] || null;
+    const pinFirst = !!(firstMsg && firstMsg.role === 'user' && String(firstMsg.content || '').trim().length >= OPENING_PIN_MIN_CHARS);
+    const history = rawHistory.slice(pinFirst ? 1 : 0).slice(-60);
     let merged = [];
     for (const m of history) {
       const last = merged[merged.length - 1];
@@ -1384,6 +1390,10 @@ const server = http.createServer(async (req, res) => {
     if (op) system += '\n\n---\n\n' + op;
     const emo = emotionInject(payload.chatId || '');
     if (emo) system += '\n\n---\n\n' + emo;
+    // 开局提示词保底：首条长消息原文注入 system（每轮都在，不参与 maxContext 裁剪/自动压缩）
+    if (pinFirst) {
+      system += '\n\n---\n\n## 会话开局提示词（首条消息原文，每轮保底注入；与「会话常驻设定」冲突时以常驻设定为准）\n' + String(firstMsg.content).trim();
+    }
     // 调试：记录本轮 system prompt（落盘 data/prompts/）
     recordPrompt(payload.chatId || '', system, merged.length);
 
