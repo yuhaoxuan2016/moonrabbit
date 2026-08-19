@@ -127,6 +127,9 @@ function buildSystemPrompt(setting, chatId) {
   if (setting && setting.rules && setting.rules.trim()) {
     parts.push(`【规则】（用户填写，必须遵守）\n${setting.rules.trim()}`);
   }
+  if (setting && setting.extra && setting.extra.trim()) {
+    parts.push(`## 补充资料（用户临时附加，核对细节时以此为准）\n${setting.extra.trim()}`);
+  }
   const enabledNames = toolsEnabled(chatId || '');
   if (enabledNames.length) {
     parts.push('【工具（已开启：' + enabledNames.map((n) => BRIDGE_TOOL_LABELS[n] || n).join('、') + '）】当用户明确要求「联网/搜索/查一下」时，必须先调用 web_search 工具，得到结果后再回答；禁止跳过或编造；工具结果需标注来源。');
@@ -1353,6 +1356,7 @@ const server = http.createServer(async (req, res) => {
       world: payload.worldSetting || '',
       chars: payload.charsSetting || '',
       rules: payload.rulesSetting || '',
+      extra: payload.extra || '',
     }, payload.chatId || '');
     const op = opInject(payload.chatId || '');
     if (op) system += '\n\n---\n\n' + op;

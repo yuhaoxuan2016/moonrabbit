@@ -158,6 +158,17 @@
         <textarea id="rules-setting" class="world-setting" placeholder="如：禁止替用户角色说话 / 每轮回复不超过300字 / 战斗场景详细描写……"></textarea>
       </label>
       <div id="world-note" class="attach-note hidden">已保存 ✓（对话时注入 system）</div>
+      <div class="man-attach">
+        <button id="man-attach-btn" class="attach">📎 手动附加资料（临时注入，不进对话历史）</button>
+        <div id="man-attach-box" class="hidden">
+          <textarea id="man-attach-input" rows="5" placeholder="粘贴要临时注入的文本（剧情对话原文/设定补充等），发送下一条消息时随 system 的「## 补充资料」段注入，用完即弃。示例：【参考对话原文】凯文：「……不必了，抱歉。面很好吃。」"></textarea>
+          <div class="man-attach-row">
+            <button id="man-attach-ok" class="head-btn">✅ 附加到下一轮</button>
+            <button id="man-attach-cancel" class="head-btn">取消</button>
+          </div>
+          <div id="man-attach-note" class="attach-note hidden">已附加：下一条消息会带上手动资料</div>
+        </div>
+      </div>
     </div>
     <div class="card" id="card-wardrobe-op">
       <div class="card-title">👗 换装（界面操作，记账可导出）</div>

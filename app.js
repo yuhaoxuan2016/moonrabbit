@@ -9,7 +9,15 @@ const els = {
   expandBtn: document.getElementById('expand-btn'),
   opNote: document.getElementById('op-note'),
   toolChips: Array.from(document.querySelectorAll('.tool-chip[data-tool]')),
+  manAttachBtn: document.getElementById('man-attach-btn'),
+  manAttachBox: document.getElementById('man-attach-box'),
+  manAttachInput: document.getElementById('man-attach-input'),
+  manAttachOk: document.getElementById('man-attach-ok'),
+  manAttachCancel: document.getElementById('man-attach-cancel'),
+  manAttachNote: document.getElementById('man-attach-note'),
 };
+
+let pendingContext = '';   // 手动附加资料 → 下一条消息附带（不进对话历史）
 
 // 通用模式：不注入任何预设真值源，世界设定由用户自填
 const GENERIC = true;
@@ -276,6 +284,9 @@ async function generate() {
   streaming = true;
   els.send.disabled = true;
   els.typing.classList.remove('hidden');
+  const extra = pendingContext;
+  pendingContext = '';
+  els.manAttachNote.classList.add('hidden');
   const seq = ++msgSeq;
 
   let acc = '';
@@ -298,6 +309,7 @@ async function generate() {
         worldSetting: collectSettings().world,
         charsSetting: collectSettings().chars,
         rulesSetting: collectSettings().rules,
+        extra,                     // 手动附加资料（临时注入 system，不进对话历史）
       }),
     });
     if (!resp.ok) {
@@ -1254,6 +1266,24 @@ function maybeStartTour() {
 els.send.addEventListener('click', send);
 els.input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+
+// ---------- 手动附加资料（📎 临时注入，不进对话历史） ----------
+els.manAttachBtn.addEventListener('click', () => {
+  els.manAttachBox.classList.remove('hidden');
+  els.manAttachInput.focus();
+});
+els.manAttachCancel.addEventListener('click', () => {
+  els.manAttachBox.classList.add('hidden');
+  els.manAttachInput.value = '';
+});
+els.manAttachOk.addEventListener('click', () => {
+  const text = els.manAttachInput.value.trim();
+  if (!text) return;
+  pendingContext = text;
+  els.manAttachBox.classList.add('hidden');
+  els.manAttachInput.value = '';
+  els.manAttachNote.classList.remove('hidden');
 });
 
 // ---------- 启动 ----------
