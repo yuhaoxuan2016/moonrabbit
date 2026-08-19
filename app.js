@@ -597,6 +597,7 @@ apiBtn.addEventListener('click', async () => {
     document.getElementById('api-aux-model').value = ax.model || '';
     document.getElementById('api-aux-fallback').value = String(!!ax.fallback);
     apiNow.textContent = `当前：${c.protocol === 'openai' ? 'OpenAI 兼容' : 'Anthropic 兼容'} · ${c.baseURL} · ${c.model}${c.apiKeyMasked ? ' · Key ' + c.apiKeyMasked : ''} · max_tokens ${c.maxTokens} · thinking ${c.thinking} · context ${c.maxContext ?? 64000}`;
+    await loadPresets();
   } catch (e) { /* 忽略 */ }
   apiModal.classList.remove('hidden');
 });
@@ -651,6 +652,66 @@ document.getElementById('api-save').addEventListener('click', async () => {
     btn.disabled = false;
     btn.textContent = '保存并探测';
   }
+});
+
+// ---------- API 采样预设（命名预设） ----------
+const presetSelect = document.getElementById('preset-select');
+async function loadPresets() {
+  try {
+    const r = await (await fetch('/api/presets')).json();
+    if (!r.ok || !r.presets) return;
+    presetSelect.innerHTML = '';
+    for (const n of Object.keys(r.presets)) {
+      const o = document.createElement('option');
+      o.value = n; o.textContent = n;
+      presetSelect.appendChild(o);
+    }
+    if (r.active) presetSelect.value = r.active;
+    const p = r.presets[r.active] || {};
+    const set = (id, v, dft) => { const el = document.getElementById(id); if (el) el.value = (v != null ? v : dft); };
+    set('preset-temp', p.temperature, 1.0);
+    set('preset-topp', p.top_p, 1.0);
+    set('preset-topk', p.top_k, 0);
+    set('preset-presence', p.presence_penalty, 0);
+    set('preset-freq', p.frequency_penalty, 0);
+    if (p.maxTokens != null) document.getElementById('api-maxtokens').value = p.maxTokens;
+    if (p.maxContext != null) document.getElementById('api-context').value = p.maxContext;
+  } catch (e) { /* 服务未就绪 */ }
+}
+function readPresetInputs() {
+  const num = (id, dft) => Number(document.getElementById(id).value) || dft;
+  return {
+    temperature: num('preset-temp', 1.0),
+    top_p: num('preset-topp', 1.0),
+    top_k: Math.round(num('preset-topk', 0)),
+    presence_penalty: num('preset-presence', 0),
+    frequency_penalty: num('preset-freq', 0),
+    maxTokens: num('api-maxtokens', 8192),
+    maxContext: num('api-context', 0),
+  };
+}
+async function presetPost(body) {
+  try {
+    const r = await (await fetch('/api/presets', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).json();
+    if (r.error) { apiMsg.className = 'api-msg err'; apiMsg.textContent = '✗ ' + r.error; return; }
+    apiMsg.className = 'api-msg ok';
+    apiMsg.textContent = '✓ ' + (r.note || '已应用');
+    await loadPresets();
+  } catch (e) {
+    apiMsg.className = 'api-msg err';
+    apiMsg.textContent = '✗ ' + e.message;
+  }
+}
+document.getElementById('preset-apply').addEventListener('click', () => presetPost({ action: 'apply', name: presetSelect.value }));
+document.getElementById('preset-save').addEventListener('click', () => {
+  const name = (prompt('预设名称（与现有同名 = 覆盖）：', presetSelect.value) || '').trim();
+  if (!name) return;
+  presetPost({ action: 'save', name, preset: readPresetInputs() });
+});
+document.getElementById('preset-del').addEventListener('click', () => {
+  if (!presetSelect.value) return;
+  if (!confirm('删除预设「' + presetSelect.value + '」？')) return;
+  presetPost({ action: 'delete', name: presetSelect.value });
 });
 
 // ---------- 模型查看 / 切换（select 下拉 + 自定义） ----------

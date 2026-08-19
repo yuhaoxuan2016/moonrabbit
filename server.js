@@ -186,6 +186,54 @@ try {
   }
 } catch (e) { /* 首次使用 */ }
 
+// ---------- API 采样预设（命名预设：保存/切换/删除；参数随预设保存） ----------
+const PRESET_FILE = path.join(DATA_DIR, 'presets.json');
+const BUILTIN_PRESETS = {
+  'DeepSeek 默认（官方参数）': { temperature: 1.0, top_p: 1.0, top_k: 0, presence_penalty: 0, frequency_penalty: 0, maxTokens: 8192, maxContext: 64000 },
+  'RP 创作（社区向）': { temperature: 1.5, top_p: 0.9, top_k: 40, presence_penalty: 0, frequency_penalty: 0, maxTokens: 8192, maxContext: 64000 },
+  '省 token 快速': { temperature: 1.0, top_p: 1.0, top_k: 0, presence_penalty: 0, frequency_penalty: 0, maxTokens: 2048, maxContext: 32000 },
+};
+let presets = JSON.parse(JSON.stringify(BUILTIN_PRESETS));
+let activePreset = 'DeepSeek 默认（官方参数）';
+// 当前生效采样参数（null = 不传，用 API 默认）
+let SAMPLERS = { temperature: null, top_p: null, top_k: null, presence_penalty: null, frequency_penalty: null };
+function normPreset(p) {
+  const out = {};
+  if (Number.isFinite(p.temperature) && p.temperature >= 0 && p.temperature <= 2) out.temperature = p.temperature;
+  if (Number.isFinite(p.top_p) && p.top_p > 0 && p.top_p <= 1) out.top_p = p.top_p;
+  if (Number.isFinite(p.top_k) && p.top_k >= 0 && p.top_k <= 100) out.top_k = Math.round(p.top_k);
+  if (Number.isFinite(p.presence_penalty) && p.presence_penalty >= 0 && p.presence_penalty <= 2) out.presence_penalty = p.presence_penalty;
+  if (Number.isFinite(p.frequency_penalty) && p.frequency_penalty >= 0 && p.frequency_penalty <= 2) out.frequency_penalty = p.frequency_penalty;
+  if (Number.isFinite(p.maxTokens) && p.maxTokens >= 256 && p.maxTokens <= 65536) out.maxTokens = Math.round(p.maxTokens);
+  if (Number.isFinite(p.maxContext) && p.maxContext >= 0 && p.maxContext <= 256000) out.maxContext = Math.round(p.maxContext);
+  return out;
+}
+function savePresets() {
+  const custom = {};
+  for (const [k, v] of Object.entries(presets)) if (!BUILTIN_PRESETS[k]) custom[k] = v;
+  try { fs.writeFileSync(PRESET_FILE, JSON.stringify({ custom, active: activePreset }, null, 2), 'utf8'); } catch (e) { /* 忽略 */ }
+}
+function applyPreset(name) {
+  const p = presets[name];
+  if (!p) return false;
+  activePreset = name;
+  SAMPLERS.temperature = p.temperature != null ? p.temperature : null;
+  SAMPLERS.top_p = p.top_p != null ? p.top_p : null;
+  SAMPLERS.top_k = p.top_k != null && p.top_k > 0 ? p.top_k : null;
+  SAMPLERS.presence_penalty = p.presence_penalty != null ? p.presence_penalty : null;
+  SAMPLERS.frequency_penalty = p.frequency_penalty != null ? p.frequency_penalty : null;
+  if (p.maxTokens != null) ENDPOINT.maxTokens = p.maxTokens;
+  if (p.maxContext != null) ENDPOINT.maxContext = p.maxContext;
+  savePresets();
+  return true;
+}
+try {
+  const pj = JSON.parse(fs.readFileSync(PRESET_FILE, 'utf8'));
+  if (pj.custom && typeof pj.custom === 'object') for (const [k, v] of Object.entries(pj.custom)) presets[k] = normPreset(v || {});
+  if (pj.active && presets[pj.active]) activePreset = pj.active;
+} catch (e) { /* 首次使用 */ }
+applyPreset(activePreset);
+
 // 解析 AI 回复中的 <storyevent>/<items>/【更新】标签 → 结构化回合记录
 function parseTurnTags(content) {
   const rec = { story_time: '', location: '', atmosphere: '', characters: [], costume: '', event: '', items_gain: [], items_loss: [], updates: [], emotion: {} };
@@ -305,6 +353,11 @@ async function callLLM(messages, system, onDelta, onMeta, onThinking) {
       max_tokens: ep.maxTokens || 8192,
     };
     if (ep.thinking === 'enabled') body.reasoning_effort = 'high';
+    // 采样参数（来自当前预设；top_k 仅 Anthropic 支持）
+    if (SAMPLERS.temperature != null) body.temperature = SAMPLERS.temperature;
+    if (SAMPLERS.top_p != null) body.top_p = SAMPLERS.top_p;
+    if (SAMPLERS.presence_penalty != null) body.presence_penalty = SAMPLERS.presence_penalty;
+    if (SAMPLERS.frequency_penalty != null) body.frequency_penalty = SAMPLERS.frequency_penalty;
     const resp = await fetch(`${ep.baseURL}/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${ep.apiKey}` },
@@ -342,6 +395,10 @@ async function callLLM(messages, system, onDelta, onMeta, onThinking) {
   const body = { model: ep.model, system, messages, max_tokens: ep.maxTokens || 8192, stream: true };
   if (ep.thinking === 'enabled') body.thinking = { type: 'enabled', budget_tokens: ep.thinkingBudget || 2048 };
   else if (ep.thinking === 'disabled') body.thinking = { type: 'disabled' };
+  // 采样参数（来自当前预设；presence/frequency_penalty 仅 OpenAI 支持）
+  if (SAMPLERS.temperature != null) body.temperature = SAMPLERS.temperature;
+  if (SAMPLERS.top_p != null) body.top_p = SAMPLERS.top_p;
+  if (SAMPLERS.top_k != null) body.top_k = SAMPLERS.top_k;
   const resp = await fetch(`${ep.baseURL}/messages`, {
     method: 'POST',
     headers: {
@@ -1166,6 +1223,39 @@ const server = http.createServer(async (req, res) => {
     } catch (e) {
       res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ error: String(e) }));
+    }
+  }
+  // 界面操作：API 采样预设（命名预设）
+  if (p === '/api/presets' && req.method === 'GET') {
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ ok: true, presets, active: activePreset, samplers: SAMPLERS }));
+  }
+  if (p === '/api/presets' && req.method === 'POST') {
+    let body = '';
+    for await (const c of req) body += c;
+    try {
+      const { action, name, preset } = JSON.parse(body);
+      const nm = String(name || '').trim().slice(0, 40);
+      if (action === 'apply') {
+        if (!presets[nm]) return res.end(JSON.stringify({ error: '预设不存在：' + nm }));
+        applyPreset(nm);
+        return res.end(JSON.stringify({ ok: true, active: nm, samplers: SAMPLERS, note: `已应用预设「${nm}」` }));
+      }
+      if (action === 'save') {
+        if (!nm) return res.end(JSON.stringify({ error: '预设名不能为空' }));
+        presets[nm] = normPreset(preset || {});
+        applyPreset(nm);
+        return res.end(JSON.stringify({ ok: true, active: nm, note: `预设「${nm}」已保存并应用` }));
+      }
+      if (action === 'delete') {
+        if (BUILTIN_PRESETS[nm]) return res.end(JSON.stringify({ error: '内置预设不可删除' }));
+        delete presets[nm];
+        savePresets();
+        return res.end(JSON.stringify({ ok: true, note: `预设「${nm}」已删除` }));
+      }
+      res.end(JSON.stringify({ error: '未知操作' }));
+    } catch (e) {
+      res.writeHead(400); return res.end(JSON.stringify({ error: String(e) }));
     }
   }
   // 界面操作：会话常驻设定（📌 每轮注入 system，不被上下文裁剪；按会话隔离）
