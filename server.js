@@ -172,7 +172,7 @@ try {
   if (Number.isFinite(m.maxTokens) && m.maxTokens >= 256 && m.maxTokens <= 393216) ENDPOINT.maxTokens = m.maxTokens;
   if (['auto', 'disabled', 'low', 'medium', 'high', 'custom'].includes(m.thinking)) ENDPOINT.thinking = m.thinking;
   else if (m.thinking === 'enabled') ENDPOINT.thinking = 'high';   // 旧「开启」→ 深度思考档
-  if (Number.isFinite(m.thinkingBudget) && m.thinkingBudget >= 256 && m.thinkingBudget <= 131072) ENDPOINT.thinkingBudget = m.thinkingBudget;
+  if (Number.isFinite(m.thinkingBudget) && m.thinkingBudget >= 256 && m.thinkingBudget <= 393216) ENDPOINT.thinkingBudget = m.thinkingBudget;
   if (Number.isFinite(m.maxContext) && m.maxContext >= 0 && m.maxContext <= 1048576) ENDPOINT.maxContext = m.maxContext;
   if (typeof m.autoSummary === 'boolean') ENDPOINT.autoSummary = m.autoSummary;
   if (Number.isFinite(m.autoSummaryThreshold) && m.autoSummaryThreshold >= 2000 && m.autoSummaryThreshold <= 100000) ENDPOINT.autoSummaryThreshold = m.autoSummaryThreshold;
@@ -1072,7 +1072,7 @@ const server = http.createServer(async (req, res) => {
       if (Number.isFinite(maxTokens) && maxTokens >= 256 && maxTokens <= 393216) next.maxTokens = maxTokens;
       if (['auto', 'disabled', 'low', 'medium', 'high', 'custom'].includes(thinking)) next.thinking = thinking;
       else if (thinking === 'enabled') next.thinking = 'high';   // 旧「开启」→ 深度思考档
-      if (Number.isFinite(thinkingBudget) && thinkingBudget >= 256 && thinkingBudget <= 131072) next.thinkingBudget = thinkingBudget;
+      if (Number.isFinite(thinkingBudget) && thinkingBudget >= 256 && thinkingBudget <= 393216) next.thinkingBudget = thinkingBudget;
       if (Number.isFinite(maxContext) && maxContext >= 0 && maxContext <= 1048576) next.maxContext = maxContext;
       if (typeof autoSummary === 'boolean') next.autoSummary = autoSummary;
       if (Number.isFinite(autoSummaryThreshold) && autoSummaryThreshold >= 2000 && autoSummaryThreshold <= 100000) next.autoSummaryThreshold = autoSummaryThreshold;
