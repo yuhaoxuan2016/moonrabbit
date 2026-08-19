@@ -170,7 +170,7 @@ try {
   if (m.apiKey && typeof m.apiKey === 'string' && m.apiKey.trim()) ENDPOINT.apiKey = m.apiKey.trim();
   if (m.model && typeof m.model === 'string' && m.model.trim()) ENDPOINT.model = m.model.trim();
   if (Number.isFinite(m.maxTokens) && m.maxTokens >= 256 && m.maxTokens <= 393216) ENDPOINT.maxTokens = m.maxTokens;
-  if (['auto', 'disabled', 'low', 'medium', 'high', 'custom'].includes(m.thinking)) ENDPOINT.thinking = m.thinking;
+  if (['auto', 'disabled', 'low', 'medium', 'high', 'max', 'custom'].includes(m.thinking)) ENDPOINT.thinking = m.thinking;
   else if (m.thinking === 'enabled') ENDPOINT.thinking = 'high';   // 旧「开启」→ 深度思考档
   if (Number.isFinite(m.thinkingBudget) && m.thinkingBudget >= 256 && m.thinkingBudget <= 393216) ENDPOINT.thinkingBudget = m.thinkingBudget;
   if (Number.isFinite(m.maxContext) && m.maxContext >= 0 && m.maxContext <= 1048576) ENDPOINT.maxContext = m.maxContext;
@@ -187,7 +187,7 @@ try {
   }
 } catch (e) { /* 首次使用 */ }
 
-const THINK_BUDGET = { low: 4096, medium: 8192, high: 32768 };  // 思考强度档位 → 预算 token（custom 用 thinkingBudget 字段）
+const THINK_BUDGET = { low: 4096, medium: 8192, high: 32768, max: 65536 };  // 思考强度档位 → 预算 token（custom 用 thinkingBudget 字段）
 
 // ---------- API 采样预设（命名预设：保存/切换/删除；参数随预设保存） ----------
 const PRESET_FILE = path.join(DATA_DIR, 'presets.json');
@@ -358,6 +358,7 @@ async function callLLM(messages, system, onDelta, onMeta, onThinking) {
     if (ep.thinking === 'low') body.reasoning_effort = 'low';
     else if (ep.thinking === 'medium') body.reasoning_effort = 'medium';
     else if (ep.thinking === 'high' || ep.thinking === 'custom' || ep.thinking === 'enabled') body.reasoning_effort = 'high';
+    else if (ep.thinking === 'max') body.reasoning_effort = 'max';
     // 采样参数（来自当前预设；top_k 仅 Anthropic 支持）
     if (SAMPLERS.temperature != null) body.temperature = SAMPLERS.temperature;
     if (SAMPLERS.top_p != null) body.top_p = SAMPLERS.top_p;
@@ -1070,7 +1071,7 @@ const server = http.createServer(async (req, res) => {
       if (apiKey && apiKey.trim()) next.apiKey = apiKey.trim();
       if (model && model.trim()) next.model = model.trim();
       if (Number.isFinite(maxTokens) && maxTokens >= 256 && maxTokens <= 393216) next.maxTokens = maxTokens;
-      if (['auto', 'disabled', 'low', 'medium', 'high', 'custom'].includes(thinking)) next.thinking = thinking;
+      if (['auto', 'disabled', 'low', 'medium', 'high', 'max', 'custom'].includes(thinking)) next.thinking = thinking;
       else if (thinking === 'enabled') next.thinking = 'high';   // 旧「开启」→ 深度思考档
       if (Number.isFinite(thinkingBudget) && thinkingBudget >= 256 && thinkingBudget <= 393216) next.thinkingBudget = thinkingBudget;
       if (Number.isFinite(maxContext) && maxContext >= 0 && maxContext <= 1048576) next.maxContext = maxContext;
