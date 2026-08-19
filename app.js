@@ -582,7 +582,7 @@ apiBtn.addEventListener('click', async () => {
     apiKey.value = '';
     apiKey.placeholder = `留空 = 沿用当前 Key（${c.apiKeyMasked || '未配置'}）`;
     document.getElementById('api-maxtokens').value = c.maxTokens || 8192;
-    document.getElementById('api-thinking').value = c.thinking || 'auto';
+    document.getElementById('api-thinking').value = (c.thinking === 'enabled' ? 'high' : (c.thinking || 'auto'));
     document.getElementById('api-budget').value = c.thinkingBudget || 2048;
     document.getElementById('api-context').value = c.maxContext ?? 64000;
     document.getElementById('api-autosummary').value = String(c.autoSummary !== false);

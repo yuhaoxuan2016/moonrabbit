@@ -170,7 +170,8 @@ try {
   if (m.apiKey && typeof m.apiKey === 'string' && m.apiKey.trim()) ENDPOINT.apiKey = m.apiKey.trim();
   if (m.model && typeof m.model === 'string' && m.model.trim()) ENDPOINT.model = m.model.trim();
   if (Number.isFinite(m.maxTokens) && m.maxTokens >= 256 && m.maxTokens <= 393216) ENDPOINT.maxTokens = m.maxTokens;
-  if (['auto', 'enabled', 'disabled'].includes(m.thinking)) ENDPOINT.thinking = m.thinking;
+  if (['auto', 'disabled', 'low', 'medium', 'high', 'custom'].includes(m.thinking)) ENDPOINT.thinking = m.thinking;
+  else if (m.thinking === 'enabled') ENDPOINT.thinking = 'high';   // 旧「开启」→ 深度思考档
   if (Number.isFinite(m.thinkingBudget) && m.thinkingBudget >= 256 && m.thinkingBudget <= 131072) ENDPOINT.thinkingBudget = m.thinkingBudget;
   if (Number.isFinite(m.maxContext) && m.maxContext >= 0 && m.maxContext <= 1048576) ENDPOINT.maxContext = m.maxContext;
   if (typeof m.autoSummary === 'boolean') ENDPOINT.autoSummary = m.autoSummary;
@@ -185,6 +186,8 @@ try {
     if (typeof m.aux.fallback === 'boolean') AUX.fallback = m.aux.fallback;
   }
 } catch (e) { /* 首次使用 */ }
+
+const THINK_BUDGET = { low: 4096, medium: 8192, high: 32768 };  // 思考强度档位 → 预算 token（custom 用 thinkingBudget 字段）
 
 // ---------- API 采样预设（命名预设：保存/切换/删除；参数随预设保存） ----------
 const PRESET_FILE = path.join(DATA_DIR, 'presets.json');
@@ -352,7 +355,9 @@ async function callLLM(messages, system, onDelta, onMeta, onThinking) {
       stream: true,
       max_tokens: ep.maxTokens || 8192,
     };
-    if (ep.thinking === 'enabled') body.reasoning_effort = 'high';
+    if (ep.thinking === 'low') body.reasoning_effort = 'low';
+    else if (ep.thinking === 'medium') body.reasoning_effort = 'medium';
+    else if (ep.thinking === 'high' || ep.thinking === 'custom' || ep.thinking === 'enabled') body.reasoning_effort = 'high';
     // 采样参数（来自当前预设；top_k 仅 Anthropic 支持）
     if (SAMPLERS.temperature != null) body.temperature = SAMPLERS.temperature;
     if (SAMPLERS.top_p != null) body.top_p = SAMPLERS.top_p;
@@ -393,8 +398,12 @@ async function callLLM(messages, system, onDelta, onMeta, onThinking) {
   }
   // anthropic 协议（默认）
   const body = { model: ep.model, system, messages, max_tokens: ep.maxTokens || 8192, stream: true };
-  if (ep.thinking === 'enabled') body.thinking = { type: 'enabled', budget_tokens: ep.thinkingBudget || 32768 };
-  else if (ep.thinking === 'disabled') body.thinking = { type: 'disabled' };
+  if (ep.thinking === 'disabled') body.thinking = { type: 'disabled' };
+  else if (ep.thinking !== 'auto') {
+    const mode = ep.thinking === 'enabled' ? 'high' : ep.thinking;   // 旧值兼容
+    const budget = mode === 'custom' ? (ep.thinkingBudget || 32768) : (THINK_BUDGET[mode] || 8192);
+    body.thinking = { type: 'enabled', budget_tokens: budget };
+  }
   // 采样参数（来自当前预设；presence/frequency_penalty 仅 OpenAI 支持）
   if (SAMPLERS.temperature != null) body.temperature = SAMPLERS.temperature;
   if (SAMPLERS.top_p != null) body.top_p = SAMPLERS.top_p;
@@ -1061,7 +1070,8 @@ const server = http.createServer(async (req, res) => {
       if (apiKey && apiKey.trim()) next.apiKey = apiKey.trim();
       if (model && model.trim()) next.model = model.trim();
       if (Number.isFinite(maxTokens) && maxTokens >= 256 && maxTokens <= 393216) next.maxTokens = maxTokens;
-      if (['auto', 'enabled', 'disabled'].includes(thinking)) next.thinking = thinking;
+      if (['auto', 'disabled', 'low', 'medium', 'high', 'custom'].includes(thinking)) next.thinking = thinking;
+      else if (thinking === 'enabled') next.thinking = 'high';   // 旧「开启」→ 深度思考档
       if (Number.isFinite(thinkingBudget) && thinkingBudget >= 256 && thinkingBudget <= 131072) next.thinkingBudget = thinkingBudget;
       if (Number.isFinite(maxContext) && maxContext >= 0 && maxContext <= 1048576) next.maxContext = maxContext;
       if (typeof autoSummary === 'boolean') next.autoSummary = autoSummary;
