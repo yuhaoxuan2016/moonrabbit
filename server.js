@@ -17,7 +17,7 @@ let ENDPOINT = {
   model: process.env.MOONRABBIT_MODEL || 'deepseek-chat',
   maxTokens: 8192,          // 输出上限
   thinking: 'auto',         // auto | enabled | disabled
-  thinkingBudget: 2048,     // thinking 开启时的预算 token
+  thinkingBudget: 32768,    // thinking 开启时的预算 token（v4 输出 384K，给足思考空间）
   maxContext: 1048576,      // 上下文预算（system+历史 token；0 = 不裁剪；deepseek-v4 窗口 1M）
   autoSummary: true,        // 自动压缩总结
   autoSummaryThreshold: 80000,  // 历史消息字符数超过该值触发压缩（v4 大窗口：快满才压，长记忆）
@@ -171,7 +171,7 @@ try {
   if (m.model && typeof m.model === 'string' && m.model.trim()) ENDPOINT.model = m.model.trim();
   if (Number.isFinite(m.maxTokens) && m.maxTokens >= 256 && m.maxTokens <= 393216) ENDPOINT.maxTokens = m.maxTokens;
   if (['auto', 'enabled', 'disabled'].includes(m.thinking)) ENDPOINT.thinking = m.thinking;
-  if (Number.isFinite(m.thinkingBudget) && m.thinkingBudget >= 256 && m.thinkingBudget <= 32768) ENDPOINT.thinkingBudget = m.thinkingBudget;
+  if (Number.isFinite(m.thinkingBudget) && m.thinkingBudget >= 256 && m.thinkingBudget <= 131072) ENDPOINT.thinkingBudget = m.thinkingBudget;
   if (Number.isFinite(m.maxContext) && m.maxContext >= 0 && m.maxContext <= 1048576) ENDPOINT.maxContext = m.maxContext;
   if (typeof m.autoSummary === 'boolean') ENDPOINT.autoSummary = m.autoSummary;
   if (Number.isFinite(m.autoSummaryThreshold) && m.autoSummaryThreshold >= 2000 && m.autoSummaryThreshold <= 100000) ENDPOINT.autoSummaryThreshold = m.autoSummaryThreshold;
@@ -393,7 +393,7 @@ async function callLLM(messages, system, onDelta, onMeta, onThinking) {
   }
   // anthropic 协议（默认）
   const body = { model: ep.model, system, messages, max_tokens: ep.maxTokens || 8192, stream: true };
-  if (ep.thinking === 'enabled') body.thinking = { type: 'enabled', budget_tokens: ep.thinkingBudget || 2048 };
+  if (ep.thinking === 'enabled') body.thinking = { type: 'enabled', budget_tokens: ep.thinkingBudget || 32768 };
   else if (ep.thinking === 'disabled') body.thinking = { type: 'disabled' };
   // 采样参数（来自当前预设；presence/frequency_penalty 仅 OpenAI 支持）
   if (SAMPLERS.temperature != null) body.temperature = SAMPLERS.temperature;
@@ -1062,7 +1062,7 @@ const server = http.createServer(async (req, res) => {
       if (model && model.trim()) next.model = model.trim();
       if (Number.isFinite(maxTokens) && maxTokens >= 256 && maxTokens <= 393216) next.maxTokens = maxTokens;
       if (['auto', 'enabled', 'disabled'].includes(thinking)) next.thinking = thinking;
-      if (Number.isFinite(thinkingBudget) && thinkingBudget >= 256 && thinkingBudget <= 32768) next.thinkingBudget = thinkingBudget;
+      if (Number.isFinite(thinkingBudget) && thinkingBudget >= 256 && thinkingBudget <= 131072) next.thinkingBudget = thinkingBudget;
       if (Number.isFinite(maxContext) && maxContext >= 0 && maxContext <= 1048576) next.maxContext = maxContext;
       if (typeof autoSummary === 'boolean') next.autoSummary = autoSummary;
       if (Number.isFinite(autoSummaryThreshold) && autoSummaryThreshold >= 2000 && autoSummaryThreshold <= 100000) next.autoSummaryThreshold = autoSummaryThreshold;
