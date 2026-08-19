@@ -18,9 +18,9 @@ let ENDPOINT = {
   maxTokens: 8192,          // 输出上限
   thinking: 'auto',         // auto | enabled | disabled
   thinkingBudget: 2048,     // thinking 开启时的预算 token
-  maxContext: 64000,        // 上下文预算（system+历史 token；0 = 不裁剪）
+  maxContext: 1048576,      // 上下文预算（system+历史 token；0 = 不裁剪；deepseek-v4 窗口 1M）
   autoSummary: true,        // 自动压缩总结
-  autoSummaryThreshold: 12000,  // 历史消息字符数超过该值触发压缩
+  autoSummaryThreshold: 80000,  // 历史消息字符数超过该值触发压缩（v4 大窗口：快满才压，长记忆）
 };
 
 // 辅助 API（后台任务独立端点）：自动摘要 / 工具桥 / 联网搜索走独立端点，不抢主对话 API；
@@ -169,10 +169,10 @@ try {
   if (m.baseURL && typeof m.baseURL === 'string' && m.baseURL.trim()) ENDPOINT.baseURL = m.baseURL.trim().replace(/\/+$/, '');
   if (m.apiKey && typeof m.apiKey === 'string' && m.apiKey.trim()) ENDPOINT.apiKey = m.apiKey.trim();
   if (m.model && typeof m.model === 'string' && m.model.trim()) ENDPOINT.model = m.model.trim();
-  if (Number.isFinite(m.maxTokens) && m.maxTokens >= 256 && m.maxTokens <= 65536) ENDPOINT.maxTokens = m.maxTokens;
+  if (Number.isFinite(m.maxTokens) && m.maxTokens >= 256 && m.maxTokens <= 393216) ENDPOINT.maxTokens = m.maxTokens;
   if (['auto', 'enabled', 'disabled'].includes(m.thinking)) ENDPOINT.thinking = m.thinking;
   if (Number.isFinite(m.thinkingBudget) && m.thinkingBudget >= 256 && m.thinkingBudget <= 32768) ENDPOINT.thinkingBudget = m.thinkingBudget;
-  if (Number.isFinite(m.maxContext) && m.maxContext >= 0 && m.maxContext <= 256000) ENDPOINT.maxContext = m.maxContext;
+  if (Number.isFinite(m.maxContext) && m.maxContext >= 0 && m.maxContext <= 1048576) ENDPOINT.maxContext = m.maxContext;
   if (typeof m.autoSummary === 'boolean') ENDPOINT.autoSummary = m.autoSummary;
   if (Number.isFinite(m.autoSummaryThreshold) && m.autoSummaryThreshold >= 2000 && m.autoSummaryThreshold <= 100000) ENDPOINT.autoSummaryThreshold = m.autoSummaryThreshold;
   // 辅助 API（后台任务独立端点）
@@ -189,8 +189,8 @@ try {
 // ---------- API 采样预设（命名预设：保存/切换/删除；参数随预设保存） ----------
 const PRESET_FILE = path.join(DATA_DIR, 'presets.json');
 const BUILTIN_PRESETS = {
-  'DeepSeek 默认（官方参数）': { temperature: 1.0, top_p: 1.0, top_k: 0, presence_penalty: 0, frequency_penalty: 0, maxTokens: 8192, maxContext: 64000 },
-  'RP 创作（社区向）': { temperature: 1.5, top_p: 0.9, top_k: 40, presence_penalty: 0, frequency_penalty: 0, maxTokens: 8192, maxContext: 64000 },
+  'DeepSeek 默认（官方参数）': { temperature: 1.0, top_p: 1.0, top_k: 0, presence_penalty: 0, frequency_penalty: 0, maxTokens: 393216, maxContext: 1048576 },
+  'RP 创作（社区向）': { temperature: 1.5, top_p: 0.9, top_k: 40, presence_penalty: 0, frequency_penalty: 0, maxTokens: 393216, maxContext: 1048576 },
   '省 token 快速': { temperature: 1.0, top_p: 1.0, top_k: 0, presence_penalty: 0, frequency_penalty: 0, maxTokens: 2048, maxContext: 32000 },
 };
 let presets = JSON.parse(JSON.stringify(BUILTIN_PRESETS));
@@ -204,8 +204,8 @@ function normPreset(p) {
   if (Number.isFinite(p.top_k) && p.top_k >= 0 && p.top_k <= 100) out.top_k = Math.round(p.top_k);
   if (Number.isFinite(p.presence_penalty) && p.presence_penalty >= 0 && p.presence_penalty <= 2) out.presence_penalty = p.presence_penalty;
   if (Number.isFinite(p.frequency_penalty) && p.frequency_penalty >= 0 && p.frequency_penalty <= 2) out.frequency_penalty = p.frequency_penalty;
-  if (Number.isFinite(p.maxTokens) && p.maxTokens >= 256 && p.maxTokens <= 65536) out.maxTokens = Math.round(p.maxTokens);
-  if (Number.isFinite(p.maxContext) && p.maxContext >= 0 && p.maxContext <= 256000) out.maxContext = Math.round(p.maxContext);
+  if (Number.isFinite(p.maxTokens) && p.maxTokens >= 256 && p.maxTokens <= 393216) out.maxTokens = Math.round(p.maxTokens);
+  if (Number.isFinite(p.maxContext) && p.maxContext >= 0 && p.maxContext <= 1048576) out.maxContext = Math.round(p.maxContext);
   return out;
 }
 function savePresets() {
@@ -1060,10 +1060,10 @@ const server = http.createServer(async (req, res) => {
       if (baseURL && baseURL.trim()) next.baseURL = baseURL.trim().replace(/\/+$/, '');
       if (apiKey && apiKey.trim()) next.apiKey = apiKey.trim();
       if (model && model.trim()) next.model = model.trim();
-      if (Number.isFinite(maxTokens) && maxTokens >= 256 && maxTokens <= 65536) next.maxTokens = maxTokens;
+      if (Number.isFinite(maxTokens) && maxTokens >= 256 && maxTokens <= 393216) next.maxTokens = maxTokens;
       if (['auto', 'enabled', 'disabled'].includes(thinking)) next.thinking = thinking;
       if (Number.isFinite(thinkingBudget) && thinkingBudget >= 256 && thinkingBudget <= 32768) next.thinkingBudget = thinkingBudget;
-      if (Number.isFinite(maxContext) && maxContext >= 0 && maxContext <= 256000) next.maxContext = maxContext;
+      if (Number.isFinite(maxContext) && maxContext >= 0 && maxContext <= 1048576) next.maxContext = maxContext;
       if (typeof autoSummary === 'boolean') next.autoSummary = autoSummary;
       if (Number.isFinite(autoSummaryThreshold) && autoSummaryThreshold >= 2000 && autoSummaryThreshold <= 100000) next.autoSummaryThreshold = autoSummaryThreshold;
       if (!next.apiKey) {
@@ -1463,11 +1463,11 @@ const server = http.createServer(async (req, res) => {
     }
     // 规范化历史：Anthropic 要求 user/assistant 交替、首条为 user
     // 开局提示词保底（2026-08-20）：首条 user 消息若为长文本（≥300 字，如开局注入/长提示词），
-    // 移入 system 常驻、不参与历史截断——长对话后设定仍在；历史上限放宽到 60 条（预算由 maxContext 兜底）
+    // 移入 system 常驻、不参与历史截断——长对话后设定仍在；历史上限 300 条（v4 1M 窗口，预算由 maxContext 兜底）
     const rawHistory = (payload.messages || []).filter((m) => m.role === 'user' || m.role === 'assistant');
     const firstMsg = rawHistory[0] || null;
     const pinFirst = !!(firstMsg && firstMsg.role === 'user' && String(firstMsg.content || '').trim().length >= OPENING_PIN_MIN_CHARS);
-    const history = rawHistory.slice(pinFirst ? 1 : 0).slice(-60);
+    const history = rawHistory.slice(pinFirst ? 1 : 0).slice(-300);
     let merged = [];
     for (const m of history) {
       const last = merged[merged.length - 1];

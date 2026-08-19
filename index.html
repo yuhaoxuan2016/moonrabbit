@@ -41,8 +41,8 @@
     <label class="api-field">API Key
       <input id="api-key" type="password" placeholder="留空 = 沿用当前 Key">
     </label>
-    <label class="api-field">输出上限 max_tokens（256-65536）
-      <input id="api-maxtokens" type="number" min="256" max="65536" step="256" value="8192">
+    <label class="api-field">输出上限 max_tokens（256-393216）
+      <input id="api-maxtokens" type="number" min="256" max="393216" step="256" value="393216">
     </label>
     <label class="api-field">思考 thinking
       <select id="api-thinking">
@@ -55,7 +55,7 @@
       <input id="api-budget" type="number" min="256" max="32768" step="256" value="2048">
     </label>
     <label class="api-field">上下文预算 token（system+历史，0=不裁剪）
-      <input id="api-context" type="number" min="0" max="256000" step="1024" value="64000">
+      <input id="api-context" type="number" min="0" max="1048576" step="1024" value="1048576">
     </label>
     <label class="api-field">自动压缩总结（历史超阈值时压最旧一半为摘要）
       <select id="api-autosummary">
