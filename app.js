@@ -112,6 +112,7 @@ function highlightText(text) {
 }
 
 // ---------- 消息容器与操作（重roll / 删除） ----------
+const rerollVersions = {};   // 版本历史：{ 锚点userSeq: [ {content, ts}, ... ] }（旧→新累积，支持多次重roll 回溯）
 function makeWrap(role, seq) {
   const wrap = document.createElement('div');
   wrap.className = 'msg-wrap';
@@ -143,6 +144,13 @@ function reroll(seq) {
   if (streaming) return;
   const idx = history.findIndex((m) => m.seq === seq);
   if (idx < 0) return;
+  // 记录旧版进版本链（锚点 = 该回复之前最近一条 user 消息的 seq；多次重roll 累积）
+  const oldMsg = history[idx];
+  let anchorSeq = seq;
+  for (let i = idx - 1; i >= 0; i--) { if (history[i].role === 'user') { anchorSeq = history[i].seq; break; } }
+  if (oldMsg && oldMsg.role === 'assistant') {
+    (rerollVersions[anchorSeq] = rerollVersions[anchorSeq] || []).push({ content: oldMsg.content, ts: Date.now() });
+  }
   history = history.slice(0, idx);          // 截断：该条及其后全部作废（旧文本不进 AI 上下文）
   // 同步清理回合记录：删除 seq >= n 的记账（旧回复的账本不残留）
   fetch('/api/timeline/truncate', {
@@ -150,7 +158,7 @@ function reroll(seq) {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ chatId, seq, mode: 'gte' }),
   }).catch(() => {});
-  // 旧气泡保留为「旧版本」样式（仅对比用，可删除；不参与后续上下文）
+  // 旧气泡保留为「旧版本」样式（仅对比用，可删除/可恢复；不参与后续上下文）
   const wrap = els.messages.querySelector(`.msg-wrap[data-seq="${seq}"]`);
   if (wrap) {
     let node = wrap.nextSibling;
@@ -162,17 +170,73 @@ function reroll(seq) {
       const tag = document.createElement('span');
       tag.className = 'alt-tag';
       tag.textContent = '旧版本';
-      tag.title = '重roll 前的回复（不进上下文，仅对比）';
+      tag.title = '重roll 前的回复（不进上下文，仅对比/可恢复）';
       bar.appendChild(tag);
+      const verIdx = (rerollVersions[anchorSeq] || []).length - 1;   // 本版本在链中的下标
+      const rst = document.createElement('button');
+      rst.className = 'ma-btn';
+      rst.textContent = '↩ 恢复此版';
+      rst.title = '放弃新回复，恢复这一版（可再切回其它版本）';
+      rst.addEventListener('click', () => restoreVersion(anchorSeq, verIdx, seq));
+      bar.appendChild(rst);
       const del = document.createElement('button');
       del.className = 'ma-btn del';
       del.textContent = '✕ 删旧版';
       del.title = '删除旧版本（仅移除对比气泡，不影响对话）';
-      del.addEventListener('click', () => wrap.remove());
+      del.addEventListener('click', () => { wrap.remove(); });
       bar.appendChild(del);
     }
   }
   generate();
+}
+
+// 恢复旧版本：移除当前最新 assistant 回复 → 旧版文本放回原位 → 旧气泡恢复为正常样式
+function restoreVersion(anchorSeq, verIdx, oldSeq) {
+  if (streaming) return;
+  const versions = rerollVersions[anchorSeq];
+  if (!versions || !versions[verIdx]) return;
+  const content = versions[verIdx].content;
+  // 1) 从 history 移除锚点之后的所有消息（当前链）
+  const anchorIdx = history.findIndex((m) => m.seq === anchorSeq);
+  if (anchorIdx < 0) return;
+  history = history.slice(0, anchorIdx + 1);
+  // 1.5) 清理锚点后的回合记录（重roll 后新回复的账本不残留）
+  fetch('/api/timeline/truncate', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ chatId, seq: anchorSeq + 1, mode: 'gte' }),
+  }).catch(() => {});
+  // 2) 旧版放回原位（新 seq，避免与已存消息冲突）
+  const newSeq = ++msgSeq;
+  history.push({ role: 'assistant', content, seq: newSeq });
+  saveChat();
+  // 3) DOM：删除旧版本气泡（本版转正），并移除其后所有气泡
+  const oldWrap = els.messages.querySelector(`.msg-wrap[data-seq="${oldSeq}"]`);
+  if (oldWrap) {
+    oldWrap.classList.remove('alt-version');
+    const bar = oldWrap.querySelector('.msg-actions');
+    if (bar) {
+      bar.innerHTML = '';
+      const rb = document.createElement('button');
+      rb.className = 'ma-btn';
+      rb.textContent = '↻';
+      rb.title = '重roll：重写该回复（其后的消息一并截断）';
+      rb.addEventListener('click', () => reroll(newSeq));
+      bar.appendChild(rb);
+      const db = document.createElement('button');
+      db.className = 'ma-btn del';
+      db.textContent = '✕';
+      db.title = '删除该消息';
+      db.addEventListener('click', () => deleteMsg(newSeq));
+      bar.appendChild(db);
+    }
+    let node = oldWrap.nextSibling;
+    while (node) { const next = node.nextSibling; node.remove(); node = next; }
+    // 重建气泡内容（显示旧版文本）
+    const bub = oldWrap.querySelector('.bubble');
+    if (bub) { bub.innerHTML = ''; bub.appendChild(document.createTextNode(stripTurnTags(content))); }
+  }
+  // 4) 其余旧版本气泡保留（可再切回）
 }
 
 function deleteMsg(seq) {
