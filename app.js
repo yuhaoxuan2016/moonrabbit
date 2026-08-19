@@ -134,6 +134,18 @@ function makeWrap(role, seq) {
       rb.addEventListener('click', () => reroll(seq));
       bar.appendChild(rb);
     }
+    const eb = document.createElement('button');
+    eb.className = 'ma-btn';
+    eb.textContent = '✏️';
+    eb.title = '编辑该消息内容';
+    eb.addEventListener('click', () => editMsg(seq));
+    bar.appendChild(eb);
+    const tb = document.createElement('button');
+    tb.className = 'ma-btn del';
+    tb.textContent = '✂️';
+    tb.title = '截断：删除该消息及其后所有消息（把剧情拉回正轨）';
+    tb.addEventListener('click', () => truncateTo(seq));
+    bar.appendChild(tb);
     const db = document.createElement('button');
     db.className = 'ma-btn del';
     db.textContent = '✕';
@@ -262,6 +274,98 @@ function deleteMsg(seq) {
   const wrap = els.messages.querySelector(`.msg-wrap[data-seq="${seq}"]`);
   if (wrap) wrap.remove();
   saveChat();
+}
+
+// ---------- 对话编辑（✏️ 编辑消息 / ✂️ 截断至此） ----------
+function editMsg(seq) {
+  if (streaming) return;
+  const idx = history.findIndex((m) => m.seq === seq);
+  if (idx < 0) return;
+  const wrap = els.messages.querySelector(`.msg-wrap[data-seq="${seq}"]`);
+  if (!wrap) return;
+  if (wrap.querySelector('.edit-box')) return;   // 已在编辑中
+  const ta = document.createElement('textarea');
+  ta.className = 'edit-box';
+  ta.value = stripTurnTags(history[idx].content);
+  const btnRow = document.createElement('div');
+  btnRow.className = 'edit-actions';
+  const ok = document.createElement('button');
+  ok.className = 'ma-btn';
+  ok.textContent = '保存';
+  ok.addEventListener('click', () => {
+    const text = ta.value.trim();
+    if (!text) return;
+    history[idx].content = text;
+    saveChat();
+    rebuildMsgWrap(wrap, history[idx].role, text, seq);
+  });
+  const cancel = document.createElement('button');
+  cancel.className = 'ma-btn del';
+  cancel.textContent = '取消';
+  cancel.addEventListener('click', () => rebuildMsgWrap(wrap, history[idx].role, history[idx].content, seq));
+  btnRow.appendChild(ok);
+  btnRow.appendChild(cancel);
+  // 清空操作栏以外内容 → 换成编辑器
+  const bar = wrap.querySelector('.msg-actions');
+  let node = wrap.firstChild;
+  while (node) { const next = node.nextSibling; if (node !== bar) node.remove(); node = next; }
+  wrap.appendChild(ta);
+  wrap.appendChild(btnRow);
+  ta.focus();
+}
+
+function truncateTo(seq) {
+  if (streaming) return;
+  const idx = history.findIndex((m) => m.seq === seq);
+  if (idx < 0) return;
+  if (!confirm(`截断：删除该消息及其后所有消息（${history.length} → ${idx} 条）？\n用于把剧情拉回正轨；旧内容在 data 子仓检查点可找回。`)) return;
+  history = history.slice(0, idx);
+  fetch('/api/timeline/truncate', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ chatId, seq, mode: 'gte' }),
+  }).catch(() => {});
+  const wrap = els.messages.querySelector(`.msg-wrap[data-seq="${seq}"]`);
+  if (wrap) {
+    let node = wrap;
+    while (node) { const next = node.nextSibling; node.remove(); node = next; }
+  }
+  saveChat();
+}
+
+// 重建单个消息气泡（编辑保存/取消后，结构简化为单段）
+function rebuildMsgWrap(wrap, role, content, seq) {
+  const bar = wrap.querySelector('.msg-actions');
+  let node = wrap.firstChild;
+  while (node) { const next = node.nextSibling; if (node !== bar) node.remove(); node = next; }
+  const row = document.createElement('div');
+  const body = document.createElement('div');
+  body.style.flex = '1';
+  const bub = document.createElement('div');
+  bub.className = 'bubble';
+  bub.innerHTML = highlightText(content);
+  body.appendChild(bub);
+  if (role === 'user') {
+    row.className = 'msg user';
+    const av = document.createElement('div');
+    av.className = 'avatar';
+    av.style.borderColor = '#60a5fa';
+    av.innerHTML = avatarHtml('rabbit');
+    const nm = document.createElement('div');
+    nm.className = 'char-name';
+    nm.textContent = 'rabbit（你）';
+    body.insertBefore(nm, bub);
+    row.appendChild(av);
+  } else {
+    row.className = 'msg narrator';
+    const av = document.createElement('div');
+    av.className = 'avatar';
+    av.textContent = '旁';
+    row.appendChild(av);
+  }
+  row.appendChild(body);
+  wrap.appendChild(row);
+  els.messages.scrollTop = els.messages.scrollHeight;
 }
 
 // 记账标签剥离（仅显示层）：<storyevent>/<items>/【更新】不显示在气泡里；原文仍在 history/存档中

@@ -148,6 +148,14 @@ main { flex: 1; display: flex; min-height: 0; }
 }
 .ma-btn:hover { border-color: var(--accent); color: var(--text); }
 .ma-btn.del:hover { border-color: #f0a3a3; color: #f0a3a3; }
+/* 对话编辑（✏️ 编辑 / ✂️ 截断） */
+.edit-box {
+  width: 100%; box-sizing: border-box; margin: 4px 0;
+  background: var(--bg2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px; font: inherit; line-height: 1.6;
+  min-height: 90px; resize: vertical;
+}
+.edit-actions { display: flex; gap: 6px; margin-bottom: 4px; }
 /* 重roll 旧版本（保留对比，不进上下文） */
 .msg-wrap.alt-version { opacity: 0.62; }
 .msg-wrap.alt-version .bubble { border-style: dashed; background: var(--bg2); }
