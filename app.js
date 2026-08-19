@@ -1330,9 +1330,11 @@ function fmtTok(n) {
 async function loadStats() {
   try {
     const s = await (await fetch('/api/stats?chatId=' + encodeURIComponent(chatId))).json();
-    const c = s.current, t = s.total;
-    const chatRate = s.chat ? s.chat.cacheRate : null;
-    statsBar.innerHTML = `模型 <b>${s.model}</b> | <b>${c.turns}</b> 轮 · <b>${c.calls}</b> 次调用 | LLM 总耗时 <b>${fmtDur(c.llmSec)}</b> | 首 token 平均 <b>${(c.firstTokenAvgMs / 1000).toFixed(1)}s</b> · <b>${c.tokPerSec}</b> tok/s | 缓存命中 <b>${chatRate != null ? chatRate + '%' : '—'}</b>（本对话）· 累计 <b>${t.cacheRate}%</b> | 输入 <b>${fmtTok(c.tokensIn)}</b> · 输出 <b>${fmtTok(c.tokensOut)}</b> tok | 全部: <b>${t.turns}</b> 轮 · <b>${fmtTok(t.tokensIn + t.tokensOut)}</b> tok`;
+    const c = s.current, t = s.total, ch = s.chat;
+    const chatTxt = ch
+      ? `<b>${ch.turns}</b> 轮 · <b>${ch.calls}</b> 次调用 | LLM 总耗时 <b>${fmtDur(ch.llmSec)}</b> | 首 token 平均 <b>${(ch.firstTokenAvgMs / 1000).toFixed(1)}s</b> · <b>${ch.tokPerSec}</b> tok/s | 缓存命中 <b>${ch.cacheRate}%</b> | 输入 <b>${fmtTok(ch.tokensIn)}</b> · 输出 <b>${fmtTok(ch.tokensOut)}</b> tok`
+      : `—`;
+    statsBar.innerHTML = `模型 <b>${s.model}</b> | 本对话 ${chatTxt} | 累计 <b>${c.turns}</b> 轮 · 缓存 <b>${c.cacheRate}%</b> · <b>${fmtTok(c.tokensIn + c.tokensOut)}</b> tok | 全部 <b>${t.turns}</b> 轮 · 缓存 <b>${t.cacheRate}%</b> · <b>${fmtTok(t.tokensIn + t.tokensOut)}</b> tok`;
   } catch (e) { /* 忽略 */ }
 }
 

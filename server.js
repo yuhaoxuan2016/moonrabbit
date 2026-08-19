@@ -1318,13 +1318,10 @@ const server = http.createServer(async (req, res) => {
       return acc;
     }, emptyBucket());
     const t = summarize(total);
-    // 本对话缓存命中（?chatId= 指定会话；累计口径见 total）
+    // 本对话统计（?chatId= 指定会话的完整桶；累计口径见 current/total）
     const qcid = (url.searchParams.get('chatId') || '').trim();
-    const cb = qcid ? (stats.byChat[sanitizeId(qcid)] || { cacheRead: 0, cacheMiss: 0 }) : null;
-    const chat = cb ? {
-      cacheRead: cb.cacheRead, cacheMiss: cb.cacheMiss,
-      cacheRate: (cb.cacheRead + cb.cacheMiss) > 0 ? Math.round((cb.cacheRead / (cb.cacheRead + cb.cacheMiss)) * 100) : 100,
-    } : null;
+    const cb = qcid ? (stats.byChat[sanitizeId(qcid)] || null) : null;
+    const chat = cb ? summarize(cb) : null;
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify({ model: ENDPOINT.model, current: cur, total: t, chat }));
   }
@@ -1599,10 +1596,17 @@ const server = http.createServer(async (req, res) => {
       b.tokensOut += uOut.output_tokens || uOut.completion_tokens || 0;
       b.cacheRead += cacheRead;
       b.cacheMiss += inTok + cacheCreate;
-      // 缓存命中按对话另计（本对话口径；累计口径在 /api/stats 的 total 汇总）
+      // 本对话统计另计（完整桶；累计口径在 /api/stats 的 current/total 汇总）
       const cid = payload.chatId ? sanitizeId(payload.chatId) : '';
       if (cid) {
-        const cb = stats.byChat[cid] || (stats.byChat[cid] = { cacheRead: 0, cacheMiss: 0 });
+        let cb = stats.byChat[cid];
+        if (!cb || cb.turns == null) cb = stats.byChat[cid] = Object.assign(emptyBucket(), cb || {});
+        cb.turns += 1;
+        cb.calls += 1;
+        cb.llmMs += Date.now() - t0;
+        if (firstTokenAt) { cb.firstTokenSum += firstTokenAt - t0; cb.firstTokenN += 1; }
+        cb.tokensIn += inTok + cacheRead + cacheCreate;
+        cb.tokensOut += uOut.output_tokens || uOut.completion_tokens || 0;
         cb.cacheRead += cacheRead;
         cb.cacheMiss += inTok + cacheCreate;
       }
