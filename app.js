@@ -557,6 +557,7 @@ async function openChat(id) {
     loadInventory();
     loadCurrentWardrobe();
     loadSessionNote();   // 会话常驻设定按会话加载
+    loadStats();   // 统计栏按对话口径刷新（缓存命中）
   } catch (e) { /* 忽略 */ }
 }
 
@@ -1328,9 +1329,10 @@ function fmtTok(n) {
 }
 async function loadStats() {
   try {
-    const s = await (await fetch('/api/stats')).json();
+    const s = await (await fetch('/api/stats?chatId=' + encodeURIComponent(chatId))).json();
     const c = s.current, t = s.total;
-    statsBar.innerHTML = `模型 <b>${s.model}</b> | <b>${c.turns}</b> 轮 · <b>${c.calls}</b> 次调用 | LLM 总耗时 <b>${fmtDur(c.llmSec)}</b> | 首 token 平均 <b>${(c.firstTokenAvgMs / 1000).toFixed(1)}s</b> · <b>${c.tokPerSec}</b> tok/s | 缓存命中 <b>${c.cacheRate}%</b> | 输入 <b>${fmtTok(c.tokensIn)}</b> · 输出 <b>${fmtTok(c.tokensOut)}</b> tok | 全部: <b>${t.turns}</b> 轮 · <b>${fmtTok(t.tokensIn + t.tokensOut)}</b> tok`;
+    const chatRate = s.chat ? s.chat.cacheRate : null;
+    statsBar.innerHTML = `模型 <b>${s.model}</b> | <b>${c.turns}</b> 轮 · <b>${c.calls}</b> 次调用 | LLM 总耗时 <b>${fmtDur(c.llmSec)}</b> | 首 token 平均 <b>${(c.firstTokenAvgMs / 1000).toFixed(1)}s</b> · <b>${c.tokPerSec}</b> tok/s | 缓存命中 <b>${chatRate != null ? chatRate + '%' : '—'}</b>（本对话）· 累计 <b>${t.cacheRate}%</b> | 输入 <b>${fmtTok(c.tokensIn)}</b> · 输出 <b>${fmtTok(c.tokensOut)}</b> tok | 全部: <b>${t.turns}</b> 轮 · <b>${fmtTok(t.tokensIn + t.tokensOut)}</b> tok`;
   } catch (e) { /* 忽略 */ }
 }
 

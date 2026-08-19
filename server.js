@@ -523,10 +523,10 @@ function emptyBucket() {
 function loadStats() {
   try {
     const raw = JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'));
-    if (raw.byModel) return raw;   // v2：按模型分桶
+    if (raw.byModel) { if (!raw.byChat) raw.byChat = {}; return raw; }   // v2/v3：按模型分桶 + 按对话缓存统计
     const b = Object.assign(emptyBucket(), raw);
-    return { byModel: { [ENDPOINT.model]: b } };
-  } catch (e) { return { byModel: {} }; }
+    return { byModel: { [ENDPOINT.model]: b }, byChat: {} };
+  } catch (e) { return { byModel: {}, byChat: {} }; }
 }
 const stats = loadStats();
 function bucket(model) {
@@ -1318,8 +1318,15 @@ const server = http.createServer(async (req, res) => {
       return acc;
     }, emptyBucket());
     const t = summarize(total);
+    // 本对话缓存命中（?chatId= 指定会话；累计口径见 total）
+    const qcid = (url.searchParams.get('chatId') || '').trim();
+    const cb = qcid ? (stats.byChat[sanitizeId(qcid)] || { cacheRead: 0, cacheMiss: 0 }) : null;
+    const chat = cb ? {
+      cacheRead: cb.cacheRead, cacheMiss: cb.cacheMiss,
+      cacheRate: (cb.cacheRead + cb.cacheMiss) > 0 ? Math.round((cb.cacheRead / (cb.cacheRead + cb.cacheMiss)) * 100) : 100,
+    } : null;
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ model: ENDPOINT.model, current: cur, total: t }));
+    return res.end(JSON.stringify({ model: ENDPOINT.model, current: cur, total: t, chat }));
   }
 
   // 剧情记忆：时间线 / 物品栏 / 导出（按会话 chatId 隔离）
@@ -1592,6 +1599,13 @@ const server = http.createServer(async (req, res) => {
       b.tokensOut += uOut.output_tokens || uOut.completion_tokens || 0;
       b.cacheRead += cacheRead;
       b.cacheMiss += inTok + cacheCreate;
+      // 缓存命中按对话另计（本对话口径；累计口径在 /api/stats 的 total 汇总）
+      const cid = payload.chatId ? sanitizeId(payload.chatId) : '';
+      if (cid) {
+        const cb = stats.byChat[cid] || (stats.byChat[cid] = { cacheRead: 0, cacheMiss: 0 });
+        cb.cacheRead += cacheRead;
+        cb.cacheMiss += inTok + cacheCreate;
+      }
       saveStats();
       appendTurnRecord(acc, payload.chatId, payload.seq);  // 剧情记忆：按会话自动记账（带消息序号）
       if (toolTrace && toolTrace.length) appendOpRecord(payload.chatId, '工具调用', toolTrace.map((t) => t.name + ':' + String(t.input.query || '').slice(0, 40)).join('；'));
