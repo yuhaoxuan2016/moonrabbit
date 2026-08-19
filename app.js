@@ -15,6 +15,12 @@ const els = {
   manAttachOk: document.getElementById('man-attach-ok'),
   manAttachCancel: document.getElementById('man-attach-cancel'),
   manAttachNote: document.getElementById('man-attach-note'),
+  noteAttachBtn: document.getElementById('note-attach-btn'),
+  noteAttachBox: document.getElementById('note-attach-box'),
+  noteAttachInput: document.getElementById('note-attach-input'),
+  noteAttachOk: document.getElementById('note-attach-ok'),
+  noteAttachCancel: document.getElementById('note-attach-cancel'),
+  noteAttachNote: document.getElementById('note-attach-note'),
 };
 
 let pendingContext = '';   // 手动附加资料 → 下一条消息附带（不进对话历史）
@@ -521,6 +527,7 @@ async function newChat() {
     loadChatList();
     loadTimeline();   // 剧情记忆按会话隔离，切会话后刷新
     loadInventory();
+    loadSessionNote();   // 会话常驻设定按会话加载（新会话为空）
   } catch (e) { /* 忽略 */ }
 }
 
@@ -549,6 +556,7 @@ async function openChat(id) {
     loadTimeline();   // 剧情记忆按会话隔离，切会话后刷新
     loadInventory();
     loadCurrentWardrobe();
+    loadSessionNote();   // 会话常驻设定按会话加载
   } catch (e) { /* 忽略 */ }
 }
 
@@ -1350,6 +1358,46 @@ els.manAttachOk.addEventListener('click', () => {
   els.manAttachNote.classList.remove('hidden');
 });
 
+// ---------- 会话常驻设定（📌 每轮注入 system，防遗忘；按会话隔离） ----------
+async function loadSessionNote() {
+  try {
+    const r = await (await fetch('/api/op/note', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId, get: true }),
+    })).json();
+    if (r && r.note) {
+      els.noteAttachInput.value = r.note;
+      els.noteAttachBtn.textContent = '📌 会话常驻设定（已设置，点击查看/修改）';
+    } else {
+      els.noteAttachInput.value = '';
+      els.noteAttachBtn.textContent = '📌 会话常驻设定（每轮注入，防遗忘）';
+    }
+  } catch (e) { /* 忽略 */ }
+}
+els.noteAttachBtn.addEventListener('click', () => {
+  els.noteAttachBox.classList.toggle('hidden');
+});
+els.noteAttachCancel.addEventListener('click', () => {
+  els.noteAttachBox.classList.add('hidden');
+});
+els.noteAttachOk.addEventListener('click', async () => {
+  const text = els.noteAttachInput.value.trim();
+  try {
+    const r = await (await fetch('/api/op/note', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId, note: text }),
+    })).json();
+    if (r && r.ok) {
+      els.noteAttachBox.classList.add('hidden');
+      els.noteAttachNote.classList.remove('hidden');
+      setTimeout(() => els.noteAttachNote.classList.add('hidden'), 2500);
+      loadSessionNote();
+    }
+  } catch (e) { /* 忽略 */ }
+});
+
 // ---------- 启动 ----------
 document.getElementById('card-world').style.display = '';
 renderSettings();
@@ -1359,6 +1407,7 @@ updatePeakBanner();
 setInterval(updatePeakBanner, 60000);
 loadTimeline();
 loadCurrentWardrobe();
+loadSessionNote();
 loadStats();
 loadModel();
 maybeStartTour();

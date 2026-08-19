@@ -498,7 +498,7 @@ fs.mkdirSync(CHATS_DIR, { recursive: true });
 
 // ---------- 界面操作状态（视角 / 当日着装覆盖，会话内持久，注入 system + 记账） ----------
 const OP_FILE = path.join(DATA_DIR, 'op.json');
-let opState = { views: {}, wardrobes: {}, expands: {}, tools: {} };   // views/wardrobes/expands/tools: {chatId: ...}
+let opState = { views: {}, wardrobes: {}, expands: {}, tools: {}, notes: {} };   // views/wardrobes/expands/tools/notes: {chatId: ...}
 try { opState = Object.assign(opState, JSON.parse(fs.readFileSync(OP_FILE, 'utf8'))); } catch (e) { /* 首次 */ }
 function saveOpState() {
   try { fs.writeFileSync(OP_FILE, JSON.stringify(opState), 'utf8'); } catch (e) { /* 忽略 */ }
@@ -634,6 +634,7 @@ function setEmotion(chatId, name, emo) {
 function opInject(chatId) {
   const cid = sanitizeId(chatId);
   const lines = [];
+  if (opState.notes[cid] && String(opState.notes[cid]).trim()) lines.push(`- 📌 会话常驻设定（用户保存，每轮必读，优先级最高；与「世界设定」/检索内容冲突时以此为准）：\n${String(opState.notes[cid]).trim()}`);
   if (opState.views[cid]) lines.push(`- 当前视角覆盖：${opState.views[cid]}（用户已在界面切换视角；你必须以该角色的主观视角叙述——与设定中记录的视角冲突时，以本覆盖为准。严格遵守信息屏障：主场景角色无法感知副场景事件）`);
   if (opState.wardrobes[cid]) lines.push(`- 当日着装覆盖：${opState.wardrobes[cid]}（用户已在界面换装；以此为准，覆盖设定中的当日着装描述）`);
   if (opState.expands[cid]) lines.push('- 【扩写指令（已开启）】当用户发来简短指令（如「角色去厨房」「角色站起来」）时，你的任务是将其【扩写】为详细、生动的动作/场景/台词描写：用第三人称叙述该角色的行为（动作细节、表情、环境、心理），符合人设；扩写要连贯、有画面感、贴合当前场景；不要替其他角色做决定；扩写后可自然衔接台词。');
@@ -1162,6 +1163,27 @@ const server = http.createServer(async (req, res) => {
       appendOpRecord(cid, '工具桥', sel.length ? sel.map((n) => BRIDGE_TOOL_LABELS[n] || n).join('、') : '关闭');
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ ok: true, tools: sel, note: sel.length ? '工具桥已开启：' + sel.map((n) => BRIDGE_TOOL_LABELS[n] || n).join('、') : '工具桥已关闭' }));
+    } catch (e) {
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ error: String(e) }));
+    }
+  }
+  // 界面操作：会话常驻设定（📌 每轮注入 system，不被上下文裁剪；按会话隔离）
+  if (p === '/api/op/note' && req.method === 'POST') {
+    let body = '';
+    for await (const c of req) body += c;
+    try {
+      const { chatId, note, get } = JSON.parse(body);
+      const cid = sanitizeId(chatId || '');
+      if (get) {
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ note: opState.notes[cid] || '' }));
+      }
+      const n = String(note || '').trim();
+      if (n) opState.notes[cid] = n; else delete opState.notes[cid];
+      saveOpState();
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok: true, saved: !!n, note: n ? '会话常驻设定已保存（每轮注入 system）' : '会话常驻设定已清空' }));
     } catch (e) {
       res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ error: String(e) }));
