@@ -1898,6 +1898,13 @@ els.input.addEventListener('paste', (e) => {
         const imgTag = `![pasted-image](${base64})`;
         els.input.value = text.slice(0, cursor) + imgTag + text.slice(cursor);
         els.input.focus();
+        // 视觉模型提示（Task17 增强）：服务端按模型判定——含 vision 的模型图片直传，否则降级 [图片]
+        const sb = document.getElementById('stats-bar');
+        if (sb) {
+          const old = sb.textContent;
+          sb.innerHTML = sb.innerHTML + ' <span style="color:#a78bfa">📷 图片已粘贴（当前模型支持视觉则直传，否则降级为占位符）</span>';
+          setTimeout(() => { if (sb && sb.textContent !== old) sb.innerHTML = old; }, 4000);
+        }
       };
       reader.readAsDataURL(file);
     }

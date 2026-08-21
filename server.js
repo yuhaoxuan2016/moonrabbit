@@ -473,6 +473,27 @@ async function readBody(req, maxBytes = BODY_MAX_BYTES) {
   return body;
 }
 
+// 多模态消息协议适配：视觉模型时把 content 数组（openai 格式 image_url 块）转成 anthropic 图片块；
+// 非视觉模型/纯文本消息原样返回。图片块形如 {type:'image_url', image_url:{url:'data:image/png;base64,...'}}
+function adaptVisionContent(msg, protocol) {
+  const c = msg.content;
+  if (typeof c !== 'object' || !Array.isArray(c)) return msg;
+  if (protocol !== 'anthropic') return msg;   // openai 原生支持 image_url 块
+  const out = [];
+  for (const part of c) {
+    if (part.type === 'text') { out.push(part); continue; }
+    if (part.type === 'image_url' && part.image_url && typeof part.image_url.url === 'string') {
+      const m = part.image_url.url.match(/^data:image\/([a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/);
+      if (m) {
+        out.push({ type: 'image', source: { type: 'base64', media_type: `image/${m[1]}`, data: m[2] } });
+        continue;
+      }
+    }
+    out.push({ type: 'text', text: '[图片]' });   // 未知格式兜底
+  }
+  return { ...msg, content: out };
+}
+
 // ---------- LLM 调用（Anthropic / OpenAI 双协议，流式；onThinking 回调思考链） ----------
 async function callLLM(messages, system, onDelta, onMeta, onThinking, signal) {
   const ep = ENDPOINT;
@@ -551,7 +572,7 @@ async function callLLM(messages, system, onDelta, onMeta, onThinking, signal) {
       return;
     }
     // anthropic 协议（默认）
-    const body = { model: ep.model, system, messages, max_tokens: ep.maxTokens || 8192, stream: true };
+    const body = { model: ep.model, system, messages: messages.map((m) => adaptVisionContent(m, 'anthropic')), max_tokens: ep.maxTokens || 8192, stream: true };
     if (ep.thinking === 'disabled') body.thinking = { type: 'disabled' };
     else if (ep.thinking !== 'auto') {
       const mode = ep.thinking === 'enabled' ? 'high' : ep.thinking;   // 旧值兼容
@@ -1984,9 +2005,27 @@ const server = http.createServer(async (req, res) => {
         }
       } catch (e) { console.error('[bridge] 工具回合失败:', e.message); }
     }
-    // 图片降级（M7）：base64 图片不进 LLM（单图可达百万字符、双图超 2MB body 限制），
-    // 发送前替换为占位符文本（气泡渲染不受影响——前端 history 仍是原图）
-    merged = merged.map((m) => ({ ...m, content: String(m.content || '').replace(/!\[[^\]]*\]\(data:image\/[^)]+\)/g, '[图片]') }));
+    // 图片处理（M7 升级：视觉模型 → 图片以多模态格式进 LLM；非视觉模型 → 降级占位符）
+    // 视觉模型判定：模型名含 vision（如 deepseek-v4-flash-vision-exp）
+    const isVision = /vision/i.test(ENDPOINT.model || '');
+    const IMG_RE = /!\[[^\]]*\]\((data:image\/([a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=]+))\)/g;
+    merged = merged.map((m) => {
+      const text = String(m.content || '');
+      if (!isVision) return { ...m, content: text.replace(IMG_RE, '[图片]') };
+      // 视觉模型：单条消息内图文混合 → content 数组（openai 格式）；anthropic 走 messages 转换
+      if (!IMG_RE.test(text)) return m;
+      IMG_RE.lastIndex = 0;
+      const parts = [];
+      let last = 0, mm;
+      while ((mm = IMG_RE.exec(text)) !== null) {
+        if (mm.index > last) parts.push({ type: 'text', text: text.slice(last, mm.index) });
+        parts.push({ type: 'image_url', image_url: { url: mm[1] } });
+        last = mm.index + mm[0].length;
+      }
+      if (last < text.length) parts.push({ type: 'text', text: text.slice(last) });
+      // 仅当整条消息恰为单段文本时才折叠为字符串；含图一律保留数组（单图无文字时 parts=[image_url]，不能取 .text）
+      return parts.length === 1 && parts[0].type === 'text' ? parts[0].text : parts;
+    });
     try {
       await callLLM(merged, system, (text) => {
         if (!firstTokenAt) firstTokenAt = Date.now();
