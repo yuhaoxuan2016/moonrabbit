@@ -82,7 +82,8 @@ let streaming = false;
 // ---------- 渲染 ----------
 // 无立绘：一律首字徽章（通用版无任何角色图片素材）
 function avatarHtml(name) {
-  return `<span class="avatar-badge" style="background:${nameColor(name)}">${(name || '?').slice(0, 1)}</span>`;
+  const ch = String(name || '?').slice(0, 1).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return `<span class="avatar-badge" style="background:${nameColor(name)}">${ch}</span>`;
 }
 
 function parseSegments(text) {
