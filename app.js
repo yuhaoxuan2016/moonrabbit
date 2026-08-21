@@ -584,15 +584,63 @@ async function saveChat() {
   if (!chatId) return;
   const firstUser = history.find((m) => m.role === 'user');
   const title = chatTitle || (firstUser ? firstUser.content.slice(0, 24) : '新对话');
-  try {
-    await fetch('/api/chats/' + chatId, {
+  // 失败自动重试 1 次（500ms 后）；仍失败 → 状态栏提示（不静默丢数据）
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await fetch('/api/chats/' + chatId, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ title, messages: history }),
+      });
+      if (r.ok) { chatTitle = title; return; }
+    } catch (e) { /* 网络异常 → 重试 */ }
+    if (attempt === 0) await new Promise((res) => setTimeout(res, 500));
+  }
+  const sb = document.getElementById('stats-bar');
+  if (sb) {
+    const old = sb.textContent;
+    sb.textContent = '⚠️ 对话保存失败（将重试）';
+    setTimeout(() => { if (sb.textContent.includes('保存失败')) sb.textContent = old; }, 4000);
+  }
+  // 后台再补一次（异步、尽力而为）
+  setTimeout(() => {
+    fetch('/api/chats/' + chatId, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ title, messages: history }),
-    });
-    chatTitle = title;
-  } catch (e) { /* 忽略 */ }
+    }).catch(() => {});
+  }, 3000);
 }
+
+// ---------- 会话导出（JSON 完整备份 / Markdown 可读版；随手备份） ----------
+function downloadBlob(filename, content, type) {
+  const blob = new Blob([content], { type });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+}
+function exportChat(md) {
+  if (!chatId || !history.length) { alert('当前会话为空，无内容可导出'); return; }
+  const firstUser = history.find((m) => m.role === 'user');
+  const title = chatTitle || (firstUser ? firstUser.content.slice(0, 24) : '新对话');
+  const safeTitle = title.replace(/[\\/:*?"<>|]/g, '_').slice(0, 40);
+  if (!md) {
+    downloadBlob(`${safeTitle}.json`, JSON.stringify({ id: chatId, title, exportedAt: new Date().toISOString(), messages: history }, null, 2), 'application/json');
+  } else {
+    const lines = [`# ${title}`, '', `> 导出时间：${new Date().toLocaleString()}`, ''];
+    for (const m of history) {
+      const who = m.role === 'user' ? '你' : 'AI';
+      lines.push(`## ${who}`, '', String(m.content || ''), '');
+    }
+    downloadBlob(`${safeTitle}.md`, lines.join('\n'), 'text/markdown;charset=utf-8');
+  }
+}
+document.getElementById('export-btn').addEventListener('click', () => exportChat(false));
+document.getElementById('export-md-btn').addEventListener('click', () => exportChat(true));
 
 async function loadChatList() {
   const box = document.getElementById('chat-list');
@@ -1704,6 +1752,17 @@ loadSessionNote();
 loadStats();
 loadModel();
 loadProfiles();
+// 多标签页同步：另一 tab 切换会话/改偏好时本页跟随（避免互相覆盖）
+window.addEventListener('storage', (e) => {
+  if (!e.newValue) return;
+  if (e.key === CUR_CHAT_KEY && e.newValue !== chatId) {
+    fetch('/api/chats/' + e.newValue).then((r) => r.json()).then((c) => {
+      if (c && !c.error && (c.messages || []).length) openChat(e.newValue);
+    }).catch(() => {});
+  } else if (e.key === PREFS_KEY || e.key === 'mr-custom-skin') {
+    location.reload();   // 主题/背景/侧栏偏好：刷新应用
+  }
+});
 maybeStartTour();
 setInterval(loadStats, 15000);
 

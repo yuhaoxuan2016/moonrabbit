@@ -56,7 +56,9 @@ function readText(file) {
   } catch (e) { return ''; }
 }
 
-// ---------- 变化驱动省 token：文件内容 hash 缓存（未变化不重读） ----------
+// ---------- 变化驱动省 token（mtime+size 键缓存，未变不重读） ----------
+// 同一文件（mtime+size 未变）复用读取结果，只有元数据变化才重读；
+// hash 字段供 readHash() 生成 system 拼装缓存签名（规则/角色卡/世界观变化 → 签名变化 → 缓存失效）。
 const readCache = new Map();   // file -> {key, hash, text}
 function hashText(s) {
   let h = 0x811c9dc5;
@@ -418,31 +420,107 @@ function buildInventory(chatId) {
   };
 }
 
+// ---------- 请求体读取（统一上限，防异常数据撑爆内存；超限抛 413 错误） ----------
+const BODY_MAX_BYTES = 2 * 1024 * 1024;   // 2MB（对话历史 + system 注入的上限足够）
+async function readBody(req, maxBytes = BODY_MAX_BYTES) {
+  let body = '';
+  let total = 0;
+  for await (const c of req) {
+    total += c.length;
+    if (total > maxBytes) {
+      const err = new Error(`请求体过大（>${Math.round(maxBytes / 1024)}KB），已拒绝`);
+      err.statusCode = 413;
+      throw err;
+    }
+    body += c;
+  }
+  return body;
+}
+
 // ---------- LLM 调用（Anthropic / OpenAI 双协议，流式；onThinking 回调思考链） ----------
-async function callLLM(messages, system, onDelta, onMeta, onThinking) {
+async function callLLM(messages, system, onDelta, onMeta, onThinking, signal) {
   const ep = ENDPOINT;
-  if (ep.protocol === 'openai') {
-    const body = {
-      model: ep.model,
-      messages: [{ role: 'system', content: system }, ...messages],
-      stream: true,
-      max_tokens: ep.maxTokens || 8192,
-    };
-    if (ep.thinking === 'low') body.reasoning_effort = 'low';
-    else if (ep.thinking === 'medium') body.reasoning_effort = 'medium';
-    else if (ep.thinking === 'high' || ep.thinking === 'custom' || ep.thinking === 'enabled') body.reasoning_effort = 'high';
-    else if (ep.thinking === 'max') body.reasoning_effort = 'max';
-    // 采样参数（来自当前预设；top_k 仅 Anthropic 支持）
+  let emitted = false;   // 已有输出（delta/thinking）→ 失败时不重试，避免重复输出
+  // 单次调用（openai/anthropic 双协议）；signal 用于客户端断连中止（SSE abort）
+  const attempt = async () => {
+    const emitDelta = (t) => { emitted = true; onDelta(t); };
+    const emitThink = (t) => { emitted = true; onThinking && onThinking(t); };
+    if (ep.protocol === 'openai') {
+      const body = {
+        model: ep.model,
+        messages: [{ role: 'system', content: system }, ...messages],
+        stream: true,
+        max_tokens: ep.maxTokens || 8192,
+      };
+      if (ep.thinking === 'low') body.reasoning_effort = 'low';
+      else if (ep.thinking === 'medium') body.reasoning_effort = 'medium';
+      else if (ep.thinking === 'high' || ep.thinking === 'custom' || ep.thinking === 'enabled') body.reasoning_effort = 'high';
+      else if (ep.thinking === 'max') body.reasoning_effort = 'max';
+      // 采样参数（来自当前预设；top_k 仅 Anthropic 支持）
+      if (SAMPLERS.temperature != null) body.temperature = SAMPLERS.temperature;
+      if (SAMPLERS.top_p != null) body.top_p = SAMPLERS.top_p;
+      if (SAMPLERS.presence_penalty != null) body.presence_penalty = SAMPLERS.presence_penalty;
+      if (SAMPLERS.frequency_penalty != null) body.frequency_penalty = SAMPLERS.frequency_penalty;
+      const resp = await fetch(`${ep.baseURL}/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${ep.apiKey}` },
+        body: JSON.stringify(body),
+        signal,
+      });
+      if (!resp.ok) throw new Error(`LLM ${resp.status}: ${(await resp.text()).slice(0, 400)}`);
+      const reader = resp.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, idx).trim();
+          buf = buf.slice(idx + 1);
+          if (!line.startsWith('data:')) continue;
+          const data = line.slice(5).trim();
+          if (!data || data === '[DONE]') continue;
+          try {
+            const ev = JSON.parse(data);
+            const delta = ev.choices && ev.choices[0] && ev.choices[0].delta;
+            if (delta) {
+              if (typeof delta.content === 'string' && delta.content) emitDelta(delta.content);
+              if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) emitThink(delta.reasoning_content);
+            }
+            if (ev.usage) onMeta && onMeta({ usageIn: ev.usage, usageOut: ev.usage });
+          } catch (e) { /* 忽略残缺行 */ }
+        }
+      }
+      return;
+    }
+    // anthropic 协议（默认）
+    const body = { model: ep.model, system, messages, max_tokens: ep.maxTokens || 8192, stream: true };
+    if (ep.thinking === 'disabled') body.thinking = { type: 'disabled' };
+    else if (ep.thinking !== 'auto') {
+      const mode = ep.thinking === 'enabled' ? 'high' : ep.thinking;   // 旧值兼容
+      const budget = mode === 'custom' ? (ep.thinkingBudget || 32768) : (THINK_BUDGET[mode] || 8192);
+      body.thinking = { type: 'enabled', budget_tokens: budget };
+    }
+    // 采样参数（来自当前预设；presence/frequency_penalty 仅 OpenAI 支持）
     if (SAMPLERS.temperature != null) body.temperature = SAMPLERS.temperature;
     if (SAMPLERS.top_p != null) body.top_p = SAMPLERS.top_p;
-    if (SAMPLERS.presence_penalty != null) body.presence_penalty = SAMPLERS.presence_penalty;
-    if (SAMPLERS.frequency_penalty != null) body.frequency_penalty = SAMPLERS.frequency_penalty;
-    const resp = await fetch(`${ep.baseURL}/chat/completions`, {
+    if (SAMPLERS.top_k != null) body.top_k = SAMPLERS.top_k;
+    const resp = await fetch(`${ep.baseURL}/messages`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${ep.apiKey}` },
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': ep.apiKey,
+        'anthropic-version': '2023-06-01',
+      },
       body: JSON.stringify(body),
+      signal,
     });
-    if (!resp.ok) throw new Error(`LLM ${resp.status}: ${(await resp.text()).slice(0, 400)}`);
+    if (!resp.ok) {
+      const err = await resp.text();
+      throw new Error(`LLM ${resp.status}: ${err.slice(0, 400)}`);
+    }
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
@@ -459,71 +537,30 @@ async function callLLM(messages, system, onDelta, onMeta, onThinking) {
         if (!data || data === '[DONE]') continue;
         try {
           const ev = JSON.parse(data);
-          const delta = ev.choices && ev.choices[0] && ev.choices[0].delta;
-          if (delta) {
-            if (typeof delta.content === 'string' && delta.content) onDelta(delta.content);
-            if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) onThinking && onThinking(delta.reasoning_content);
+          if (ev.type === 'message_start' && ev.message && ev.message.usage) {
+            onMeta && onMeta({ usageIn: ev.message.usage });
+          } else if (ev.type === 'message_delta' && ev.usage) {
+            onMeta && onMeta({ usageOut: ev.usage });
+          } else if (ev.type === 'content_block_delta' && ev.delta) {
+            if (ev.delta.type === 'text_delta') {
+              emitDelta(ev.delta.text);
+            } else if (ev.delta.type === 'thinking_delta' && ev.delta.thinking) {
+              emitThink(ev.delta.thinking);
+            }
           }
-          if (ev.usage) onMeta && onMeta({ usageIn: ev.usage, usageOut: ev.usage });
         } catch (e) { /* 忽略残缺行 */ }
       }
     }
-    return;
-  }
-  // anthropic 协议（默认）
-  const body = { model: ep.model, system, messages, max_tokens: ep.maxTokens || 8192, stream: true };
-  if (ep.thinking === 'disabled') body.thinking = { type: 'disabled' };
-  else if (ep.thinking !== 'auto') {
-    const mode = ep.thinking === 'enabled' ? 'high' : ep.thinking;   // 旧值兼容
-    const budget = mode === 'custom' ? (ep.thinkingBudget || 32768) : (THINK_BUDGET[mode] || 8192);
-    body.thinking = { type: 'enabled', budget_tokens: budget };
-  }
-  // 采样参数（来自当前预设；presence/frequency_penalty 仅 OpenAI 支持）
-  if (SAMPLERS.temperature != null) body.temperature = SAMPLERS.temperature;
-  if (SAMPLERS.top_p != null) body.top_p = SAMPLERS.top_p;
-  if (SAMPLERS.top_k != null) body.top_k = SAMPLERS.top_k;
-  const resp = await fetch(`${ep.baseURL}/messages`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-api-key': ep.apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify(body),
-  });
-  if (!resp.ok) {
-    const err = await resp.text();
-    throw new Error(`LLM ${resp.status}: ${err.slice(0, 400)}`);
-  }
-  const reader = resp.body.getReader();
-  const dec = new TextDecoder();
-  let buf = '';
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let idx;
-    while ((idx = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, idx).trim();
-      buf = buf.slice(idx + 1);
-      if (!line.startsWith('data:')) continue;
-      const data = line.slice(5).trim();
-      if (!data || data === '[DONE]') continue;
-      try {
-        const ev = JSON.parse(data);
-        if (ev.type === 'message_start' && ev.message && ev.message.usage) {
-          onMeta && onMeta({ usageIn: ev.message.usage });
-        } else if (ev.type === 'message_delta' && ev.usage) {
-          onMeta && onMeta({ usageOut: ev.usage });
-        } else if (ev.type === 'content_block_delta' && ev.delta) {
-          if (ev.delta.type === 'text_delta') {
-            onDelta(ev.delta.text);
-          } else if (ev.delta.type === 'thinking_delta' && ev.delta.thinking) {
-            onThinking && onThinking(ev.delta.thinking);
-          }
-        }
-      } catch (e) { /* 忽略残缺行 */ }
-    }
+  };
+  // 自动重试：网络抖动/5xx 重试 1 次；客户端断连中止（signal.aborted）、已开始输出、4xx（Key/模型错误）不重试
+  try {
+    await attempt();
+  } catch (e) {
+    if (signal && signal.aborted) throw e;
+    if (emitted) throw e;
+    const msg = String(e && e.message || e);
+    if (msg.startsWith('LLM 4')) throw e;   // 4xx 不重试
+    await attempt();
   }
 }
 
@@ -1134,8 +1171,7 @@ const server = http.createServer(async (req, res) => {
     }));
   }
   if (p === '/api/model' && req.method === 'POST') {
-    let body = '';
-    for await (const c of req) body += c;
+    let body = await readBody(req);
     try {
       const { model, baseURL, apiKey, protocol, maxTokens, thinking, thinkingBudget, maxContext, autoSummary, autoSummaryThreshold, aux } = JSON.parse(body);
       const next = { ...ENDPOINT };
@@ -1206,8 +1242,7 @@ const server = http.createServer(async (req, res) => {
       try { return sendJson(JSON.parse(fs.readFileSync(file, 'utf8'))); } catch (e) { return sendJson({ error: 'failed to load chat' }, 500); }
     }
     if (req.method === 'PUT') {
-      let body = '';
-      for await (const c of req) body += c;
+      let body = await readBody(req);
       try {
         const { title, messages } = JSON.parse(body);
         const chat = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : { id, createdAt: new Date().toISOString() };
@@ -1228,8 +1263,7 @@ const server = http.createServer(async (req, res) => {
 
   // 界面操作：视角切换 / 换装（记账 + 状态持久化，供导出/时间线）
   if (p === '/api/op/view' && req.method === 'POST') {
-    let body = '';
-    for await (const c of req) body += c;
+    let body = await readBody(req);
     try {
       const { chatId, view } = JSON.parse(body);
       const cid = sanitizeId(chatId || '');
@@ -1253,8 +1287,7 @@ const server = http.createServer(async (req, res) => {
     }
   }
   if (p === '/api/op/wardrobe' && req.method === 'POST') {
-    let body = '';
-    for await (const c of req) body += c;
+    let body = await readBody(req);
     try {
       const { chatId, character, outfit, worn } = JSON.parse(body);
       const cid = sanitizeId(chatId || '');
@@ -1275,8 +1308,7 @@ const server = http.createServer(async (req, res) => {
 
   // 界面操作：扩写指令开关（记账）
   if (p === '/api/op/expand' && req.method === 'POST') {
-    let body = '';
-    for await (const c of req) body += c;
+    let body = await readBody(req);
     try {
       const { chatId, enabled } = JSON.parse(body);
       const cid = sanitizeId(chatId || '');
@@ -1293,8 +1325,7 @@ const server = http.createServer(async (req, res) => {
   }
   // 界面操作：工具桥开关（自由选取工具集合；记账）
   if (p === '/api/op/tools' && req.method === 'POST') {
-    let body = '';
-    for await (const c of req) body += c;
+    let body = await readBody(req);
     try {
       const { chatId, tools } = JSON.parse(body);
       const cid = sanitizeId(chatId || '');
@@ -1315,8 +1346,7 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify({ ok: true, presets, active: activePreset, samplers: SAMPLERS }));
   }
   if (p === '/api/presets' && req.method === 'POST') {
-    let body = '';
-    for await (const c of req) body += c;
+    let body = await readBody(req);
     try {
       const { action, name, preset } = JSON.parse(body);
       const nm = String(name || '').trim().slice(0, 40);
@@ -1350,8 +1380,7 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify({ ok: true, profiles: list, active: activeProfile, current: snapshotEndpoint() }));
   }
   if (p === '/api/profiles' && req.method === 'POST') {
-    let body = '';
-    for await (const c of req) body += c;
+    let body = await readBody(req);
     try {
       const { action, name, profile } = JSON.parse(body);
       const nm = String(name || '').trim().slice(0, 40);
@@ -1385,8 +1414,7 @@ const server = http.createServer(async (req, res) => {
   }
   // 界面操作：会话常驻设定（📌 每轮注入 system，不被上下文裁剪；按会话隔离）
   if (p === '/api/op/note' && req.method === 'POST') {
-    let body = '';
-    for await (const c of req) body += c;
+    let body = await readBody(req);
     try {
       const { chatId, note, get } = JSON.parse(body);
       const cid = sanitizeId(chatId || '');
@@ -1412,8 +1440,7 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify({ emotions: emo }));
   }
   if (p === '/api/op/emotion' && req.method === 'POST') {
-    let body = '';
-    for await (const c of req) body += c;
+    let body = await readBody(req);
     try {
       const { chatId, name, emotion } = JSON.parse(body);
       const cid = sanitizeId(chatId || '');
@@ -1478,8 +1505,7 @@ const server = http.createServer(async (req, res) => {
 
   // 手动补记一条回合（界面编辑）
   if (p === '/api/timeline/manual' && req.method === 'POST') {
-    let body = '';
-    for await (const c of req) body += c;
+    let body = await readBody(req);
     try {
       const { chatId, story_time, location, atmosphere, characters, costume, event } = JSON.parse(body);
       const rec = appendManualTurn(sanitizeId(chatId || ''), { story_time, location, atmosphere, characters, costume, event });
@@ -1492,8 +1518,7 @@ const server = http.createServer(async (req, res) => {
   }
   // 删除单条回合记录
   if (p === '/api/timeline/delete' && req.method === 'POST') {
-    let body = '';
-    for await (const c of req) body += c;
+    let body = await readBody(req);
     try {
       const { chatId, id } = JSON.parse(body);
       const ok = deleteTurnRecord(sanitizeId(chatId || ''), String(id || ''));
@@ -1506,8 +1531,7 @@ const server = http.createServer(async (req, res) => {
   }
   // 按消息序号清理回合记录（重roll：mode=gte 删 seq>=n；删单条消息：mode=eq 删 seq==n）
   if (p === '/api/timeline/truncate' && req.method === 'POST') {
-    let body = '';
-    for await (const c of req) body += c;
+    let body = await readBody(req);
     try {
       const { chatId, seq, mode } = JSON.parse(body);
       const n = Number(seq);
@@ -1526,8 +1550,7 @@ const server = http.createServer(async (req, res) => {
   }
   // 手动添加 / 消耗物品（界面编辑，记账）
   if (p === '/api/inventory/manual' && req.method === 'POST') {
-    let body = '';
-    for await (const c of req) body += c;
+    let body = await readBody(req);
     try {
       const { chatId, action, name, holder } = JSON.parse(body);
       const cid = sanitizeId(chatId || '');
@@ -1573,8 +1596,7 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/api/chat' && req.method === 'POST') {
     const OPENING_PIN_MIN_CHARS = 300;   // 首条消息保底注入 system 的最小长度（开局注入/长提示词；短问候不 pin）
-    let body = '';
-    for await (const c of req) body += c;
+    let body = await readBody(req);
     let payload;
     try { payload = JSON.parse(body); } catch (e) {
       res.writeHead(400); return res.end('bad json');
@@ -1670,6 +1692,10 @@ const server = http.createServer(async (req, res) => {
       connection: 'keep-alive',
     });
     let finished = false;
+    let abortedByClient = false;
+    const llmAbort = new AbortController();
+    // 客户端断连（关页面/刷新/切会话）→ 立即中止 LLM 请求，不再烧 token
+    res.on('close', () => { finished = true; abortedByClient = true; llmAbort.abort(); });
     let acc = '';
     let firstTokenAt = 0;
     const t0 = Date.now();
@@ -1705,7 +1731,7 @@ const server = http.createServer(async (req, res) => {
         if (!firstTokenAt) firstTokenAt = Date.now();
         acc += text;
         send({ type: 'delta', text });
-      }, (m) => Object.assign(meta, m), (t) => send({ type: 'thinking', text: t }));
+      }, (m) => Object.assign(meta, m), (t) => send({ type: 'thinking', text: t }), llmAbort.signal);
       // 会话统计（按当前模型分桶）
       const b = bucket(ENDPOINT.model);
       b.turns += 1;
@@ -1740,7 +1766,11 @@ const server = http.createServer(async (req, res) => {
       if (toolTrace && toolTrace.length) appendOpRecord(payload.chatId, '工具调用', toolTrace.map((t) => t.name + ':' + String(t.input.query || '').slice(0, 40)).join('；'));
       send({ type: 'done' });
     } catch (e) {
-      send({ type: 'error', error: String(e) });
+      if (abortedByClient || llmAbort.signal.aborted) {
+        // 客户端断连中止：静默收尾（不追加回合记录、不发 error）
+      } else {
+        send({ type: 'error', error: String(e) });
+      }
     } finally {
       finished = true;
       res.end();

@@ -185,7 +185,12 @@
       </div>
     </div>
     <div class="card" id="card-chats">
-      <div class="card-title">📁 会话（旧对话自动归档）</div>
+      <div class="card-title">📁 会话（旧对话自动归档）
+        <span style="float:right;">
+          <button id="export-md-btn" class="head-btn" style="padding:1px 8px;" title="导出当前会话（Markdown 可读版）">📄 MD</button>
+          <button id="export-btn" class="head-btn" style="padding:1px 8px;" title="导出当前会话（JSON 完整备份，可恢复）">📤 导出</button>
+        </span>
+      </div>
       <div id="chat-list" class="chat-list">加载中…</div>
     </div>
     <div class="card" id="card-world">
