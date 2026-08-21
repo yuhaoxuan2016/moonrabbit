@@ -1485,24 +1485,31 @@ async function loadInventory() {
   } catch (e) { tmInventory.textContent = '物品栏读取失败'; }
 }
 
+const tmEditTl = document.querySelector('.tm-edit:not(#inv-edit)');  // 手动补记（时间线）编辑区
+const tmEditInv = document.getElementById('inv-edit');                // 手动修改物品栏编辑区
+function setTmTabVis(active) {
+  const map = { tl: [tmTimeline, tmEditTl], inv: [tmInventory, tmEditInv], hs: [tmHistSearch], em: [tmEmotions] };
+  for (const [k, els] of Object.entries(map)) {
+    els.forEach(el => { if (el) el.classList.toggle('hidden', k !== active); });
+  }
+}
 tmTabTl.addEventListener('click', () => {
   tmTabTl.classList.add('active'); tmTabInv.classList.remove('active'); tmTabHs.classList.remove('active'); tmTabEm.classList.remove('active');
-  tmTimeline.classList.remove('hidden'); tmInventory.classList.add('hidden'); tmHistSearch.classList.add('hidden'); tmEmotions.classList.add('hidden');
+  setTmTabVis('tl');
 });
 tmTabInv.addEventListener('click', () => {
   tmTabInv.classList.add('active'); tmTabTl.classList.remove('active'); tmTabHs.classList.remove('active'); tmTabEm.classList.remove('active');
-  tmInventory.classList.remove('hidden'); tmTimeline.classList.add('hidden'); tmHistSearch.classList.add('hidden'); tmEmotions.classList.add('hidden');
-  document.getElementById('inv-edit').classList.remove('hidden');
+  setTmTabVis('inv');
   loadInventory();
 });
 tmTabHs.addEventListener('click', () => {
   tmTabHs.classList.add('active'); tmTabTl.classList.remove('active'); tmTabInv.classList.remove('active'); tmTabEm.classList.remove('active');
-  tmHistSearch.classList.remove('hidden'); tmTimeline.classList.add('hidden'); tmInventory.classList.add('hidden'); tmEmotions.classList.add('hidden');
+  setTmTabVis('hs');
   document.getElementById('hs-input').focus();
 });
 tmTabEm.addEventListener('click', () => {
   tmTabEm.classList.add('active'); tmTabTl.classList.remove('active'); tmTabInv.classList.remove('active'); tmTabHs.classList.remove('active');
-  tmEmotions.classList.remove('hidden'); tmTimeline.classList.add('hidden'); tmInventory.classList.add('hidden'); tmHistSearch.classList.add('hidden');
+  setTmTabVis('em');
   loadEmotions();
 });
 
@@ -2028,15 +2035,17 @@ function initMsgSearch() {
     const st = document.createElement('style');
     st.id = 'msg-search-style';
     st.textContent = `
-      .msg-search-bar{display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--card,#232946);border:1px solid var(--border,#3a4163);border-radius:10px;margin:6px 10px 2px;}
+      .msg-search-bar{display:flex;align-items:center;gap:8px;padding:4px 10px;background:var(--card,#232946);border:1px solid var(--border,#3a4163);border-radius:10px;margin:6px 10px 2px;}
       .msg-search-bar.hidden{display:none;}
+      .msg-search-toggle{background:var(--card,#232946);border:1px solid var(--border,#3a4163);color:var(--muted,#9aa0c0);border-radius:6px;padding:2px 10px;font-size:13px;cursor:pointer;flex:none;opacity:.75;}
+      .msg-search-toggle:hover{opacity:1;color:var(--accent,#a78bfa);border-color:var(--accent,#a78bfa);}
+      .msg-search-inputs{display:flex;align-items:center;gap:8px;flex:1;min-width:0;}
+      .msg-search-inputs.hidden{display:none;}
       .msg-search-bar input{flex:1;min-width:0;background:var(--bg2,#1f2438);color:var(--text,#e8e6f0);border:1px solid var(--border,#3a4163);border-radius:6px;padding:5px 9px;font-size:13px;outline:none;}
       .msg-search-bar input:focus{border-color:var(--accent,#a78bfa);}
       .msg-search-info{color:var(--muted,#9aa0c0);font-size:12px;white-space:nowrap;}
       .msg-search-bar button{background:var(--card,#232946);border:1px solid var(--border,#3a4163);color:var(--muted,#9aa0c0);border-radius:6px;padding:3px 9px;font-size:12px;cursor:pointer;flex:none;}
       .msg-search-bar button:hover{color:var(--accent,#a78bfa);border-color:var(--accent,#a78bfa);}
-      .msg-search-toggle{position:absolute;right:12px;top:12px;z-index:30;background:var(--card,#232946);border:1px solid var(--border,#3a4163);color:var(--muted,#9aa0c0);border-radius:8px;padding:4px 9px;font-size:13px;cursor:pointer;opacity:.75;}
-      .msg-search-toggle:hover{opacity:1;color:var(--accent,#a78bfa);}
       .msg-wrap.msg-search-hit{outline:2px solid var(--accent,#a78bfa);outline-offset:-2px;border-radius:10px;}
     `;
     document.head.appendChild(st);
@@ -2044,9 +2053,11 @@ function initMsgSearch() {
   const toggle = document.createElement('button');
   toggle.className = 'msg-search-toggle';
   toggle.textContent = '🔍';
-  toggle.title = '搜索当前对话';
+  toggle.title = '展开/收起搜索';
   const bar = document.createElement('div');
-  bar.className = 'msg-search-bar hidden';
+  bar.className = 'msg-search-bar';
+  const inputs = document.createElement('div');
+  inputs.className = 'msg-search-inputs hidden';
   const input = document.createElement('input');
   input.type = 'text';
   input.placeholder = '搜索对话内容…（Enter = 下一处，Esc = 关闭）';
@@ -2055,11 +2066,12 @@ function initMsgSearch() {
   const close = document.createElement('button');
   close.textContent = '✕';
   close.title = '关闭搜索';
-  bar.appendChild(input);
-  bar.appendChild(info);
-  bar.appendChild(close);
+  inputs.appendChild(input);
+  inputs.appendChild(info);
+  inputs.appendChild(close);
+  bar.appendChild(toggle);
+  bar.appendChild(inputs);
   chatInner.insertBefore(bar, els.messages);
-  chatInner.appendChild(toggle);
   if (getComputedStyle(chatInner).position === 'static') chatInner.style.position = 'relative';
 
   let matches = [];
@@ -2068,7 +2080,7 @@ function initMsgSearch() {
     document.querySelectorAll('.msg-wrap.msg-search-hit').forEach((el) => el.classList.remove('msg-search-hit'));
   };
   const closeSearch = () => {
-    bar.classList.add('hidden');
+    inputs.classList.add('hidden');
     input.value = '';
     info.textContent = '';
     matches = [];
@@ -2098,10 +2110,10 @@ function initMsgSearch() {
     if (matches.length) jump(1);
   };
   toggle.addEventListener('click', () => {
-    const isOpen = !bar.classList.contains('hidden');
+    const isOpen = !inputs.classList.contains('hidden');
     if (isOpen) closeSearch();
     else {
-      bar.classList.remove('hidden');
+      inputs.classList.remove('hidden');
       input.focus();
       if (input.value.trim()) runSearch();
     }
