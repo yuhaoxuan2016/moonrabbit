@@ -72,6 +72,8 @@ header {
 .api-field { display: block; font-size: 13px; color: var(--muted); margin-bottom: 10px; }
 .api-field select, .api-field input { width: 100%; margin-top: 4px; background: var(--bg2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 7px 10px; font-size: 13px; outline: none; }
 .api-field select:focus, .api-field input:focus { border-color: var(--accent); }
+.api-field textarea { width: 100%; margin-top: 4px; background: var(--bg2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 7px 10px; font-size: 13px; outline: none; resize: vertical; font-family: inherit; box-sizing: border-box; }
+.api-field textarea:focus { border-color: var(--accent); }
 .modal-actions { display: flex; gap: 8px; margin-top: 4px; }
 .modal-actions .head-btn { padding: 7px 16px; }
 .api-msg { margin-top: 10px; font-size: 12.5px; color: var(--muted); line-height: 1.6; white-space: pre-wrap; }
@@ -92,6 +94,13 @@ header {
 .chat-item .ci-time { color: var(--muted); font-size: 11px; flex: none; }
 .chat-item .ci-del { color: var(--muted); font-size: 13px; padding: 0 4px; border-radius: 4px; flex: none; }
 .chat-item .ci-del:hover { color: #f0a3a3; background: rgba(240, 163, 163, 0.12); }
+/* 会话置顶 / 重命名（聊天列表内） */
+.chat-item .ci-pin { color: var(--muted); font-size: 12px; padding: 0 2px; border-radius: 4px; flex: none; cursor: pointer; }
+.chat-item .ci-pin:hover { color: var(--accent); }
+.chat-item .ci-pin.on { color: var(--accent); }
+.chat-item .ci-rename { color: var(--muted); font-size: 12px; padding: 0 2px; border-radius: 4px; flex: none; cursor: pointer; opacity: 0; }
+.chat-item:hover .ci-rename { opacity: 1; }
+.chat-item .ci-rename:hover { color: var(--accent); }
 .badge { font-size: 12.5px; padding: 2px 10px; border-radius: 999px; background: var(--card); border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
 .badge.on { color: #7fe0a9; border-color: #2f6b4a; }
 .badge.off { color: #f0a3a3; border-color: #6b2f2f; }
@@ -387,3 +396,50 @@ body.with-bg {
 .tour-dots .dot.on { background: var(--accent); }
 .head-btn.ghost { background: transparent; border-color: transparent; color: var(--muted); }
 .tour-highlight { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 10px; }
+
+/* Markdown rendering styles */
+.bubble pre { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin: 6px 0; overflow-x: auto; font-size: 13px; line-height: 1.5; }
+.bubble pre code { background: none; border: none; padding: 0; font-size: inherit; color: var(--text); }
+.bubble code { background: var(--bg2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 13px; color: var(--gold, #f5c97b); }
+.bubble blockquote { border-left: 3px solid var(--accent); padding: 4px 12px; margin: 6px 0; color: var(--muted); font-style: italic; }
+.bubble ul, .bubble ol { padding-left: 20px; margin: 6px 0; }
+.bubble li { margin: 2px 0; line-height: 1.6; }
+/* 气泡内图片（Task17：粘贴/链接图片渲染） */
+.bubble img { max-width: 100%; max-height: 400px; border-radius: 8px; margin: 4px 0; cursor: pointer; }
+.bubble img:hover { opacity: 0.9; }
+
+/* 会话常驻设定多槽位（Task15：其他/背景/关系/规则 页签） */
+.note-slot-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+.note-slot-tab {
+  flex: 1; background: var(--bg2); border: 1px solid var(--border); color: var(--muted);
+  border-radius: 6px; padding: 4px 0; font-size: 12px; cursor: pointer; white-space: nowrap;
+}
+.note-slot-tab:hover { border-color: var(--accent); }
+.note-slot-tab.active { background: var(--accent); border-color: var(--accent); color: #1a1a2e; font-weight: 700; }
+
+/* Mobile responsive */
+.hamburger { display: none; background: none; border: none; color: var(--text); font-size: 20px; cursor: pointer; padding: 4px 8px; }
+@media (max-width: 768px) {
+  .hamburger { display: inline-block; }
+  header { padding: 6px 12px; }
+  .brand h1 { font-size: 14px; }
+  .subtitle { display: none; }
+  .header-right { gap: 4px; }
+  .head-input { width: 120px; }
+  main { position: relative; }
+  #sidebar {
+    position: fixed; top: 0; right: -320px; width: 300px; height: 100vh;
+    z-index: 50; transition: right 0.3s ease;
+    background: var(--card); border-left: 1px solid var(--border);
+  }
+  #sidebar.open { right: 0; }
+  .sidebar-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 40; }
+  .sidebar-overlay.open { display: block; }
+  #chat { padding: 8px 10px; }
+  #messages { padding: 4px; }
+  .bubble { max-width: 90%; font-size: 14px; }
+  footer { padding: 8px 10px; flex-wrap: wrap; }
+  footer textarea { font-size: 14px; }
+  .view-bar { flex-wrap: wrap; gap: 4px; font-size: 11px; }
+  .tool-chip { padding: 3px 10px; font-size: 11px; }
+}

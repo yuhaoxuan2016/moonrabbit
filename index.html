@@ -9,6 +9,7 @@
 </head>
 <body>
 <header>
+  <button class="hamburger" id="sidebar-toggle" title="打开侧栏菜单（移动端抽屉）" aria-label="菜单">☰</button>
   <div class="brand">
     <span class="brand-dot"></span>
     <h1>多角色 RP</h1>
@@ -136,6 +137,18 @@
         <option value="true">回退主端点（辅助挂了也能跑）</option>
       </select>
     </label>
+    <div class="set-group-title">⚙️ 自定义注入（前缀 / 后缀 · 按当前会话）</div>
+    <label class="api-field">注入前缀（置于 system 最前）
+      <textarea id="inject-prefix" rows="2" placeholder="留空 = 不注入。如：本会话以第二人称「你」称呼用户、禁止网络用语…"></textarea>
+    </label>
+    <label class="api-field">注入后缀（置于 system 最后）
+      <textarea id="inject-suffix" rows="2" placeholder="留空 = 不注入。如：每轮回复末尾不要总结、不要反问…"></textarea>
+    </label>
+    <div class="api-field" style="display:flex;gap:8px;align-items:center;">
+      <button id="inject-save" class="head-btn" style="padding:2px 10px;">💾 保存注入</button>
+      <span id="inject-note" class="attach-note hidden">已保存（下一轮生效）</span>
+    </div>
+    <div class="api-msg">💡 前缀/后缀按会话保存，随每轮 system 注入：前缀置顶、后缀置底。适合不想写进「会话常驻设定」的临时指令。</div>
     <div class="api-field" id="api-now">当前：—</div>
     <div class="modal-actions">
       <button id="api-save" class="head-btn">保存并探测</button>
@@ -189,6 +202,9 @@
         <span style="float:right;">
           <button id="export-md-btn" class="head-btn" style="padding:1px 8px;" title="导出当前会话（Markdown 可读版）">📄 MD</button>
           <button id="export-btn" class="head-btn" style="padding:1px 8px;" title="导出当前会话（JSON 完整备份，可恢复）">📤 导出</button>
+          <button id="import-btn" class="head-btn" style="padding:1px 8px;" title="导入会话（JSON 文件）">📥 导入</button>
+          <button id="savepoint-btn" class="head-btn" style="padding:1px 8px;" title="存档当前会话">💾 存档</button>
+          <button id="loadpoint-btn" class="head-btn" style="padding:1px 8px;" title="读取存档点">↩ 读档</button>
         </span>
       </div>
       <div id="chat-list" class="chat-list">加载中…</div>
@@ -219,7 +235,13 @@
       <div class="man-attach">
         <button id="note-attach-btn" class="attach">📌 会话常驻设定（每轮注入，防遗忘）</button>
         <div id="note-attach-box" class="hidden">
-          <textarea id="note-attach-input" rows="6" placeholder="写入本会话「每轮必读」的设定速记（不会被上下文裁剪）。用于长线剧情的关键设定，如：&#10;· 黑菲=被崩坏侵蚀：黑色水手服/敌意/戒备&#10;· 飞船=年代久远非残破；崩坏兽=原有的&#10;· 真正的蓝白版在 Avalon 虚拟世界里"></textarea>
+          <div class="note-slot-tabs" title="多槽位：切换页签分别编辑，保存后按槽合并注入 system">
+            <button type="button" class="note-slot-tab active" data-slot="其他">其他</button>
+            <button type="button" class="note-slot-tab" data-slot="背景">背景</button>
+            <button type="button" class="note-slot-tab" data-slot="关系">关系</button>
+            <button type="button" class="note-slot-tab" data-slot="规则">规则</button>
+          </div>
+          <textarea id="note-attach-input" rows="6" placeholder="写入本会话「每轮必读」的设定速记（不会被上下文裁剪；切换页签分别编辑 背景/关系/规则/其他 槽，保存后合并注入）。用于长线剧情的关键设定，如：&#10;· 黑菲=被崩坏侵蚀：黑色水手服/敌意/戒备&#10;· 飞船=年代久远非残破；崩坏兽=原有的&#10;· 真正的蓝白版在 Avalon 虚拟世界里"></textarea>
           <div class="man-attach-row">
             <button id="note-attach-ok" class="head-btn">✅ 保存到本会话</button>
             <button id="note-attach-cancel" class="head-btn">取消</button>
@@ -305,6 +327,8 @@
     </div>
   </aside>
 </main>
+
+<div class="sidebar-overlay" id="sidebar-overlay"></div>
 
 <footer>
   <div class="view-bar">

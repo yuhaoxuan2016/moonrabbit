@@ -118,6 +118,38 @@ function highlightText(text) {
   return escapeHtml(text);
 }
 
+// Markdown 渲染：图片 → 代码块 / 行内代码 / 引用 / 无序列表
+// 图片（Task17）先占位保护：base64 data URL 含 / + = 等字符，转义会破坏 img 标签，故最后还原
+function renderMarkdown(text) {
+  const images = [];
+  let s = String(text || '').replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (m, alt, src) => {
+    images.push(`<img src="${String(src).replace(/"/g, '%22')}" alt="${String(alt).replace(/"/g, '&quot;')}" loading="lazy" onclick="window.open(this.src,'_blank')" title="点击查看原图">`);
+    return `\u0005${images.length - 1}\u0006`;
+  });
+  s = escapeHtml(s);
+  // 1) 代码块 ```...``` → <pre><code>（先占位保护，避免后续规则命中块内内容）
+  const codeBlocks = [];
+  s = s.replace(/```([\s\S]*?)```/g, (m, code) => {
+    codeBlocks.push(`<pre><code>${code.trim()}</code></pre>`);
+    return `\u0003${codeBlocks.length - 1}\u0004`;
+  });
+  // 2) 行内代码 `...` → <code>...</code>
+  s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  // 3) 引用 > text → <blockquote>；无序列表 - text → <ul><li>（转义后 > 为 &gt;）
+  s = s.split('\n').map((line) => {
+    const bq = /^&gt;\s?(.*)$/.exec(line);
+    if (bq) return `<blockquote>${bq[1]}</blockquote>`;
+    const ul = /^[-*]\s+(.*)$/.exec(line);
+    if (ul) return `<ul><li>${ul[1]}</li></ul>`;
+    return line;
+  }).join('\n');
+  // 4) 还原代码块
+  s = s.replace(/\u0003(\d+)\u0004/g, (m, i) => codeBlocks[Number(i)]);
+  // 5) 还原图片
+  s = s.replace(/\u0005(\d+)\u0006/g, (m, i) => images[Number(i)]);
+  return s;
+}
+
 // ---------- 消息容器与操作（重roll / 删除） ----------
 const rerollVersions = {};   // 版本历史：{ 锚点userSeq: [ {content, ts}, ... ] }（旧→新累积，支持多次重roll 回溯）
 function makeWrap(role, seq) {
@@ -251,9 +283,9 @@ function restoreVersion(anchorSeq, verIdx, oldSeq) {
     }
     let node = oldWrap.nextSibling;
     while (node) { const next = node.nextSibling; node.remove(); node = next; }
-    // 重建气泡内容（显示旧版文本）
+    // 重建气泡内容（显示旧版文本；走 renderMarkdown 以支持图片渲染）
     const bub = oldWrap.querySelector('.bubble');
-    if (bub) { bub.innerHTML = ''; bub.appendChild(document.createTextNode(stripTurnTags(content))); }
+    if (bub) { bub.innerHTML = renderMarkdown(stripTurnTags(content)); }
   }
   // 4) 其余旧版本气泡保留（可再切回）
 }
@@ -344,7 +376,7 @@ function rebuildMsgWrap(wrap, role, content, seq) {
   body.style.flex = '1';
   const bub = document.createElement('div');
   bub.className = 'bubble';
-  bub.innerHTML = highlightText(content);
+  bub.innerHTML = renderMarkdown(content);
   body.appendChild(bub);
   if (role === 'user') {
     row.className = 'msg user';
@@ -400,8 +432,8 @@ function renderAssistant(content, seq) {
     const bub = document.createElement('div');
     bub.className = 'bubble';
     const contentNode = document.createElement('span');
-    contentNode.innerHTML = highlightText(seg.text.trim());
-    if (seg.actionOnly) { contentNode.className = 'action'; contentNode.innerHTML = `（${highlightText(seg.text.trim())}）`; }
+    contentNode.innerHTML = renderMarkdown(seg.text.trim());
+    if (seg.actionOnly) { contentNode.className = 'action'; contentNode.innerHTML = `（${renderMarkdown(seg.text.trim())}）`; }
     bub.appendChild(contentNode);
     body.appendChild(bub);
     row.appendChild(av);
@@ -428,7 +460,7 @@ function renderUser(content, seq) {
   body.appendChild(nm);
   const bub = document.createElement('div');
   bub.className = 'bubble';
-  bub.innerHTML = highlightText(content);
+  bub.innerHTML = renderMarkdown(content);
   body.appendChild(bub);
   row.appendChild(av);
   row.appendChild(body);
@@ -441,6 +473,8 @@ function renderUser(content, seq) {
 async function send() {
   const content = els.input.value.trim();
   if (!content || streaming) return;
+  // 发送即取消自动保存防抖（防 3s 后以发送前旧快照 PUT 覆盖新数据）
+  clearTimeout(autoSaveTimer);
   // 高峰时段强提醒：官方直连渠道 + 高峰时间 + 发送前确认（可设置关闭）
   if (peakEligible && prefs.peakConfirm !== false && isPeakHours(new Date())) {
     if (!confirm('⚠️ 当前高峰时段（9:00-12:00 / 14:00-18:00）\nAPI 费用翻倍、可能限流变卡。\n\n继续发送吗？')) {
@@ -517,6 +551,8 @@ async function generate() {
           renderThinking(`🔧 ${(ev.trace || []).join('；')}`);
         } else if (ev.type === 'summarized') {
           renderThinking(`💾 ${ev.note}`);
+        } else if (ev.type === 'ping') {
+          // SSE 心跳（Task8）：仅保活连接，无需处理
         } else if (ev.type === 'error') {
           throw new Error(ev.error || 'LLM 错误');
         } else if (ev.type === 'done') {
@@ -642,6 +678,88 @@ function exportChat(md) {
 document.getElementById('export-btn').addEventListener('click', () => exportChat(false));
 document.getElementById('export-md-btn').addEventListener('click', () => exportChat(true));
 
+// ---------- 会话导入（📥 JSON 完整备份恢复：解析 → 校验 {id,title,messages} → 新建会话写入） ----------
+const importFileInput = document.createElement('input');
+importFileInput.type = 'file';
+importFileInput.accept = '.json,application/json';
+importFileInput.style.display = 'none';
+document.body.appendChild(importFileInput);
+document.getElementById('import-btn').addEventListener('click', () => importFileInput.click());
+importFileInput.addEventListener('change', async () => {
+  const file = importFileInput.files && importFileInput.files[0];
+  importFileInput.value = '';   // 允许连续选择同一文件
+  if (!file) return;
+  try {
+    const data = JSON.parse(await file.text());
+    if (!data || typeof data !== 'object') throw new Error('文件不是有效的 JSON 对象');
+    if (!Array.isArray(data.messages)) throw new Error('缺少 messages 数组（需为导出格式：{id, title, messages}）');
+    const messages = data.messages
+      .filter((m) => m && (m.role === 'user' || m.role === 'assistant'))
+      .map((m) => ({ role: m.role, content: String(m.content || ''), ...(m.thinking ? { thinking: m.thinking } : {}) }));
+    if (!messages.length) throw new Error('会话中没有可导入的消息');
+    const title = String(data.title || '导入会话').slice(0, 40);
+    if (!confirm(`导入会话「${title}」？共 ${messages.length} 条消息（将创建为新的会话）。`)) return;
+    // 创建新会话（服务端生成新 id）→ 写入标题与消息 → 打开
+    const { id } = await (await fetch('/api/chats', { method: 'POST' })).json();
+    const r = await fetch('/api/chats/' + id, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title, messages }),
+    });
+    if (!r.ok) throw new Error('写入失败（HTTP ' + r.status + '）');
+    await openChat(id);
+  } catch (e) {
+    alert('导入失败：' + e.message);
+  }
+});
+
+// ---------- 存档点（💾 存档 / ↩ 读档，按会话；服务端存 data/savepoints/{chatId}/{ts}.json 完整副本） ----------
+document.getElementById('savepoint-btn').addEventListener('click', async () => {
+  if (!chatId) { alert('还没有会话，无法存档'); return; }
+  if (!history.length) { alert('当前会话为空，无需存档'); return; }
+  await saveChat();   // 先把最新对话落盘，再存副本
+  const label = (prompt('存档备注（可留空）：', '') || '').trim().slice(0, 40);
+  try {
+    const r = await (await fetch('/api/savepoints/save', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId, label }),
+    })).json();
+    if (!r.ok) throw new Error(r.error || '存档失败');
+    alert('✅ ' + r.note);
+  } catch (e) { alert('存档失败：' + e.message); }
+});
+document.getElementById('loadpoint-btn').addEventListener('click', async () => {
+  if (!chatId) { alert('还没有会话，无法读档'); return; }
+  try {
+    const { ok, savepoints } = await (await fetch(`/api/savepoints/list?chatId=${encodeURIComponent(chatId)}`)).json();
+    if (!ok || !savepoints || !savepoints.length) { alert('本会话还没有存档点'); return; }
+    const choice = prompt(
+      '选择要读取的存档点（输入序号，Enter 取消）：\n\n' +
+      savepoints.map((s, i) => `${i + 1}. ${s.label || '（无备注）'} · ${new Date(s.ts).toLocaleString()} · ${s.count} 条消息`).join('\n'),
+      '1'
+    );
+    const idx = Number(choice);
+    if (!choice || !Number.isFinite(idx)) return;
+    const sp = savepoints[idx - 1];
+    if (!sp) { alert('序号无效'); return; }
+    if (!confirm(`读取存档点「${sp.label || '（无备注）'}」（${new Date(sp.ts).toLocaleString()}，${sp.count} 条消息）？\n当前会话内容将被存档副本覆盖（可先导出备份）。`)) return;
+    const r = await (await fetch('/api/savepoints/load', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId, ts: sp.ts }),
+    })).json();
+    if (!r.ok) throw new Error(r.error || '读档失败');
+    // 清空本地状态再重新打开（避免 openChat 先把旧 history 存回覆盖存档）
+    const prevHistory = history.slice();   // 备份：openChat 失败时恢复，防空 history 覆盖存档
+    history = [];
+    els.messages.innerHTML = '';
+    msgSeq = 0;
+    await openChat(chatId);
+    if (!history.length && prevHistory.length) history = prevHistory;   // GET 失败 → 恢复旧状态
+  } catch (e) { alert('读档失败：' + e.message); }
+});
+
 async function loadChatList() {
   const box = document.getElementById('chat-list');
   try {
@@ -652,9 +770,35 @@ async function loadChatList() {
       const d = document.createElement('div');
       d.className = 'chat-item' + (c.id === chatId ? ' active' : '');
       const time = (c.updatedAt || '').slice(5, 16).replace('T', ' ');
-      d.innerHTML = `<span class="ci-title"></span><span class="ci-time">${time}</span><span class="ci-del" title="删除">×</span>`;
+      d.innerHTML = `<span class="ci-pin${c.pinned ? ' on' : ''}" title="${c.pinned ? '取消置顶' : '置顶'}">📌</span><span class="ci-title"></span><span class="ci-rename" title="重命名">✏️</span><span class="ci-time">${time}</span><span class="ci-del" title="删除">×</span>`;
       d.querySelector('.ci-title').textContent = c.title;
       d.querySelector('.ci-title').addEventListener('click', () => openChat(c.id));
+      d.querySelector('.ci-pin').addEventListener('click', async (e) => {
+        e.stopPropagation();
+        try {
+          await fetch('/api/chats/' + c.id, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ pinned: !c.pinned }),
+          });
+        } catch (err) { /* 忽略 */ }
+        loadChatList();
+      });
+      d.querySelector('.ci-rename').addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const name = (prompt('新的会话名称：', c.title) || '').trim().slice(0, 40);
+        if (!name || name === c.title) return;
+        try {
+          const r = await fetch('/api/chats/' + c.id, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ title: name }),
+          });
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          if (c.id === chatId) chatTitle = name;   // 当前会话标题同步，后续 saveChat 沿用
+        } catch (err) { alert('重命名失败：' + err.message); }
+        loadChatList();
+      });
       d.querySelector('.ci-del').addEventListener('click', async (e) => {
         e.stopPropagation();
         if (!confirm(`删除会话「${c.title}」？`)) return;
@@ -681,6 +825,7 @@ async function newChat() {
     loadTimeline();   // 剧情记忆按会话隔离，切会话后刷新
     loadInventory();
     loadSessionNote();   // 会话常驻设定按会话加载（新会话为空）
+    toggleSidebar(false);   // 移动端：新建会话后收起抽屉
   } catch (e) { /* 忽略 */ }
 }
 
@@ -710,7 +855,9 @@ async function openChat(id) {
     loadInventory();
     loadCurrentWardrobe();
     loadSessionNote();   // 会话常驻设定按会话加载
+    loadInjections();    // 自定义注入槽按会话刷新（API 弹窗开着时同步显示当前会话值）
     loadStats();   // 统计栏按对话口径刷新（缓存命中）
+    toggleSidebar(false);   // 移动端：切换会话后收起抽屉
   } catch (e) { /* 忽略 */ }
 }
 
@@ -753,6 +900,7 @@ apiBtn.addEventListener('click', async () => {
     apiNow.textContent = `当前：${c.protocol === 'openai' ? 'OpenAI 兼容' : 'Anthropic 兼容'} · ${c.baseURL} · ${c.model}${c.apiKeyMasked ? ' · Key ' + c.apiKeyMasked : ''} · max_tokens ${c.maxTokens} · thinking ${c.thinking} · context ${c.maxContext ?? 64000}`;
     await loadPresets();
     await loadProfiles();
+    loadInjections();   // 自定义注入槽（按当前会话加载）
   } catch (e) { /* 忽略 */ }
   apiModal.classList.remove('hidden');
 });
@@ -807,6 +955,38 @@ document.getElementById('api-save').addEventListener('click', async () => {
     btn.disabled = false;
     btn.textContent = '保存并探测';
   }
+});
+
+// ---------- 自定义注入槽（⚙️ 前缀 / 后缀，按会话，随 system 注入） ----------
+async function loadInjections() {
+  try {
+    const r = await (await fetch('/api/op/inject?chatId=' + encodeURIComponent(chatId || ''))).json();
+    if (r.ok) {
+      document.getElementById('inject-prefix').value = r.prefix || '';
+      document.getElementById('inject-suffix').value = r.suffix || '';
+    }
+  } catch (e) { /* 忽略 */ }
+}
+document.getElementById('inject-save').addEventListener('click', async () => {
+  const note = document.getElementById('inject-note');
+  try {
+    const r = await (await fetch('/api/op/inject', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        chatId,
+        prefix: document.getElementById('inject-prefix').value,
+        suffix: document.getElementById('inject-suffix').value,
+      }),
+    })).json();
+    if (r.ok) {
+      note.textContent = '已保存（下一轮生效）';
+      note.classList.remove('hidden');
+      setTimeout(() => note.classList.add('hidden'), 3000);
+    } else {
+      alert('保存失败：' + (r.error || '未知错误'));
+    }
+  } catch (e) { alert('保存失败：' + e.message); }
 });
 
 // ---------- API 采样预设（命名预设） ----------
@@ -1603,6 +1783,10 @@ function fmtTok(n) {
   if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
   return String(n);
 }
+function fmtCost(n) {
+  if (!n) return '0';
+  return n < 0.01 ? n.toFixed(4) : n.toFixed(2);
+}
 async function loadStats() {
   try {
     const s = await (await fetch('/api/stats?chatId=' + encodeURIComponent(chatId))).json();
@@ -1610,7 +1794,11 @@ async function loadStats() {
     const chatTxt = ch
       ? `<b>${ch.turns}</b> 轮 · <b>${ch.calls}</b> 次调用 | LLM 总耗时 <b>${fmtDur(ch.llmSec)}</b> | 首 token 平均 <b>${(ch.firstTokenAvgMs / 1000).toFixed(1)}s</b> · <b>${ch.tokPerSec}</b> tok/s | 缓存命中 <b>${ch.cacheRate}%</b> | 输入 <b>${fmtTok(ch.tokensIn)}</b> · 输出 <b>${fmtTok(ch.tokensOut)}</b> tok`
       : `—`;
-    statsBar.innerHTML = `模型 <b>${s.model}</b> | 本对话 ${chatTxt} | 累计 <b>${c.turns}</b> 轮 · 缓存 <b>${c.cacheRate}%</b> · <b>${fmtTok(c.tokensIn + c.tokensOut)}</b> tok | 全部 <b>${t.turns}</b> 轮 · 缓存 <b>${t.cacheRate}%</b> · <b>${fmtTok(t.tokensIn + t.tokensOut)}</b> tok`;
+    // 费用（Task6）：每日仪表盘估算（PRICE_TABLE 每 1M token 单价；仅参考非账单）
+    const daily = s.daily || [];
+    const today = daily[daily.length - 1];
+    const costTxt = `💰 费用：今日 <b>¥${fmtCost(today ? today.cost : 0)}</b> · 累计 <b>¥${fmtCost(s.totalCost)}</b>`;
+    statsBar.innerHTML = `模型 <b>${s.model}</b> | 本对话 ${chatTxt} | 累计 <b>${c.turns}</b> 轮 · 缓存 <b>${c.cacheRate}%</b> · <b>${fmtTok(c.tokensIn + c.tokensOut)}</b> tok | 全部 <b>${t.turns}</b> 轮 · 缓存 <b>${t.cacheRate}%</b> · <b>${fmtTok(t.tokensIn + t.tokensOut)}</b> tok | ${costTxt}`;
   } catch (e) { /* 忽略 */ }
 }
 
@@ -1631,7 +1819,7 @@ const tourSteps = [
   { title: '👋 欢迎', body: '这是通用多角色 RP 界面：多角色对话、头像渲染、世界设定自填、回合自动记账。首次使用带你看一圈～', target: null },
   { title: '🌍 世界设定', body: '在右侧「世界设定」里填写你的世界观 / 角色卡 / 规则。保存在本浏览器，对话时注入 system。', target: 'card-world' },
   { title: '📜 剧情记忆', body: '回合自动记账：时间线 / 物品栏 / 历史检索 / 情绪。可导出 markdown 自行归档。', target: 'card-tm' },
-  { title: '✍️ 输入区', body: '底部输入区支持「角色名：台词」格式；可切换视角、开扩写、勾选联网工具。Enter 发送，Shift+Enter 换行。', target: 'input' },
+  { title: '✍️ 输入区', body: '底部输入区支持「角色名：台词」格式；可切换视角、开扩写、勾选联网工具。Enter 换行，Ctrl+Enter 发送。', target: 'input' },
   { title: '⚙ API 设置', body: '右上角「⚙ API」可配置端点 / 模型 / 上下文预算 / 辅助 API（后台任务独立端点）。', target: 'api-btn' },
 ];
 let tourIdx = 0;
@@ -1678,8 +1866,73 @@ function maybeStartTour() {
 // ---------- 事件 ----------
 els.send.addEventListener('click', send);
 els.input.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  // Enter = 换行（textarea 默认行为）；Ctrl/Cmd+Enter = 发送
+  // 输入法组合期间（isComposing/keyCode 229）不触发发送，避免发出缺最后一段组合文本的输入
+  if (e.isComposing || e.keyCode === 229) return;
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); }
 });
+// 图片粘贴（Task17）：剪贴板图片 → base64 → markdown 图片语法插入输入框（>1MB 拒绝）
+els.input.addEventListener('paste', (e) => {
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.type && item.type.startsWith('image/')) {
+      e.preventDefault();
+      const file = item.getAsFile();
+      if (!file) continue;
+      // Limit to 1MB
+      if (file.size > 1024 * 1024) { alert('图片过大（>1MB），请压缩后粘贴'); continue; }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const base64 = reader.result;
+        // Insert markdown image syntax into input
+        const cursor = els.input.selectionStart;
+        const text = els.input.value;
+        const imgTag = `![pasted-image](${base64})`;
+        els.input.value = text.slice(0, cursor) + imgTag + text.slice(cursor);
+        els.input.focus();
+      };
+      reader.readAsDataURL(file);
+    }
+  }
+});
+// 自动保存（Task9）：输入停顿 3s 自动落盘；关页前尽力保存
+let autoSaveTimer = null;
+els.input.addEventListener('input', () => {
+  clearTimeout(autoSaveTimer);
+  autoSaveTimer = setTimeout(() => { if (history.length) saveChat(); }, 3000);
+});
+// Before unload: try to save（keepalive 确保页面卸载时请求仍发出；异步 saveChat 会随页面销毁丢失）
+window.addEventListener('beforeunload', () => {
+  if (!chatId || !history.length) return;
+  const firstUser = history.find((m) => m.role === 'user');
+  const title = chatTitle || (firstUser ? firstUser.content.slice(0, 24) : '新对话');
+  try {
+    fetch('/api/chats/' + chatId, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title, messages: history }),
+      keepalive: true,
+    }).catch(() => {});
+  } catch (e) { /* best effort */ }
+});
+// 全局快捷键：Ctrl+Shift+F 聚焦世界设定（通用版无检索框）
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && e.shiftKey && (e.key === 'F' || e.key === 'f')) {
+    e.preventDefault();
+    if (worldInput) { worldInput.focus(); worldInput.select(); }
+  }
+});
+// 移动端侧栏抽屉：汉堡按钮开 / 遮罩点击关（<768px 生效，桌面端无影响）
+const sidebarToggle = document.getElementById('sidebar-toggle');
+const sidebarOverlay = document.getElementById('sidebar-overlay');
+const sidebarEl = document.getElementById('sidebar');
+function toggleSidebar(open) {
+  if (sidebarEl) sidebarEl.classList.toggle('open', open);
+  if (sidebarOverlay) sidebarOverlay.classList.toggle('open', open);
+}
+if (sidebarToggle) sidebarToggle.addEventListener('click', () => toggleSidebar(!(sidebarEl && sidebarEl.classList.contains('open'))));
+if (sidebarOverlay) sidebarOverlay.addEventListener('click', () => toggleSidebar(false));
 
 // ---------- 手动附加资料（📎 临时注入，不进对话历史） ----------
 els.manAttachBtn.addEventListener('click', () => {
@@ -1700,6 +1953,23 @@ els.manAttachOk.addEventListener('click', () => {
 });
 
 // ---------- 会话常驻设定（📌 每轮注入 system，防遗忘；按会话隔离） ----------
+// Task15 多槽位：其他 / 背景 / 关系 / 规则（页签切换编辑，保存时整包提交）
+const NOTE_SLOTS_UI = ['其他', '背景', '关系', '规则'];
+let noteSlotsData = {};      // 内存槽位数据
+let noteSlotsPristine = {};  // 打开/加载时的原始槽位快照（取消时整体还原，防页签暂存无法撤销）
+let currentNoteSlot = '其他';
+
+function noteSlotTab(name) {
+  return els.noteAttachBox.querySelector(`.note-slot-tab[data-slot="${name}"]`);
+}
+function switchNoteSlot(name) {
+  currentNoteSlot = name;
+  els.noteAttachInput.value = noteSlotsData[name] || '';
+  NOTE_SLOTS_UI.forEach((k) => {
+    const t = noteSlotTab(k);
+    if (t) t.classList.toggle('active', k === name);
+  });
+}
 async function loadSessionNote() {
   try {
     const r = await (await fetch('/api/op/note', {
@@ -1707,28 +1977,38 @@ async function loadSessionNote() {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ chatId, get: true }),
     })).json();
-    if (r && r.note) {
-      els.noteAttachInput.value = r.note;
-      els.noteAttachBtn.textContent = '📌 会话常驻设定（已设置，点击查看/修改）';
-    } else {
-      els.noteAttachInput.value = '';
-      els.noteAttachBtn.textContent = '📌 会话常驻设定（每轮注入，防遗忘）';
-    }
+    noteSlotsData = (r && r.slots && typeof r.slots === 'object') ? r.slots : {};
+    noteSlotsPristine = JSON.parse(JSON.stringify(noteSlotsData));   // 快照：取消时还原到本次加载值
+    const hasAny = NOTE_SLOTS_UI.some((k) => String(noteSlotsData[k] || '').trim());
+    els.noteAttachBtn.textContent = hasAny
+      ? '📌 会话常驻设定（已设置，点击查看/修改）'
+      : '📌 会话常驻设定（每轮注入，防遗忘）';
+    switchNoteSlot('其他');
   } catch (e) { /* 忽略 */ }
 }
 els.noteAttachBtn.addEventListener('click', () => {
   els.noteAttachBox.classList.toggle('hidden');
 });
+// 页签切换：暂存当前槽内容 → 加载目标槽
+NOTE_SLOTS_UI.forEach((k) => {
+  const tab = noteSlotTab(k);
+  if (tab) tab.addEventListener('click', () => {
+    noteSlotsData[currentNoteSlot] = els.noteAttachInput.value.trim();
+    switchNoteSlot(k);
+  });
+});
 els.noteAttachCancel.addEventListener('click', () => {
+  noteSlotsData = JSON.parse(JSON.stringify(noteSlotsPristine));   // 整体还原到加载时快照（含切过页签的暂存）
+  switchNoteSlot(currentNoteSlot);
   els.noteAttachBox.classList.add('hidden');
 });
 els.noteAttachOk.addEventListener('click', async () => {
-  const text = els.noteAttachInput.value.trim();
+  noteSlotsData[currentNoteSlot] = els.noteAttachInput.value.trim();   // 先同步当前槽
   try {
     const r = await (await fetch('/api/op/note', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ chatId, note: text }),
+      body: JSON.stringify({ chatId, slots: noteSlotsData }),
     })).json();
     if (r && r.ok) {
       els.noteAttachBox.classList.add('hidden');
@@ -1738,6 +2018,101 @@ els.noteAttachOk.addEventListener('click', async () => {
     }
   } catch (e) { /* 忽略 */ }
 });
+
+// ---------- 对话内搜索（🔍 搜索当前会话消息：输入即过滤 + 高亮 + 跳转） ----------
+function initMsgSearch() {
+  const chatInner = els.messages && els.messages.parentNode;
+  if (!chatInner || chatInner.querySelector('.msg-search-bar')) return;   // 已初始化
+  // 样式内联注入（两版通用，不依赖 style.css）
+  if (!document.getElementById('msg-search-style')) {
+    const st = document.createElement('style');
+    st.id = 'msg-search-style';
+    st.textContent = `
+      .msg-search-bar{display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--card,#232946);border:1px solid var(--border,#3a4163);border-radius:10px;margin:6px 10px 2px;}
+      .msg-search-bar.hidden{display:none;}
+      .msg-search-bar input{flex:1;min-width:0;background:var(--bg2,#1f2438);color:var(--text,#e8e6f0);border:1px solid var(--border,#3a4163);border-radius:6px;padding:5px 9px;font-size:13px;outline:none;}
+      .msg-search-bar input:focus{border-color:var(--accent,#a78bfa);}
+      .msg-search-info{color:var(--muted,#9aa0c0);font-size:12px;white-space:nowrap;}
+      .msg-search-bar button{background:var(--card,#232946);border:1px solid var(--border,#3a4163);color:var(--muted,#9aa0c0);border-radius:6px;padding:3px 9px;font-size:12px;cursor:pointer;flex:none;}
+      .msg-search-bar button:hover{color:var(--accent,#a78bfa);border-color:var(--accent,#a78bfa);}
+      .msg-search-toggle{position:absolute;right:12px;top:12px;z-index:30;background:var(--card,#232946);border:1px solid var(--border,#3a4163);color:var(--muted,#9aa0c0);border-radius:8px;padding:4px 9px;font-size:13px;cursor:pointer;opacity:.75;}
+      .msg-search-toggle:hover{opacity:1;color:var(--accent,#a78bfa);}
+      .msg-wrap.msg-search-hit{outline:2px solid var(--accent,#a78bfa);outline-offset:-2px;border-radius:10px;}
+    `;
+    document.head.appendChild(st);
+  }
+  const toggle = document.createElement('button');
+  toggle.className = 'msg-search-toggle';
+  toggle.textContent = '🔍';
+  toggle.title = '搜索当前对话';
+  const bar = document.createElement('div');
+  bar.className = 'msg-search-bar hidden';
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = '搜索对话内容…（Enter = 下一处，Esc = 关闭）';
+  const info = document.createElement('span');
+  info.className = 'msg-search-info';
+  const close = document.createElement('button');
+  close.textContent = '✕';
+  close.title = '关闭搜索';
+  bar.appendChild(input);
+  bar.appendChild(info);
+  bar.appendChild(close);
+  chatInner.insertBefore(bar, els.messages);
+  chatInner.appendChild(toggle);
+  if (getComputedStyle(chatInner).position === 'static') chatInner.style.position = 'relative';
+
+  let matches = [];
+  let curIdx = -1;
+  const clearHl = () => {
+    document.querySelectorAll('.msg-wrap.msg-search-hit').forEach((el) => el.classList.remove('msg-search-hit'));
+  };
+  const closeSearch = () => {
+    bar.classList.add('hidden');
+    input.value = '';
+    info.textContent = '';
+    matches = [];
+    curIdx = -1;
+    clearHl();
+  };
+  const jump = (dir) => {
+    if (!matches.length) return;
+    curIdx = (curIdx + dir + matches.length) % matches.length;
+    clearHl();
+    const el = matches[curIdx];
+    el.classList.add('msg-search-hit');
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    info.textContent = `${curIdx + 1} / ${matches.length}`;
+  };
+  const runSearch = () => {
+    const q = input.value.trim().toLowerCase();
+    clearHl();
+    matches = [];
+    curIdx = -1;
+    if (!q) { info.textContent = ''; return; }
+    // 只匹配气泡文本（不含操作按钮符号）
+    matches = Array.from(els.messages.querySelectorAll('.msg-wrap')).filter((w) =>
+      Array.from(w.querySelectorAll('.bubble')).some((b) => (b.textContent || '').toLowerCase().includes(q))
+    );
+    info.textContent = matches.length ? `匹配 ${matches.length} 条` : '无匹配';
+    if (matches.length) jump(1);
+  };
+  toggle.addEventListener('click', () => {
+    const isOpen = !bar.classList.contains('hidden');
+    if (isOpen) closeSearch();
+    else {
+      bar.classList.remove('hidden');
+      input.focus();
+      if (input.value.trim()) runSearch();
+    }
+  });
+  close.addEventListener('click', closeSearch);
+  input.addEventListener('input', runSearch);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); jump(1); }
+    else if (e.key === 'Escape') { e.preventDefault(); closeSearch(); }
+  });
+}
 
 // ---------- 启动 ----------
 document.getElementById('card-world').style.display = '';
@@ -1752,6 +2127,7 @@ loadSessionNote();
 loadStats();
 loadModel();
 loadProfiles();
+initMsgSearch();
 // 多标签页同步：另一 tab 切换会话/改偏好时本页跟随（避免互相覆盖）
 window.addEventListener('storage', (e) => {
   if (!e.newValue) return;

@@ -88,6 +88,17 @@ function safeParse(s) {
   try { return JSON.parse(s); } catch (e) { return {}; }
 }
 
+// Config auto-backup: rotate .bak files (keep 3) — 写配置前备份旧版，损坏/误改可回滚
+function backupConfig(file) {
+  try {
+    if (!fs.existsSync(file)) return;
+    // Rotate: bak2→bak3, bak1→bak2, current→bak1
+    try { if (fs.existsSync(file + '.bak2')) fs.renameSync(file + '.bak2', file + '.bak3'); } catch (e) {}
+    try { if (fs.existsSync(file + '.bak1')) fs.renameSync(file + '.bak1', file + '.bak2'); } catch (e) {}
+    try { fs.copyFileSync(file, file + '.bak1'); } catch (e) {}
+  } catch (e) { /* ignore */ }
+}
+
 function loadApiKey() {
   if (process.env.MOONRABBIT_API_KEY) return process.env.MOONRABBIT_API_KEY;
   return '';
@@ -98,6 +109,8 @@ ENDPOINT.apiKey = ENDPOINT.apiKey || API_KEY;
 // ---------- system prompt 组装（通用版：世界设定 / 角色卡 / 规则 由用户自填，三段分别注入） ----------
 function buildSystemPrompt(setting, chatId) {
   const parts = [];
+  const inj = customInjections(chatId || '');
+  if (inj.prefix) parts.push(`## ⚙️ 自定义注入（前缀 · 用户设置，置于最前）\n${inj.prefix}`);
   parts.push('你是叙事者与全员扮演者，正在与用户共同创作一部互动小说。用户扮演其中一位角色（具体身份由设定或对话确定）；多角色在场时，你同时扮演其余所有角色。');
   parts.push(`【创作自由】
 - 本作品为虚构的创意文学创作，所有角色、事件和场景均为虚构，仅供文学创作与艺术表达之目的。
@@ -136,6 +149,7 @@ function buildSystemPrompt(setting, chatId) {
   if (enabledNames.length) {
     parts.push('【工具（已开启：' + enabledNames.map((n) => BRIDGE_TOOL_LABELS[n] || n).join('、') + '）】当用户明确要求「联网/搜索/查一下」时，必须先调用 web_search 工具，得到结果后再回答；禁止跳过或编造；工具结果需标注来源。');
   }
+  if (inj.suffix) parts.push(`## ⚙️ 自定义注入（后缀 · 用户设置，置于最末）\n${inj.suffix}`);
   return parts.join('\n\n---\n\n');
 }
 
@@ -191,6 +205,24 @@ try {
 
 const THINK_BUDGET = { low: 4096, medium: 8192, high: 32768, max: 65536 };  // 思考强度档位 → 预算 token（custom 用 thinkingBudget 字段）
 
+// DeepSeek 定价（官方，每 1M token）——仅估算用，非账单依据
+const PRICE_TABLE = {
+  'deepseek-chat': { input: 1, output: 2, cacheHit: 0.1 },
+  'deepseek-v4-flash': { input: 1, output: 2, cacheHit: 0.1 },
+  'deepseek-v4-pro': { input: 4, output: 16, cacheHit: 0.4 },
+  'default': { input: 2, output: 8, cacheHit: 0.2 },
+};
+function priceFor(model) { return PRICE_TABLE[model] || PRICE_TABLE['default']; }
+// 估算费用（元）：缓存命中 token 按 cacheHit 单价，其余输入按 input 单价，输出按 output 单价
+function estimateCost(bucket, model) {
+  const p = priceFor(model);
+  const cacheTotal = (bucket.cacheRead || 0) + (bucket.cacheMiss || 0);
+  const inCost = cacheTotal > 0
+    ? ((bucket.cacheMiss || 0) / 1e6) * p.input + ((bucket.cacheRead || 0) / 1e6) * p.cacheHit
+    : ((bucket.tokensIn || 0) / 1e6) * p.input;   // 旧数据无缓存字段 → 全按输入价
+  return inCost + ((bucket.tokensOut || 0) / 1e6) * p.output;
+}
+
 // ---------- API 采样预设（命名预设：保存/切换/删除；参数随预设保存） ----------
 const PRESET_FILE = path.join(DATA_DIR, 'presets.json');
 const BUILTIN_PRESETS = {
@@ -216,7 +248,7 @@ function normPreset(p) {
 function savePresets() {
   const custom = {};
   for (const [k, v] of Object.entries(presets)) if (!BUILTIN_PRESETS[k]) custom[k] = v;
-  try { fs.writeFileSync(PRESET_FILE, JSON.stringify({ custom, active: activePreset }, null, 2), 'utf8'); } catch (e) { /* 忽略 */ }
+  try { backupConfig(PRESET_FILE); fs.writeFileSync(PRESET_FILE, JSON.stringify({ custom, active: activePreset }, null, 2), 'utf8'); } catch (e) { /* 忽略 */ }
 }
 function applyPreset(name) {
   const p = presets[name];
@@ -265,7 +297,7 @@ function loadProfiles() {
 function saveProfiles() {
   const custom = {};
   for (const [k, v] of Object.entries(profiles)) if (!BUILTIN_PROFILES[k]) custom[k] = v;
-  try { fs.writeFileSync(PROFILES_FILE, JSON.stringify({ custom, active: activeProfile }, null, 2), 'utf8'); } catch (e) { /* 忽略 */ }
+  try { backupConfig(PROFILES_FILE); fs.writeFileSync(PROFILES_FILE, JSON.stringify({ custom, active: activeProfile }, null, 2), 'utf8'); } catch (e) { /* 忽略 */ }
 }
 function snapshotEndpoint() {
   return {
@@ -299,14 +331,18 @@ function applyProfile(name) {
     if (typeof p.aux.fallback === 'boolean') AUX.fallback = p.aux.fallback;
   }
   if (p.preset && presets[p.preset]) applyPreset(p.preset);
-  fs.writeFileSync(MODEL_FILE, JSON.stringify({
-    protocol: ENDPOINT.protocol, baseURL: ENDPOINT.baseURL, apiKey: ENDPOINT.apiKey,
-    model: ENDPOINT.model, maxTokens: ENDPOINT.maxTokens, thinking: ENDPOINT.thinking,
-    thinkingBudget: ENDPOINT.thinkingBudget, maxContext: ENDPOINT.maxContext,
-    autoSummary: ENDPOINT.autoSummary, autoSummaryThreshold: ENDPOINT.autoSummaryThreshold,
-    aux: { enabled: AUX.enabled, protocol: AUX.protocol, baseURL: AUX.baseURL, apiKey: AUX.apiKey, model: AUX.model, fallback: AUX.fallback },
-    updatedAt: new Date().toISOString(),
-  }), 'utf8');
+  // 同步 model.json（写盘失败不阻塞端点切换；下次保存会再试）
+  try {
+    backupConfig(MODEL_FILE);
+    fs.writeFileSync(MODEL_FILE, JSON.stringify({
+      protocol: ENDPOINT.protocol, baseURL: ENDPOINT.baseURL, apiKey: ENDPOINT.apiKey,
+      model: ENDPOINT.model, maxTokens: ENDPOINT.maxTokens, thinking: ENDPOINT.thinking,
+      thinkingBudget: ENDPOINT.thinkingBudget, maxContext: ENDPOINT.maxContext,
+      autoSummary: ENDPOINT.autoSummary, autoSummaryThreshold: ENDPOINT.autoSummaryThreshold,
+      aux: { enabled: AUX.enabled, protocol: AUX.protocol, baseURL: AUX.baseURL, apiKey: AUX.apiKey, model: AUX.model, fallback: AUX.fallback },
+      updatedAt: new Date().toISOString(),
+    }), 'utf8');
+  } catch (e) { console.error('[applyProfile] model.json 写盘失败:', e.message); }
   saveProfiles();
   return true;
 }
@@ -441,6 +477,7 @@ async function readBody(req, maxBytes = BODY_MAX_BYTES) {
 async function callLLM(messages, system, onDelta, onMeta, onThinking, signal) {
   const ep = ENDPOINT;
   let emitted = false;   // 已有输出（delta/thinking）→ 失败时不重试，避免重复输出
+  let idleTimedOut = false;   // 流式空闲超时触发（Task7）→ 视为主动中止，不重试
   // 单次调用（openai/anthropic 双协议）；signal 用于客户端断连中止（SSE abort）
   const attempt = async () => {
     const emitDelta = (t) => { emitted = true; onDelta(t); };
@@ -471,27 +508,45 @@ async function callLLM(messages, system, onDelta, onMeta, onThinking, signal) {
       const reader = resp.body.getReader();
       const dec = new TextDecoder();
       let buf = '';
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let idx;
-        while ((idx = buf.indexOf('\n')) >= 0) {
-          const line = buf.slice(0, idx).trim();
-          buf = buf.slice(idx + 1);
-          if (!line.startsWith('data:')) continue;
-          const data = line.slice(5).trim();
-          if (!data || data === '[DONE]') continue;
-          try {
-            const ev = JSON.parse(data);
-            const delta = ev.choices && ev.choices[0] && ev.choices[0].delta;
-            if (delta) {
-              if (typeof delta.content === 'string' && delta.content) emitDelta(delta.content);
-              if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) emitThink(delta.reasoning_content);
-            }
-            if (ev.usage) onMeta && onMeta({ usageIn: ev.usage, usageOut: ev.usage });
-          } catch (e) { /* 忽略残缺行 */ }
+      // 流式空闲超时（Task7）：60s 无新 chunk → 取消读取，防端点挂起白烧 token
+      const IDLE_TIMEOUT = 60000;   // 60s
+      let lastChunk = Date.now();
+      const idleTimer = setInterval(() => {
+        if (Date.now() - lastChunk > IDLE_TIMEOUT) {
+          idleTimedOut = true;
+          clearInterval(idleTimer);
+          try { reader.cancel(); } catch (e) { /* 已关闭 */ }
         }
+      }, 5000);
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          lastChunk = Date.now();   // 每个 chunk 重置空闲计时
+          buf += dec.decode(value, { stream: true });
+          let idx;
+          while ((idx = buf.indexOf('\n')) >= 0) {
+            const line = buf.slice(0, idx).trim();
+            buf = buf.slice(idx + 1);
+            if (!line.startsWith('data:')) continue;
+            const data = line.slice(5).trim();
+            if (!data || data === '[DONE]') continue;
+            try {
+              const ev = JSON.parse(data);
+              const delta = ev.choices && ev.choices[0] && ev.choices[0].delta;
+              if (delta) {
+                if (typeof delta.content === 'string' && delta.content) emitDelta(delta.content);
+                if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) emitThink(delta.reasoning_content);
+              }
+              if (ev.usage) onMeta && onMeta({ usageIn: ev.usage, usageOut: ev.usage });
+            } catch (e) { /* 忽略残缺行 */ }
+          }
+        }
+      } catch (e) {
+        if (idleTimedOut) throw new Error('流式响应空闲超时（60s 无数据），已中止，请重试');
+        throw e;
+      } finally {
+        clearInterval(idleTimer);
       }
       return;
     }
@@ -524,32 +579,50 @@ async function callLLM(messages, system, onDelta, onMeta, onThinking, signal) {
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      let idx;
-      while ((idx = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, idx).trim();
-        buf = buf.slice(idx + 1);
-        if (!line.startsWith('data:')) continue;
-        const data = line.slice(5).trim();
-        if (!data || data === '[DONE]') continue;
-        try {
-          const ev = JSON.parse(data);
-          if (ev.type === 'message_start' && ev.message && ev.message.usage) {
-            onMeta && onMeta({ usageIn: ev.message.usage });
-          } else if (ev.type === 'message_delta' && ev.usage) {
-            onMeta && onMeta({ usageOut: ev.usage });
-          } else if (ev.type === 'content_block_delta' && ev.delta) {
-            if (ev.delta.type === 'text_delta') {
-              emitDelta(ev.delta.text);
-            } else if (ev.delta.type === 'thinking_delta' && ev.delta.thinking) {
-              emitThink(ev.delta.thinking);
-            }
-          }
-        } catch (e) { /* 忽略残缺行 */ }
+    // 流式空闲超时（Task7）：60s 无新 chunk → 取消读取，防端点挂起白烧 token
+    const IDLE_TIMEOUT = 60000;   // 60s
+    let lastChunk = Date.now();
+    const idleTimer = setInterval(() => {
+      if (Date.now() - lastChunk > IDLE_TIMEOUT) {
+        idleTimedOut = true;
+        clearInterval(idleTimer);
+        try { reader.cancel(); } catch (e) { /* 已关闭 */ }
       }
+    }, 5000);
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        lastChunk = Date.now();   // 每个 chunk 重置空闲计时
+        buf += dec.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, idx).trim();
+          buf = buf.slice(idx + 1);
+          if (!line.startsWith('data:')) continue;
+          const data = line.slice(5).trim();
+          if (!data || data === '[DONE]') continue;
+          try {
+            const ev = JSON.parse(data);
+            if (ev.type === 'message_start' && ev.message && ev.message.usage) {
+              onMeta && onMeta({ usageIn: ev.message.usage });
+            } else if (ev.type === 'message_delta' && ev.usage) {
+              onMeta && onMeta({ usageOut: ev.usage });
+            } else if (ev.type === 'content_block_delta' && ev.delta) {
+              if (ev.delta.type === 'text_delta') {
+                emitDelta(ev.delta.text);
+              } else if (ev.delta.type === 'thinking_delta' && ev.delta.thinking) {
+                emitThink(ev.delta.thinking);
+              }
+            }
+          } catch (e) { /* 忽略残缺行 */ }
+        }
+      }
+    } catch (e) {
+      if (idleTimedOut) throw new Error('流式响应空闲超时（60s 无数据），已中止，请重试');
+      throw e;
+    } finally {
+      clearInterval(idleTimer);
     }
   };
   // 自动重试：网络抖动/5xx 重试 1 次；客户端断连中止（signal.aborted）、已开始输出、4xx（Key/模型错误）不重试
@@ -557,6 +630,7 @@ async function callLLM(messages, system, onDelta, onMeta, onThinking, signal) {
     await attempt();
   } catch (e) {
     if (signal && signal.aborted) throw e;
+    if (idleTimedOut) throw e;   // 空闲超时主动中止（Task7）：不重试（重试只会再挂 60s）
     if (emitted) throw e;
     const msg = String(e && e.message || e);
     if (msg.startsWith('LLM 4')) throw e;   // 4xx 不重试
@@ -675,10 +749,54 @@ fs.mkdirSync(CHATS_DIR, { recursive: true });
 
 // ---------- 界面操作状态（视角 / 当日着装覆盖，会话内持久，注入 system + 记账） ----------
 const OP_FILE = path.join(DATA_DIR, 'op.json');
-let opState = { views: {}, wardrobes: {}, expands: {}, tools: {}, notes: {} };   // views/wardrobes/expands/tools/notes: {chatId: ...}
+let opState = { views: {}, wardrobes: {}, expands: {}, tools: {}, notes: {}, customInjections: {} };   // views/wardrobes/expands/tools/notes/customInjections: {chatId: ...}
 try { opState = Object.assign(opState, JSON.parse(fs.readFileSync(OP_FILE, 'utf8'))); } catch (e) { /* 首次 */ }
 function saveOpState() {
   try { fs.writeFileSync(OP_FILE, JSON.stringify(opState), 'utf8'); } catch (e) { /* 忽略 */ }
+}
+
+// ---------- 会话常驻设定多槽位（Task15：背景 / 关系 / 规则 / 其他） ----------
+// opState.notes[chatId] 兼容两种形态：
+//   ① 旧字符串（向后兼容）→ 视为「其他」槽
+//   ② 对象 {背景, 关系, 规则, 其他} → 各槽独立
+const NOTE_SLOTS = ['背景', '关系', '规则', '其他'];
+// 归一化为槽位对象（字符串迁移为「其他」）
+function noteSlots(chatId) {
+  const cid = sanitizeId(chatId || '');
+  const raw = (opState.notes && opState.notes[cid]) || null;
+  if (raw == null) return {};
+  if (typeof raw === 'string') {
+    const t = raw.trim();
+    return t ? { '其他': t } : {};
+  }
+  if (typeof raw === 'object') {
+    const out = {};
+    for (const k of NOTE_SLOTS) {
+      const v = raw[k];
+      if (v && typeof v === 'string' && v.trim()) out[k] = v.trim();
+    }
+    return out;
+  }
+  return {};
+}
+// 合并文本（供注入 / 兼容旧读取）
+function noteText(chatId) {
+  const slots = noteSlots(chatId);
+  return NOTE_SLOTS.map((k) => slots[k] || '').filter(Boolean).join('\n');
+}
+// 注入文本（带槽位标题，每轮注入 system）
+function noteInjectText(chatId) {
+  const slots = noteSlots(chatId);
+  const names = Object.keys(slots);
+  if (!names.length) return '';
+  return names.map((k) => `【${k}】\n${slots[k]}`).join('\n\n');
+}
+
+// 自定义注入槽（⚙️ 前缀 / 后缀，按会话；随 system 注入：前缀置顶、后缀置底）
+function customInjections(chatId) {
+  const cid = sanitizeId(chatId || '');
+  const inj = (opState.customInjections && opState.customInjections[cid]) || {};
+  return { prefix: String(inj.prefix || '').trim(), suffix: String(inj.suffix || '').trim() };
 }
 // 记一条操作回合记录（reuse 回合记录 jsonl 结构；updates 行供导出）
 function appendOpRecord(chatId, entry, content) {
@@ -811,7 +929,8 @@ function setEmotion(chatId, name, emo) {
 function opInject(chatId) {
   const cid = sanitizeId(chatId);
   const lines = [];
-  if (opState.notes[cid] && String(opState.notes[cid]).trim()) lines.push(`- 📌 会话常驻设定（用户保存，每轮必读，优先级最高；与「世界设定」/检索内容冲突时以此为准）：\n${String(opState.notes[cid]).trim()}`);
+  const noteText_ = noteInjectText(cid);   // 多槽位合并注入（Task15：非空槽全部拼入）
+  if (noteText_) lines.push(`- 📌 会话常驻设定（用户保存，每轮必读，优先级最高；与「世界设定」/检索内容冲突时以此为准）：\n${noteText_}`);
   if (opState.views[cid]) lines.push(`- 当前视角覆盖：${opState.views[cid]}（用户已在界面切换视角；你必须以该角色的主观视角叙述——与设定中记录的视角冲突时，以本覆盖为准。严格遵守信息屏障：主场景角色无法感知副场景事件）`);
   if (opState.wardrobes[cid]) lines.push(`- 当日着装覆盖：${opState.wardrobes[cid]}（用户已在界面换装；以此为准，覆盖设定中的当日着装描述）`);
   if (opState.expands[cid]) lines.push('- 【扩写指令（已开启）】当用户发来简短指令（如「角色去厨房」「角色站起来」）时，你的任务是将其【扩写】为详细、生动的动作/场景/台词描写：用第三人称叙述该角色的行为（动作细节、表情、环境、心理），符合人设；扩写要连贯、有画面感、贴合当前场景；不要替其他角色做决定；扩写后可自然衔接台词。');
@@ -1013,14 +1132,43 @@ async function runBridgeToolLoop(messages, system, enabledNames) {
 }
 
 function chatFilePath(id) { return path.join(CHATS_DIR, `${id}.json`); }
+
+// ---------- 存档点（Savepoints）：data/savepoints/{chatId}/{timestamp}.json（会话完整副本） ----------
+const SAVEPOINTS_DIR = path.join(DATA_DIR, 'savepoints');
+fs.mkdirSync(SAVEPOINTS_DIR, { recursive: true });
+function savepointsDirFor(chatId) {
+  const dir = path.join(SAVEPOINTS_DIR, sanitizeId(chatId));
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+function listSavepoints(chatId) {
+  const dir = path.join(SAVEPOINTS_DIR, sanitizeId(chatId));
+  try {
+    return fs.readdirSync(dir).filter((f) => f.endsWith('.json')).map((f) => {
+      const ts = Number(f.replace(/\.json$/, '')) || 0;
+      let label = '', count = 0;
+      try {
+        const d = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+        label = (d.savepoint && d.savepoint.label) || '';
+        count = Array.isArray(d.messages) ? d.messages.length : 0;
+      } catch (e) { /* 忽略损坏存档 */ }
+      return { ts, file: f, label, count, time: new Date(ts).toISOString() };
+    }).sort((a, b) => b.ts - a.ts);
+  } catch (e) { return []; }
+}
+
 function readChats() {
   try {
     return fs.readdirSync(CHATS_DIR).filter((f) => f.endsWith('.json')).map((f) => {
       try {
         const c = JSON.parse(fs.readFileSync(path.join(CHATS_DIR, f), 'utf8'));
-        return { id: c.id, title: c.title || '未命名', createdAt: c.createdAt, updatedAt: c.updatedAt, count: (c.messages || []).length };
+        return { id: c.id, title: c.title || '未命名', createdAt: c.createdAt, updatedAt: c.updatedAt, count: (c.messages || []).length, pinned: !!c.pinned };
       } catch (e) { return null; }
-    }).filter(Boolean).sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+    }).filter(Boolean).sort((a, b) => {
+      // 置顶会话优先，其余按最近更新排序
+      if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
+      return (b.updatedAt || '').localeCompare(a.updatedAt || '');
+    });
   } catch (e) { return []; }
 }
 
@@ -1131,6 +1279,11 @@ function sendFile(res, file, type) {
   }
 }
 
+// 顶层兜底（M6）：async handler 内任何未捕获异常（如 readBody 413 抛出）不崩溃进程
+process.on('unhandledRejection', (err) => {
+  console.error('[server] 未捕获的异步异常（已兜底，请求可能超时）:', err && err.message || err);
+});
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const p = url.pathname;
@@ -1206,6 +1359,7 @@ const server = http.createServer(async (req, res) => {
       next.model = probed.model;
       ENDPOINT = next;
       AUX = nextAux;
+      backupConfig(MODEL_FILE);
       fs.writeFileSync(MODEL_FILE, JSON.stringify({
         protocol: ENDPOINT.protocol, baseURL: ENDPOINT.baseURL, apiKey: ENDPOINT.apiKey,
         model: ENDPOINT.model, maxTokens: ENDPOINT.maxTokens, thinking: ENDPOINT.thinking,
@@ -1244,8 +1398,9 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'PUT') {
       let body = await readBody(req);
       try {
-        const { title, messages } = JSON.parse(body);
+        const { title, messages, pinned } = JSON.parse(body);
         const chat = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : { id, createdAt: new Date().toISOString() };
+        if (typeof pinned === 'boolean') chat.pinned = pinned;
         chat.title = (title || chat.title || '未命名').slice(0, 40);
         chat.messages = Array.isArray(messages) ? messages : (chat.messages || []);
         chat.updatedAt = new Date().toISOString();
@@ -1259,6 +1414,48 @@ const server = http.createServer(async (req, res) => {
       return sendJson({ ok: true });
     }
     return sendJson({ error: 'method' }, 405);
+  }
+
+  // 存档点：保存当前会话完整副本 / 列表 / 读取恢复
+  if (p === '/api/savepoints/save' && req.method === 'POST') {
+    let body = await readBody(req);
+    const sendJson = (obj, code = 200) => { res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
+    try {
+      const { chatId, label } = JSON.parse(body);
+      const cid = sanitizeId(chatId || '');
+      const src = chatFilePath(cid);   // 读源必须用消毒后的 cid（防路径穿越外带任意 JSON）
+      if (!fs.existsSync(src)) return sendJson({ ok: false, error: '会话不存在' }, 404);
+      const chat = JSON.parse(fs.readFileSync(src, 'utf8'));
+      const ts = Date.now();
+      // 存档 = 会话完整副本（附带存档元信息 savepoint，读档时剥离）
+      const snap = { ...chat, savepoint: { ts, label: String(label || '').trim().slice(0, 40), savedAt: new Date().toISOString() } };
+      fs.writeFileSync(path.join(savepointsDirFor(chatId), `${ts}.json`), JSON.stringify(snap, null, 2), 'utf8');
+      return sendJson({ ok: true, ts, note: `已存档：${new Date(ts).toLocaleString()}${snap.savepoint.label ? '（' + snap.savepoint.label + '）' : ''}` });
+    } catch (e) {
+      return sendJson({ ok: false, error: String(e) }, 400);
+    }
+  }
+  if (p === '/api/savepoints/list' && req.method === 'GET') {
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ ok: true, savepoints: listSavepoints(url.searchParams.get('chatId') || '') }));
+  }
+  if (p === '/api/savepoints/load' && req.method === 'POST') {
+    let body = await readBody(req);
+    const sendJson = (obj, code = 200) => { res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
+    try {
+      const { chatId, ts } = JSON.parse(body);
+      const cid = sanitizeId(chatId || '');
+      const file = path.join(SAVEPOINTS_DIR, cid, `${Number(ts)}.json`);
+      if (!fs.existsSync(file)) return sendJson({ ok: false, error: '存档点不存在' }, 404);
+      const snap = JSON.parse(fs.readFileSync(file, 'utf8'));
+      // 恢复 = 用存档副本覆盖当前会话文件（剥离 savepoint 元信息，保持当前会话 id）
+      const { savepoint, ...rest } = snap;
+      const chat = { ...rest, id: cid, updatedAt: new Date().toISOString() };
+      fs.writeFileSync(chatFilePath(cid), JSON.stringify(chat), 'utf8');
+      return sendJson({ ok: true, note: '已从存档点恢复' });
+    } catch (e) {
+      return sendJson({ ok: false, error: String(e) }, 400);
+    }
   }
 
   // 界面操作：视角切换 / 换装（记账 + 状态持久化，供导出/时间线）
@@ -1413,20 +1610,63 @@ const server = http.createServer(async (req, res) => {
     }
   }
   // 界面操作：会话常驻设定（📌 每轮注入 system，不被上下文裁剪；按会话隔离）
+  // Task15 多槽位：GET 返回 {note:合并文本, slots:{背景,关系,规则,其他}}；POST 支持 slots 对象或旧字符串 note
   if (p === '/api/op/note' && req.method === 'POST') {
     let body = await readBody(req);
     try {
-      const { chatId, note, get } = JSON.parse(body);
+      const { chatId, note, get, slots } = JSON.parse(body);
       const cid = sanitizeId(chatId || '');
       if (get) {
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ note: opState.notes[cid] || '' }));
+        return res.end(JSON.stringify({ note: noteText(cid), slots: noteSlots(cid) }));
       }
-      const n = String(note || '').trim();
+      // 多槽位保存（新前端）：slots 对象 → 存对象（仅保留已知槽位；全空 = 清空）
+      if (slots && typeof slots === 'object') {
+        const clean = {};
+        let hasAny = false;
+        for (const k of NOTE_SLOTS) {
+          const v = slots[k];
+          if (v != null && typeof v === 'string' && v.trim()) { clean[k] = v.trim().slice(0, 4000); hasAny = true; }
+        }
+        if (hasAny) opState.notes[cid] = clean; else delete opState.notes[cid];
+        saveOpState();
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok: true, saved: hasAny, note: hasAny ? '会话常驻设定已保存（每轮注入 system）' : '会话常驻设定已清空' }));
+      }
+      // 旧接口兼容：字符串 note → 视为「其他」槽（读取时按迁移逻辑归位）；与 slots 路径一致截断 4000
+      const n = String(note || '').trim().slice(0, 4000);
       if (n) opState.notes[cid] = n; else delete opState.notes[cid];
       saveOpState();
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ ok: true, saved: !!n, note: n ? '会话常驻设定已保存（每轮注入 system）' : '会话常驻设定已清空' }));
+    } catch (e) {
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ error: String(e) }));
+    }
+  }
+
+  // 界面操作：自定义注入槽（⚙️ 前缀 / 后缀，按会话，随 system 注入）
+  if (p === '/api/op/inject' && req.method === 'GET') {
+    const inj = customInjections(url.searchParams.get('chatId') || '');
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ ok: true, ...inj }));
+  }
+  if (p === '/api/op/inject' && req.method === 'POST') {
+    let body = await readBody(req);
+    try {
+      const { chatId, prefix, suffix } = JSON.parse(body);
+      const cid = sanitizeId(chatId || '');
+      const cur = customInjections(chatId || '');
+      const next = {
+        prefix: String(prefix != null ? prefix : cur.prefix).trim().slice(0, 2000),
+        suffix: String(suffix != null ? suffix : cur.suffix).trim().slice(0, 2000),
+      };
+      if (!opState.customInjections) opState.customInjections = {};
+      if (next.prefix || next.suffix) opState.customInjections[cid] = next;
+      else delete opState.customInjections[cid];
+      saveOpState();
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok: true, note: next.prefix || next.suffix ? '自定义注入已保存（前缀/后缀随 system 注入，下一轮生效）' : '自定义注入已清空' }));
     } catch (e) {
       res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ error: String(e) }));
@@ -1459,7 +1699,7 @@ const server = http.createServer(async (req, res) => {
   // 历史消息检索（本地关键词，零 API）
   if (p === '/api/history/search' && req.method === 'GET') return handleHistorySearch(url, res);
 
-  // 会话统计：当前模型 + 全部合计
+  // 会话统计：当前模型 + 全部合计 + 每日费用（Task6）
   if (p === '/api/stats' && req.method === 'GET') {
     const cur = summarize(stats.byModel[ENDPOINT.model] || emptyBucket());
     const total = Object.values(stats.byModel).reduce((acc, b) => {
@@ -1470,12 +1710,26 @@ const server = http.createServer(async (req, res) => {
       return acc;
     }, emptyBucket());
     const t = summarize(total);
+    // 每日费用统计（按调用完成日期分桶；价目 PRICE_TABLE，仅估算非账单）
+    const daily = Object.entries(stats.daily || {}).map(([date, d]) => {
+      let cost = 0;
+      const models = [];
+      for (const [m, mb] of Object.entries(d.models || {})) {
+        const c = estimateCost(mb, m);
+        cost += c;
+        models.push({ model: m, calls: mb.calls, tokensIn: mb.tokensIn, tokensOut: mb.tokensOut, cacheRead: mb.cacheRead, cacheMiss: mb.cacheMiss, cost: Math.round(c * 10000) / 10000 });
+      }
+      models.sort((a, b) => b.cost - a.cost);
+      return { date, calls: d.calls, tokensIn: d.tokensIn, tokensOut: d.tokensOut, cacheRead: d.cacheRead, cacheMiss: d.cacheMiss, cost: Math.round(cost * 10000) / 10000, models };
+    }).sort((a, b) => a.date.localeCompare(b.date)).slice(-30);
+    const currentCost = Math.round(estimateCost(stats.byModel[ENDPOINT.model] || emptyBucket(), ENDPOINT.model) * 10000) / 10000;
+    const totalCost = Math.round(Object.entries(stats.byModel).reduce((a, [m, b]) => a + estimateCost(b, m), 0) * 10000) / 10000;
     // 本对话统计（?chatId= 指定会话的完整桶；累计口径见 current/total）
     const qcid = (url.searchParams.get('chatId') || '').trim();
     const cb = qcid ? (stats.byChat[sanitizeId(qcid)] || null) : null;
     const chat = cb ? summarize(cb) : null;
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ model: ENDPOINT.model, current: cur, total: t, chat }));
+    return res.end(JSON.stringify({ model: ENDPOINT.model, current: cur, total: t, chat, daily, currentCost, totalCost }));
   }
 
   // 剧情记忆：时间线 / 物品栏 / 导出（按会话 chatId 隔离）
@@ -1696,6 +1950,10 @@ const server = http.createServer(async (req, res) => {
     const llmAbort = new AbortController();
     // 客户端断连（关页面/刷新/切会话）→ 立即中止 LLM 请求，不再烧 token
     res.on('close', () => { finished = true; abortedByClient = true; llmAbort.abort(); });
+    // SSE 心跳（Task8）：15s 无事件时发 ping 保活连接，防代理/防火墙/浏览器超时掐断流
+    const pingInterval = setInterval(() => {
+      if (!finished) res.write('data: {"type":"ping"}\n\n');
+    }, 15000);
     let acc = '';
     let firstTokenAt = 0;
     const t0 = Date.now();
@@ -1726,6 +1984,9 @@ const server = http.createServer(async (req, res) => {
         }
       } catch (e) { console.error('[bridge] 工具回合失败:', e.message); }
     }
+    // 图片降级（M7）：base64 图片不进 LLM（单图可达百万字符、双图超 2MB body 限制），
+    // 发送前替换为占位符文本（气泡渲染不受影响——前端 history 仍是原图）
+    merged = merged.map((m) => ({ ...m, content: String(m.content || '').replace(/!\[[^\]]*\]\(data:image\/[^)]+\)/g, '[图片]') }));
     try {
       await callLLM(merged, system, (text) => {
         if (!firstTokenAt) firstTokenAt = Date.now();
@@ -1742,11 +2003,28 @@ const server = http.createServer(async (req, res) => {
       const uOut = meta.usageOut || {};
       const inTok = uIn.input_tokens || uIn.prompt_tokens || 0;
       const cacheRead = uIn.cache_read_input_tokens || uIn.prompt_cache_hit_tokens || 0;
-      const cacheCreate = uIn.cache_creation_input_tokens || 0;
-      b.tokensIn += inTok + cacheRead + cacheCreate;
+      // 注意：input_tokens/prompt_tokens 已包含缓存读写与缓存创建部分（DeepSeek/Anthropic 同），
+      // 不再叠加 cacheRead/cacheCreate，否则费用与命中率被系统性高估/压低
+      b.tokensIn += inTok;
       b.tokensOut += uOut.output_tokens || uOut.completion_tokens || 0;
       b.cacheRead += cacheRead;
-      b.cacheMiss += inTok + cacheCreate;
+      b.cacheMiss += Math.max(0, inTok - cacheRead);
+      // 每日费用记账（Task6）：按调用完成日期分桶（含分模型明细），供 /api/stats 每日费用仪表盘
+      const nowD = new Date();
+      const dk = `${nowD.getFullYear()}-${String(nowD.getMonth() + 1).padStart(2, '0')}-${String(nowD.getDate()).padStart(2, '0')}`;   // 本地日期（避免 UTC 跨日错记）
+      if (!stats.daily) stats.daily = {};
+      const dd = stats.daily[dk] = stats.daily[dk] || { calls: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheMiss: 0, models: {} };
+      dd.calls += 1;
+      dd.tokensIn += inTok;
+      dd.tokensOut += uOut.output_tokens || uOut.completion_tokens || 0;
+      dd.cacheRead += cacheRead;
+      dd.cacheMiss += Math.max(0, inTok - cacheRead);
+      const dm = dd.models[ENDPOINT.model] = dd.models[ENDPOINT.model] || { calls: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheMiss: 0 };
+      dm.calls += 1;
+      dm.tokensIn += inTok;
+      dm.tokensOut += uOut.output_tokens || uOut.completion_tokens || 0;
+      dm.cacheRead += cacheRead;
+      dm.cacheMiss += Math.max(0, inTok - cacheRead);
       // 本对话统计另计（完整桶；累计口径在 /api/stats 的 current/total 汇总）
       const cid = payload.chatId ? sanitizeId(payload.chatId) : '';
       if (cid) {
@@ -1756,10 +2034,10 @@ const server = http.createServer(async (req, res) => {
         cb.calls += 1;
         cb.llmMs += Date.now() - t0;
         if (firstTokenAt) { cb.firstTokenSum += firstTokenAt - t0; cb.firstTokenN += 1; }
-        cb.tokensIn += inTok + cacheRead + cacheCreate;
+        cb.tokensIn += inTok;
         cb.tokensOut += uOut.output_tokens || uOut.completion_tokens || 0;
         cb.cacheRead += cacheRead;
-        cb.cacheMiss += inTok + cacheCreate;
+        cb.cacheMiss += Math.max(0, inTok - cacheRead);
       }
       saveStats();
       appendTurnRecord(acc, payload.chatId, payload.seq);  // 剧情记忆：按会话自动记账（带消息序号）
@@ -1772,6 +2050,7 @@ const server = http.createServer(async (req, res) => {
         send({ type: 'error', error: String(e) });
       }
     } finally {
+      clearInterval(pingInterval);   // 心跳随会话结束停止（Task8）
       finished = true;
       res.end();
     }
