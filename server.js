@@ -1113,7 +1113,7 @@ const server = http.createServer(async (req, res) => {
       protocol: ENDPOINT.protocol,
       baseURL: ENDPOINT.baseURL,
       apiKeyMasked: k ? '...' + k.slice(-4) : '',
-      usingDefaultKey: !fs.existsSync(MODEL_FILE) || !(JSON.parse(fs.readFileSync(MODEL_FILE, 'utf8') || '{}').apiKey),
+      usingDefaultKey: (() => { try { return !fs.existsSync(MODEL_FILE) || !(JSON.parse(fs.readFileSync(MODEL_FILE, 'utf8') || '{}').apiKey); } catch (e) { return true; } })(),
       maxTokens: ENDPOINT.maxTokens,
       thinking: ENDPOINT.thinking,
       thinkingBudget: ENDPOINT.thinkingBudget,
@@ -1203,7 +1203,7 @@ const server = http.createServer(async (req, res) => {
     const file = chatFilePath(id);
     if (req.method === 'GET') {
       if (!fs.existsSync(file)) return sendJson({ error: 'not found' }, 404);
-      return sendJson(JSON.parse(fs.readFileSync(file, 'utf8')));
+      try { return sendJson(JSON.parse(fs.readFileSync(file, 'utf8'))); } catch (e) { return sendJson({ error: 'failed to load chat' }, 500); }
     }
     if (req.method === 'PUT') {
       let body = '';
@@ -1755,4 +1755,11 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`通用多角色 RP 界面: http://127.0.0.1:${PORT}`);
   console.log(`模型: ${ENDPOINT.model} | 协议: ${ENDPOINT.protocol} | 端点: ${ENDPOINT.baseURL} | API Key: ${ENDPOINT.apiKey ? '已配置' : '未配置'}`);
+}).on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`端口 ${PORT} 已被占用，请关闭占用进程后重试`);
+  } else {
+    console.error('服务启动失败:', err.message);
+  }
+  process.exit(1);
 });

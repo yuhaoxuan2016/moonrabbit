@@ -92,8 +92,8 @@ function parseSegments(text) {
   const push = () => { if (cur && cur.text.trim()) segs.push(cur); cur = null; };
   for (const raw of lines) {
     const line = raw.trimEnd();
-    const m1 = /^([\u4e00-\u9fa5A-Za-z][\u4e00-\u9fa5A-Za-z·]{0,10})[：:]\s*(.*)$/.exec(line);
-    const m2 = /^([\u4e00-\u9fa5A-Za-z][\u4e00-\u9fa5A-Za-z·]{0,10})[（(](.+)[）)]$/.exec(line);
+    const m1 = /^([\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7afA-Za-z][\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7afA-Za-z·]{0,10})[：:]\s*(.*)$/.exec(line);
+    const m2 = /^([\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7afA-Za-z][\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7afA-Za-z·]{0,10})[（(](.+)[）)]$/.exec(line);
     if (m1) {
       push();
       segs.push({ char: m1[1], text: m1[2], actionOnly: false });
@@ -350,10 +350,10 @@ function rebuildMsgWrap(wrap, role, content, seq) {
     const av = document.createElement('div');
     av.className = 'avatar';
     av.style.borderColor = '#60a5fa';
-    av.innerHTML = avatarHtml('rabbit');
+    av.innerHTML = avatarHtml('你');
     const nm = document.createElement('div');
     nm.className = 'char-name';
-    nm.textContent = 'rabbit（你）';
+    nm.textContent = '你';
     body.insertBefore(nm, bub);
     row.appendChild(av);
   } else {
