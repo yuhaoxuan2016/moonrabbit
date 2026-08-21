@@ -351,7 +351,7 @@ loadProfiles();
 // 解析 AI 回复中的 <storyevent>/<items>/【更新】标签 → 结构化回合记录
 function parseTurnTags(content) {
   const rec = { story_time: '', location: '', atmosphere: '', characters: [], costume: '', event: '', items_gain: [], items_loss: [], updates: [], emotion: {} };
-  const evRe = /<storyevent>([\s\S]*?)<\/storyevent>/gi;
+  const evRe = /<(?:storyevent|horaeevent)>([\s\S]*?)<\/(?:storyevent|horaeevent)>/gi;
   let m;
   while ((m = evRe.exec(content))) {
     for (const line of m[1].split('\n')) {
@@ -374,7 +374,7 @@ function parseTurnTags(content) {
       }
     }
   }
-  const hRe = /<items>([\s\S]*?)<\/items>/gi;
+  const hRe = /<(?:items|horae)>([\s\S]*?)<\/(?:items|horae)>/gi;
   while ((m = hRe.exec(content))) {
     for (const line of m[1].split('\n')) {
       let im = line.match(/^\s*item-\s*[:：]\s*(.+?)\s*$/i);
@@ -1569,23 +1569,23 @@ const server = http.createServer(async (req, res) => {
       const { action, name, preset } = JSON.parse(body);
       const nm = String(name || '').trim().slice(0, 40);
       if (action === 'apply') {
-        if (!presets[nm]) return res.end(JSON.stringify({ error: '预设不存在：' + nm }));
+        if (!presets[nm]) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '预设不存在：' + nm })); }
         applyPreset(nm);
-        return res.end(JSON.stringify({ ok: true, active: nm, samplers: SAMPLERS, note: `已应用预设「${nm}」` }));
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, active: nm, samplers: SAMPLERS, note: `已应用预设「${nm}」` }));
       }
       if (action === 'save') {
-        if (!nm) return res.end(JSON.stringify({ error: '预设名不能为空' }));
+        if (!nm) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '预设名不能为空' })); }
         presets[nm] = normPreset(preset || {});
         applyPreset(nm);
-        return res.end(JSON.stringify({ ok: true, active: nm, note: `预设「${nm}」已保存并应用` }));
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, active: nm, note: `预设「${nm}」已保存并应用` }));
       }
       if (action === 'delete') {
-        if (BUILTIN_PRESETS[nm]) return res.end(JSON.stringify({ error: '内置预设不可删除' }));
+        if (BUILTIN_PRESETS[nm]) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '内置预设不可删除' })); }
         delete presets[nm];
         savePresets();
-        return res.end(JSON.stringify({ ok: true, note: `预设「${nm}」已删除` }));
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, note: `预设「${nm}」已删除` }));
       }
-      res.end(JSON.stringify({ error: '未知操作' }));
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ error: '未知操作' }));
     } catch (e) {
       res.writeHead(400); return res.end(JSON.stringify({ error: String(e) }));
     }
@@ -1603,29 +1603,29 @@ const server = http.createServer(async (req, res) => {
       const { action, name, profile } = JSON.parse(body);
       const nm = String(name || '').trim().slice(0, 40);
       if (action === 'apply') {
-        if (!profiles[nm]) return res.end(JSON.stringify({ error: '档案不存在：' + nm }));
+        if (!profiles[nm]) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '档案不存在：' + nm })); }
         applyProfile(nm);
         const k = ENDPOINT.apiKey || '';
-        return res.end(JSON.stringify({ ok: true, active: nm, model: ENDPOINT.model, protocol: ENDPOINT.protocol, baseURL: ENDPOINT.baseURL, apiKeyMasked: k ? '...' + k.slice(-4) : '', maxTokens: ENDPOINT.maxTokens, thinking: ENDPOINT.thinking, maxContext: ENDPOINT.maxContext, preset: activePreset, note: `已切换到「${nm}」`, peakEligible: /api\.deepseek\.com/i.test(ENDPOINT.baseURL || '') }));
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, active: nm, model: ENDPOINT.model, protocol: ENDPOINT.protocol, baseURL: ENDPOINT.baseURL, apiKeyMasked: k ? '...' + k.slice(-4) : '', maxTokens: ENDPOINT.maxTokens, thinking: ENDPOINT.thinking, maxContext: ENDPOINT.maxContext, preset: activePreset, note: `已切换到「${nm}」`, peakEligible: /api\.deepseek\.com/i.test(ENDPOINT.baseURL || '') }));
       }
       if (action === 'save') {
-        if (!nm) return res.end(JSON.stringify({ error: '档案名不能为空' }));
+        if (!nm) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '档案名不能为空' })); }
         const snap = snapshotEndpoint();
         profiles[nm] = { ...snap, ...(profile || {}), desc: (profile && profile.desc) || (BUILTIN_PROFILES[nm] ? BUILTIN_PROFILES[nm].desc : '') };
         delete profiles[nm].apiKey;
         delete profiles[nm].builtin;
         saveProfiles();
-        return res.end(JSON.stringify({ ok: true, active: nm, note: `档案「${nm}」已保存（端点 + 模型 + 参数）` }));
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, active: nm, note: `档案「${nm}」已保存（端点 + 模型 + 参数）` }));
       }
       if (action === 'delete') {
-        if (BUILTIN_PROFILES[nm]) return res.end(JSON.stringify({ error: '内置档案不可删除' }));
-        if (!profiles[nm]) return res.end(JSON.stringify({ error: '档案不存在：' + nm }));
+        if (BUILTIN_PROFILES[nm]) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '内置档案不可删除' })); }
+        if (!profiles[nm]) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '档案不存在：' + nm })); }
         delete profiles[nm];
         if (activeProfile === nm) activeProfile = '';
         saveProfiles();
-        return res.end(JSON.stringify({ ok: true, note: `档案「${nm}」已删除` }));
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, note: `档案「${nm}」已删除` }));
       }
-      res.end(JSON.stringify({ error: '未知操作' }));
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ error: '未知操作' }));
     } catch (e) {
       res.writeHead(400); return res.end(JSON.stringify({ error: String(e) }));
     }
@@ -1757,9 +1757,10 @@ const server = http.createServer(async (req, res) => {
   const chatIdOf = () => sanitizeId(url.searchParams.get('chatId') || '');
   if (p === '/api/timeline' && req.method === 'GET') {
     const limit = Math.min(Number(url.searchParams.get('limit') || 20), 100);
-    const turns = readTurns(chatIdOf()).slice(-limit).reverse();
+    const allTurns = readTurns(chatIdOf());
+    const turns = allTurns.slice(-limit).reverse();
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ turns, total: readTurns(chatIdOf()).length }));
+    return res.end(JSON.stringify({ turns, total: allTurns.length }));
   }
   // 调试：查看最近提示词（最近一次 + 本会话历史记录）
   if (p === '/api/prompt/latest' && req.method === 'GET') {
