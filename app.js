@@ -703,6 +703,7 @@ apiBtn.addEventListener('click', async () => {
     document.getElementById('api-aux-fallback').value = String(!!ax.fallback);
     apiNow.textContent = `当前：${c.protocol === 'openai' ? 'OpenAI 兼容' : 'Anthropic 兼容'} · ${c.baseURL} · ${c.model}${c.apiKeyMasked ? ' · Key ' + c.apiKeyMasked : ''} · max_tokens ${c.maxTokens} · thinking ${c.thinking} · context ${c.maxContext ?? 64000}`;
     await loadPresets();
+    await loadProfiles();
   } catch (e) { /* 忽略 */ }
   apiModal.classList.remove('hidden');
 });
@@ -817,6 +818,128 @@ document.getElementById('preset-del').addEventListener('click', () => {
   if (!presetSelect.value) return;
   if (!confirm('删除预设「' + presetSelect.value + '」？')) return;
   presetPost({ action: 'delete', name: presetSelect.value });
+});
+
+// ---------- 配置档案（Profile：端点 + 模型 + 参数整套一键切换） ----------
+const profileInput = document.getElementById('profile-input');
+const profileSelect = document.getElementById('profile-select');
+let profileData = {};
+
+async function loadProfiles() {
+  try {
+    const r = await (await fetch('/api/profiles')).json();
+    if (!r.ok) return;
+    profileData = r.profiles || {};
+    profileInput.innerHTML = '<option value="">— 配置档案 —</option>';
+    for (const name of Object.keys(profileData)) {
+      const o = document.createElement('option');
+      o.value = name;
+      o.textContent = name + (profileData[name].builtin ? ' ⭐' : '');
+      profileInput.appendChild(o);
+    }
+    if (r.active) profileInput.value = r.active;
+    profileInput.title = r.active ? `当前档案：${r.active}（选择即切换整套配置）` : '配置档案（端点 + 模型 + 参数整套切换）';
+    profileSelect.innerHTML = '';
+    for (const name of Object.keys(profileData)) {
+      const o = document.createElement('option');
+      o.value = name;
+      o.textContent = name + (profileData[name].builtin ? ' ⭐' : '');
+      profileSelect.appendChild(o);
+    }
+    if (r.active) profileSelect.value = r.active;
+  } catch (e) { /* 忽略 */ }
+}
+profileInput.addEventListener('change', async () => {
+  const name = profileInput.value;
+  if (!name) return;
+  try {
+    const r = await (await fetch('/api/profiles', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'apply', name }),
+    })).json();
+    if (r.ok) {
+      profileInput.title = `当前档案：${name}`;
+      ensureModelOption(modelInput, r.model);
+      modelInput.value = r.model;
+      modelInput.title = `当前模型：${r.model}（档案「${name}」已切换）`;
+      peakEligible = r.peakEligible !== false;
+      updatePeakBanner();
+      loadStats();
+      if (r.preset) { await loadPresets(); }
+    } else {
+      alert('档案切换失败：' + (r.error || '未知错误'));
+      loadProfiles();
+    }
+  } catch (e) { alert('档案切换失败：' + e.message); loadProfiles(); }
+});
+document.getElementById('profile-apply').addEventListener('click', async () => {
+  const name = profileSelect.value;
+  if (!name) return;
+  try {
+    const r = await (await fetch('/api/profiles', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'apply', name }),
+    })).json();
+    if (r.ok) {
+      apiProtocol.value = r.protocol || 'anthropic';
+      apiBase.value = r.baseURL || '';
+      document.getElementById('api-maxtokens').value = r.maxTokens || 8192;
+      document.getElementById('api-thinking').value = (r.thinking === 'enabled' ? 'high' : (r.thinking || 'auto'));
+      document.getElementById('api-context').value = r.maxContext ?? 64000;
+      ensureModelOption(modelInput, r.model);
+      modelInput.value = r.model;
+      profileInput.value = name;
+      profileInput.title = `当前档案：${name}`;
+      peakEligible = r.peakEligible !== false;
+      updatePeakBanner();
+      await loadPresets();
+      loadStats();
+      apiMsg.className = 'api-msg ok';
+      apiMsg.textContent = r.note || '已切换';
+    } else {
+      apiMsg.className = 'api-msg err';
+      apiMsg.textContent = r.error || '切换失败';
+    }
+  } catch (e) { apiMsg.className = 'api-msg err'; apiMsg.textContent = e.message; }
+});
+document.getElementById('profile-save').addEventListener('click', async () => {
+  const name = (prompt('配置档案名称（与现有同名 = 覆盖）：', profileSelect.value || '') || '').trim();
+  if (!name) return;
+  try {
+    const r = await (await fetch('/api/profiles', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'save', name }),
+    })).json();
+    if (r.ok) {
+      await loadProfiles();
+      profileSelect.value = name;
+      profileInput.value = name;
+      apiMsg.className = 'api-msg ok';
+      apiMsg.textContent = r.note || '已保存';
+    } else {
+      apiMsg.className = 'api-msg err';
+      apiMsg.textContent = r.error || '保存失败';
+    }
+  } catch (e) { apiMsg.className = 'api-msg err'; apiMsg.textContent = e.message; }
+});
+document.getElementById('profile-del').addEventListener('click', async () => {
+  const name = profileSelect.value;
+  if (!name) return;
+  if (!confirm('删除配置档案「' + name + '」？')) return;
+  try {
+    const r = await (await fetch('/api/profiles', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'delete', name }),
+    })).json();
+    if (r.ok) {
+      await loadProfiles();
+      apiMsg.className = 'api-msg ok';
+      apiMsg.textContent = r.note || '已删除';
+    } else {
+      apiMsg.className = 'api-msg err';
+      apiMsg.textContent = r.error || '删除失败';
+    }
+  } catch (e) { apiMsg.className = 'api-msg err'; apiMsg.textContent = e.message; }
 });
 
 // ---------- 模型查看 / 切换（select 下拉 + 自定义） ----------
@@ -1579,6 +1702,7 @@ loadCurrentWardrobe();
 loadSessionNote();
 loadStats();
 loadModel();
+loadProfiles();
 maybeStartTour();
 setInterval(loadStats, 15000);
 

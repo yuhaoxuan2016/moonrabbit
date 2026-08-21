@@ -237,6 +237,79 @@ try {
 } catch (e) { /* 首次使用 */ }
 applyPreset(activePreset);
 
+// ---------- 配置档案（Profile：端点 + 模型 + 参数整套配置一键切换） ----------
+const PROFILES_FILE = path.join(DATA_DIR, 'profiles.json');
+const BUILTIN_PROFILES = {
+  'DeepSeek 官方': { protocol: 'openai', baseURL: 'https://api.deepseek.com', model: 'deepseek-chat', thinking: 'auto', maxTokens: 393216, maxContext: 1048576, preset: 'DeepSeek 默认（官方参数）', desc: '官方直连（高峰时段加价）' },
+  'DeepSeek 官方·Reasoner': { protocol: 'openai', baseURL: 'https://api.deepseek.com', model: 'deepseek-reasoner', thinking: 'auto', maxTokens: 393216, maxContext: 1048576, preset: 'DeepSeek 默认（官方参数）', desc: '官方直连推理模型' },
+  '硅基流动': { protocol: 'openai', baseURL: 'https://api.siliconflow.cn/v1', model: 'deepseek-ai/DeepSeek-V3', thinking: 'auto', maxTokens: 8192, maxContext: 65536, preset: 'DeepSeek 默认（官方参数）', desc: '硅基流动 V3（按量计费）' },
+  '本地 Ollama': { protocol: 'openai', baseURL: 'http://localhost:11434/v1', model: 'qwen2.5:14b', thinking: 'disabled', maxTokens: 4096, maxContext: 32768, desc: '本地 Ollama（无需 Key）' },
+};
+let profiles = {};
+let activeProfile = '';
+function loadProfiles() {
+  try {
+    const pj = JSON.parse(fs.readFileSync(PROFILES_FILE, 'utf8'));
+    if (pj.custom && typeof pj.custom === 'object') profiles = { ...BUILTIN_PROFILES, ...pj.custom };
+    else profiles = { ...BUILTIN_PROFILES };
+    if (pj.active && profiles[pj.active]) activeProfile = pj.active;
+    else activeProfile = '';
+  } catch (e) {
+    profiles = { ...BUILTIN_PROFILES };
+    activeProfile = '';
+    saveProfiles();
+  }
+}
+function saveProfiles() {
+  const custom = {};
+  for (const [k, v] of Object.entries(profiles)) if (!BUILTIN_PROFILES[k]) custom[k] = v;
+  try { fs.writeFileSync(PROFILES_FILE, JSON.stringify({ custom, active: activeProfile }, null, 2), 'utf8'); } catch (e) { /* 忽略 */ }
+}
+function snapshotEndpoint() {
+  return {
+    protocol: ENDPOINT.protocol, baseURL: ENDPOINT.baseURL,
+    model: ENDPOINT.model, thinking: ENDPOINT.thinking,
+    thinkingBudget: ENDPOINT.thinkingBudget, maxTokens: ENDPOINT.maxTokens,
+    maxContext: ENDPOINT.maxContext, autoSummary: ENDPOINT.autoSummary,
+    autoSummaryThreshold: ENDPOINT.autoSummaryThreshold,
+    preset: activePreset || '',
+    aux: { enabled: AUX.enabled, protocol: AUX.protocol, baseURL: AUX.baseURL, model: AUX.model, fallback: AUX.fallback },
+  };
+}
+function applyProfile(name) {
+  const p = profiles[name];
+  if (!p) return false;
+  activeProfile = name;
+  if (p.protocol === 'anthropic' || p.protocol === 'openai') ENDPOINT.protocol = p.protocol;
+  if (p.baseURL) ENDPOINT.baseURL = p.baseURL.replace(/\/+$/, '');
+  if (p.model) ENDPOINT.model = p.model;
+  if (['auto', 'disabled', 'low', 'medium', 'high', 'max', 'custom'].includes(p.thinking)) ENDPOINT.thinking = p.thinking;
+  if (Number.isFinite(p.thinkingBudget) && p.thinkingBudget >= 256) ENDPOINT.thinkingBudget = p.thinkingBudget;
+  if (Number.isFinite(p.maxTokens) && p.maxTokens >= 256) ENDPOINT.maxTokens = p.maxTokens;
+  if (Number.isFinite(p.maxContext) && p.maxContext >= 0) ENDPOINT.maxContext = p.maxContext;
+  if (typeof p.autoSummary === 'boolean') ENDPOINT.autoSummary = p.autoSummary;
+  if (Number.isFinite(p.autoSummaryThreshold) && p.autoSummaryThreshold >= 2000) ENDPOINT.autoSummaryThreshold = p.autoSummaryThreshold;
+  if (p.aux && typeof p.aux === 'object') {
+    if (typeof p.aux.enabled === 'boolean') AUX.enabled = p.aux.enabled;
+    if (p.aux.protocol === 'anthropic' || p.aux.protocol === 'openai') AUX.protocol = p.aux.protocol;
+    if (p.aux.baseURL && p.aux.baseURL.trim()) AUX.baseURL = p.aux.baseURL.trim().replace(/\/+$/, '');
+    if (p.aux.model && p.aux.model.trim()) AUX.model = p.aux.model.trim();
+    if (typeof p.aux.fallback === 'boolean') AUX.fallback = p.aux.fallback;
+  }
+  if (p.preset && presets[p.preset]) applyPreset(p.preset);
+  fs.writeFileSync(MODEL_FILE, JSON.stringify({
+    protocol: ENDPOINT.protocol, baseURL: ENDPOINT.baseURL, apiKey: ENDPOINT.apiKey,
+    model: ENDPOINT.model, maxTokens: ENDPOINT.maxTokens, thinking: ENDPOINT.thinking,
+    thinkingBudget: ENDPOINT.thinkingBudget, maxContext: ENDPOINT.maxContext,
+    autoSummary: ENDPOINT.autoSummary, autoSummaryThreshold: ENDPOINT.autoSummaryThreshold,
+    aux: { enabled: AUX.enabled, protocol: AUX.protocol, baseURL: AUX.baseURL, apiKey: AUX.apiKey, model: AUX.model, fallback: AUX.fallback },
+    updatedAt: new Date().toISOString(),
+  }), 'utf8');
+  saveProfiles();
+  return true;
+}
+loadProfiles();
+
 // 解析 AI 回复中的 <storyevent>/<items>/【更新】标签 → 结构化回合记录
 function parseTurnTags(content) {
   const rec = { story_time: '', location: '', atmosphere: '', characters: [], costume: '', event: '', items_gain: [], items_loss: [], updates: [], emotion: {} };
@@ -1263,6 +1336,47 @@ const server = http.createServer(async (req, res) => {
         delete presets[nm];
         savePresets();
         return res.end(JSON.stringify({ ok: true, note: `预设「${nm}」已删除` }));
+      }
+      res.end(JSON.stringify({ error: '未知操作' }));
+    } catch (e) {
+      res.writeHead(400); return res.end(JSON.stringify({ error: String(e) }));
+    }
+  }
+  // 配置档案（Profile：端点 + 模型 + 参数整套一键切换）
+  if (p === '/api/profiles' && req.method === 'GET') {
+    const list = {};
+    for (const [k, v] of Object.entries(profiles)) list[k] = { ...v, builtin: !!BUILTIN_PROFILES[k] };
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ ok: true, profiles: list, active: activeProfile, current: snapshotEndpoint() }));
+  }
+  if (p === '/api/profiles' && req.method === 'POST') {
+    let body = '';
+    for await (const c of req) body += c;
+    try {
+      const { action, name, profile } = JSON.parse(body);
+      const nm = String(name || '').trim().slice(0, 40);
+      if (action === 'apply') {
+        if (!profiles[nm]) return res.end(JSON.stringify({ error: '档案不存在：' + nm }));
+        applyProfile(nm);
+        const k = ENDPOINT.apiKey || '';
+        return res.end(JSON.stringify({ ok: true, active: nm, model: ENDPOINT.model, protocol: ENDPOINT.protocol, baseURL: ENDPOINT.baseURL, apiKeyMasked: k ? '...' + k.slice(-4) : '', maxTokens: ENDPOINT.maxTokens, thinking: ENDPOINT.thinking, maxContext: ENDPOINT.maxContext, preset: activePreset, note: `已切换到「${nm}」`, peakEligible: /api\.deepseek\.com/i.test(ENDPOINT.baseURL || '') }));
+      }
+      if (action === 'save') {
+        if (!nm) return res.end(JSON.stringify({ error: '档案名不能为空' }));
+        const snap = snapshotEndpoint();
+        profiles[nm] = { ...snap, ...(profile || {}), desc: (profile && profile.desc) || (BUILTIN_PROFILES[nm] ? BUILTIN_PROFILES[nm].desc : '') };
+        delete profiles[nm].apiKey;
+        delete profiles[nm].builtin;
+        saveProfiles();
+        return res.end(JSON.stringify({ ok: true, active: nm, note: `档案「${nm}」已保存（端点 + 模型 + 参数）` }));
+      }
+      if (action === 'delete') {
+        if (BUILTIN_PROFILES[nm]) return res.end(JSON.stringify({ error: '内置档案不可删除' }));
+        if (!profiles[nm]) return res.end(JSON.stringify({ error: '档案不存在：' + nm }));
+        delete profiles[nm];
+        if (activeProfile === nm) activeProfile = '';
+        saveProfiles();
+        return res.end(JSON.stringify({ ok: true, note: `档案「${nm}」已删除` }));
       }
       res.end(JSON.stringify({ error: '未知操作' }));
     } catch (e) {

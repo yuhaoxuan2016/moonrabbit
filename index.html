@@ -15,6 +15,9 @@
     <span class="subtitle">通用 RP 界面 · 设定自填</span>
   </div>
   <div class="header-right">
+    <select id="profile-input" class="head-input" title="配置档案（端点 + 模型 + 参数整套切换）">
+      <option value="">— 配置档案 —</option>
+    </select>
     <select id="model-input" class="head-input" title="切换模型（选择即生效，自动保存）">
       <option value="deepseek-chat">deepseek-chat</option>
       <option value="deepseek-reasoner">deepseek-reasoner</option>
@@ -95,6 +98,16 @@
       <input id="preset-freq" type="number" min="0" max="2" step="0.1" placeholder="0">
     </label>
     <div class="api-msg">💡 预设内含「输出上限 / 上下文预算」：应用预设会覆盖上方对应字段；改完参数点「💾 保存」= 存入当前选中预设（同名覆盖），应用后下一轮生效。</div>
+    <div class="set-group-title">📋 配置档案（端点 + 模型 + 参数 · 一键切换整套配置）</div>
+    <div class="api-field">档案
+      <span style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+        <select id="profile-select" style="flex:1;min-width:170px;"></select>
+        <button id="profile-apply" class="head-btn" style="padding:2px 10px;">切换</button>
+        <button id="profile-save" class="head-btn" style="padding:2px 10px;">💾 保存</button>
+        <button id="profile-del" class="head-btn" style="padding:2px 10px;">🗑 删除</button>
+      </span>
+    </div>
+    <div class="api-msg">💡 配置档案 = 端点（协议 / URL / Key）+ 模型 + 采样预设的完整快照。切换档案 = 一步切换整套配置。Key 不存入档案（切换后沿用当前 Key，在上方修改）。</div>
     <div class="set-group-title">辅助 API（后台任务走独立端点，不抢主 API）</div>
     <label class="api-field">启用辅助 API
       <select id="api-aux-enabled">
