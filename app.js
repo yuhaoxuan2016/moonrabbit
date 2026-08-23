@@ -1,6 +1,18 @@
 // app.js —— 通用多角色 RP / 互动小说界面前端逻辑
 'use strict';
 
+// 移除 U+FFFD（乱码替换符）与孤立代理项：防止流式拼接时把偶发乱码字节存成「方块」
+function sanitizeText(s) {
+  return String(s ?? '')
+    .replace(/\uFFFD+/g, '')
+    .replace(/[\u200B\u200C\u2060\uFEFF]/g, '')
+    .replace(/[\uD800-\uDFFF]/g, (m, i, str) => {
+      const c = m.charCodeAt(0);
+      if (c >= 0xD800 && c <= 0xDBFF) return /[\uDC00-\uDFFF]/.test(str[i + 1] || '') ? m : '';
+      return /[\uD800-\uDBFF]/.test(str[i - 1] || '') ? m : '';
+    });
+}
+
 const els = {
   messages: document.getElementById('messages'),
   typing: document.getElementById('typing'),
@@ -477,7 +489,7 @@ async function send() {
   clearTimeout(autoSaveTimer);
   // 高峰时段强提醒：官方直连渠道 + 高峰时间 + 发送前确认（可设置关闭）
   if (peakEligible && prefs.peakConfirm !== false && isPeakHours(new Date())) {
-    if (!confirm('⚠️ 当前高峰时段（9:00-12:00 / 14:00-18:00）\nAPI 费用翻倍、可能限流变卡。\n\n继续发送吗？')) {
+    if (!confirm('⚠️ 当前为工作日高峰时段（9:00-12:00 / 14:00-18:00）\nAPI 费率较高、可能限流变卡；周末全天为低谷价。\n\n继续发送吗？')) {
       return;
     }
   }
@@ -542,11 +554,11 @@ async function generate() {
         let ev;
         try { ev = JSON.parse(data); } catch (e) { continue; }
         if (ev.type === 'delta') {
-          acc += ev.text;
+          acc += sanitizeText(ev.text);
           tempBub.textContent = stripTurnTags(acc);
           els.messages.scrollTop = els.messages.scrollHeight;
         } else if (ev.type === 'thinking') {
-          thinkAcc += ev.text;
+          thinkAcc += sanitizeText(ev.text);
         } else if (ev.type === 'tools') {
           renderThinking(`🔧 ${(ev.trace || []).join('；')}`);
         } else if (ev.type === 'summarized') {
@@ -1812,6 +1824,8 @@ async function loadStats() {
 // ---------- 高峰时段提示条（官方直连渠道 + 高峰时间才生效） ----------
 let peakEligible = true;   // 端点是否为 DeepSeek 官方直连（峰谷定价渠道）
 function isPeakHours(d) {
+  const day = d.getDay();            // 0=周日 6=周六
+  if (day === 0 || day === 6) return false;   // 2026-08-23 起周末全天为低谷价（不计峰谷）
   const h = d.getHours();
   return (h >= 9 && h < 12) || (h >= 14 && h < 18);
 }

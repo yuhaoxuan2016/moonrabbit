@@ -495,14 +495,29 @@ function adaptVisionContent(msg, protocol) {
 }
 
 // ---------- LLM 调用（Anthropic / OpenAI 双协议，流式；onThinking 回调思考链） ----------
+// 移除 U+FFFD（乱码替换符）与孤立代理项：网络/解码偶发的乱码字节会以 U+FFFD 进入流，
+// 若不清理会被存档成「方块」，且随 PUT 往返持续存在。此函数在写入/展示前兜底清理。
+const sanitizeText = (s) => String(s || '')
+  .replace(/\uFFFD+/g, '')
+  .replace(/[\u200B\u200C\u2060\uFEFF]/g, '')
+  .replace(/[\uD800-\uDFFF]/g, (m, i, str) => {
+    const c = m.charCodeAt(0);
+    if (c >= 0xD800 && c <= 0xDBFF) return /[\uDC00-\uDFFF]/.test(str[i + 1] || '') ? m : '';
+    return /[\uD800-\uDBFF]/.test(str[i - 1] || '') ? m : '';
+  });
+const cleanMsg = (m) => (m && typeof m === 'object' && typeof m.content === 'string'
+  ? { ...m, content: sanitizeText(m.content), ...(typeof m.thinking === 'string' ? { thinking: sanitizeText(m.thinking) } : {}) }
+  : m);
+const cleanMsgs = (arr) => (Array.isArray(arr) ? arr.map(cleanMsg) : arr);
+
 async function callLLM(messages, system, onDelta, onMeta, onThinking, signal) {
   const ep = ENDPOINT;
   let emitted = false;   // 已有输出（delta/thinking）→ 失败时不重试，避免重复输出
   let idleTimedOut = false;   // 流式空闲超时触发（Task7）→ 视为主动中止，不重试
   // 单次调用（openai/anthropic 双协议）；signal 用于客户端断连中止（SSE abort）
   const attempt = async () => {
-    const emitDelta = (t) => { emitted = true; onDelta(t); };
-    const emitThink = (t) => { emitted = true; onThinking && onThinking(t); };
+    const emitDelta = (t) => { emitted = true; onDelta(sanitizeText(t)); };
+    const emitThink = (t) => { emitted = true; onThinking && onThinking(sanitizeText(t)); };
     if (ep.protocol === 'openai') {
       const body = {
         model: ep.model,
@@ -1416,7 +1431,11 @@ const server = http.createServer(async (req, res) => {
     const file = chatFilePath(id);
     if (req.method === 'GET') {
       if (!fs.existsSync(file)) return sendJson({ error: 'not found' }, 404);
-      try { return sendJson(JSON.parse(fs.readFileSync(file, 'utf8'))); } catch (e) { return sendJson({ error: 'failed to load chat' }, 500); }
+      try {
+        const chat = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (Array.isArray(chat.messages)) chat.messages = cleanMsgs(chat.messages);   // 展示前清理「方块」乱码（不写盘）
+        return sendJson(chat);
+      } catch (e) { return sendJson({ error: 'failed to load chat' }, 500); }
     }
     if (req.method === 'PUT') {
       let body = await readBody(req);
@@ -1425,7 +1444,8 @@ const server = http.createServer(async (req, res) => {
         const chat = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : { id, createdAt: new Date().toISOString() };
         if (typeof pinned === 'boolean') chat.pinned = pinned;
         chat.title = (title || chat.title || '未命名').slice(0, 40);
-        chat.messages = Array.isArray(messages) ? messages : (chat.messages || []);
+        // 写盘前清理「方块」乱码：即使浏览器/历史里带 U+FFFD，落盘也始终干净
+        chat.messages = Array.isArray(messages) ? cleanMsgs(messages) : (chat.messages || []);
         chat.updatedAt = new Date().toISOString();
         fs.writeFileSync(file, JSON.stringify(chat), 'utf8');
         return sendJson({ ok: true });
