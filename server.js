@@ -858,16 +858,22 @@ function appendItemRecord(chatId, action, name, holder) {
     fs.appendFileSync(turnsFile(chatId), JSON.stringify(rec) + '\n', 'utf8');
   } catch (e) { console.error('[item-record] 失败:', e.message); }
 }
+// 手动补记字段归一化（时间线 补记/修改/插入 共用）
+function normalizeTurnFields(fields) {
+  return {
+    story_time: String(fields.story_time || '').trim().slice(0, 40),
+    location: String(fields.location || '').trim().slice(0, 40),
+    atmosphere: String(fields.atmosphere || '').trim().slice(0, 60),
+    characters: (fields.characters || '').split(/[、,，/]+/).map((s) => s.trim()).filter(Boolean).slice(0, 10),
+    costume: String(fields.costume || '').trim().slice(0, 80),
+    event: String(fields.event || '').trim().slice(0, 300),
+  };
+}
 // 手动补记一条回合（时间/地点/事件等），写入 turns jsonl
 function appendManualTurn(chatId, fields) {
   try {
     const rec = {
-      story_time: String(fields.story_time || '').trim().slice(0, 40),
-      location: String(fields.location || '').trim().slice(0, 40),
-      atmosphere: String(fields.atmosphere || '').trim().slice(0, 60),
-      characters: (fields.characters || '').split(/[、,，/]+/).map((s) => s.trim()).filter(Boolean).slice(0, 10),
-      costume: String(fields.costume || '').trim().slice(0, 80),
-      event: String(fields.event || '').trim().slice(0, 300),
+      ...normalizeTurnFields(fields),
       items_gain: [], items_loss: [], updates: [], emotion: {},
     };
     rec.id = Date.now() + '-' + Math.random().toString(36).slice(2, 6);
@@ -876,6 +882,45 @@ function appendManualTurn(chatId, fields) {
     fs.appendFileSync(turnsFile(chatId), JSON.stringify(rec) + '\n', 'utf8');
     return rec;
   } catch (e) { console.error('[manual-turn] 失败:', e.message); return null; }
+}
+// 修改单条回合记录（按 id 重写 jsonl；保留 id/ts/chatId/items/updates/emotion）
+function updateTurnRecord(chatId, id, fields) {
+  const file = turnsFile(chatId);
+  if (!fs.existsSync(file)) return null;
+  const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+  let updated = null;
+  const out = lines.map((l) => {
+    let o;
+    try { o = JSON.parse(l); } catch (e) { return l; }
+    if (o.id === id) { updated = { ...o, ...normalizeTurnFields(fields) }; return JSON.stringify(updated); }
+    return l;
+  });
+  if (!updated) return null;
+  fs.writeFileSync(file, out.join('\n') + '\n', 'utf8');
+  return updated;
+}
+// 在指定条目之后插入一条回合记录（afterId 未找到/为空 → 追加末尾）
+function insertTurnRecord(chatId, afterId, fields) {
+  const file = turnsFile(chatId);
+  const rec = {
+    ...normalizeTurnFields(fields),
+    items_gain: [], items_loss: [], updates: [], emotion: {},
+  };
+  rec.id = Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+  rec.ts = new Date().toISOString();
+  rec.chatId = sanitizeId(chatId);
+  const line = JSON.stringify(rec);
+  const append = () => { fs.appendFileSync(file, line + '\n', 'utf8'); return rec; };
+  if (!afterId || !fs.existsSync(file)) return append();
+  const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+  let idx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    try { if (JSON.parse(lines[i]).id === afterId) { idx = i; break; } } catch (e) { /* 忽略 */ }
+  }
+  if (idx < 0) return append();
+  lines.splice(idx + 1, 0, line);
+  fs.writeFileSync(file, lines.join('\n') + '\n', 'utf8');
+  return rec;
 }
 // 删除单条回合记录（按 id 重写 jsonl）
 function deleteTurnRecord(chatId, id) {
@@ -985,6 +1030,12 @@ const BRIDGE_TOOL_LABELS = { web_search: '联网搜索' };
 const BRIDGE_TOOLS = [
   { name: 'web_search', description: '联网搜索（仅当用户明确要求「联网/查一下/搜索」，或需要核实现实世界信息如新闻/歌曲/游戏/品牌时使用）。返回来源标题+链接+摘要。', input_schema: { type: 'object', properties: { query: { type: 'string', description: '搜索关键词' } }, required: ['query'] } },
 ];
+// 工具定义按端点协议转换：openai → { type:'function', function:{name,description,parameters} }；anthropic → { name, description, input_schema }
+// （修复：deepseek openai 端点拒绝 anthropic 工具格式，报 tools[0]: missing field `type`）
+function toolsFor(ep, tools) {
+  if (ep.protocol === 'openai') return (tools || []).map((t) => ({ type: 'function', function: { name: t.name, description: t.description || '', parameters: t.input_schema || { type: 'object', properties: {} } } }));
+  return tools;
+}
 function normalizeToolsState() {
   const out = {};
   for (const [cid, v] of Object.entries(opState.tools || {})) {
@@ -1009,8 +1060,8 @@ async function executeBridgeTool(name, input) {
       ? { 'content-type': 'application/json', authorization: `Bearer ${ep.apiKey}` }
       : { 'content-type': 'application/json', 'x-api-key': ep.apiKey, 'anthropic-version': '2023-06-01' };
     const body = ep.protocol === 'openai'
-      ? { model: ep.model, max_tokens: 1024, tools: [toolDef], messages: msgs2 }
-      : { model: ep.model, max_tokens: 1024, thinking: { type: 'disabled' }, tools: [toolDef], messages: msgs2 };
+      ? { model: ep.model, max_tokens: 1024, tools: toolsFor(ep, [toolDef]), messages: msgs2 }
+      : { model: ep.model, max_tokens: 1024, thinking: { type: 'disabled' }, tools: toolsFor(ep, [toolDef]), messages: msgs2 };
     return fetch(`${ep.baseURL}${ep.protocol === 'openai' ? '/chat/completions' : '/messages'}`, {
       method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(60000),
     });
@@ -1098,8 +1149,8 @@ async function runBridgeToolLoop(messages, system, enabledNames) {
       ? { 'content-type': 'application/json', authorization: `Bearer ${ep.apiKey}` }
       : { 'content-type': 'application/json', 'x-api-key': ep.apiKey, 'anthropic-version': '2023-06-01' };
     const body = ep.protocol === 'openai'
-      ? { model: ep.model, system, max_tokens: 1024, tools, messages: msgs2 }
-      : { model: ep.model, system, max_tokens: 1024, thinking: { type: 'disabled' }, tools, messages: msgs2 };
+      ? { model: ep.model, messages: [{ role: 'system', content: system }, ...msgs2], max_tokens: 1024, tools: toolsFor(ep, tools) }
+      : { model: ep.model, system, max_tokens: 1024, thinking: { type: 'disabled' }, tools: toolsFor(ep, tools), messages: msgs2 };
     return fetch(`${ep.baseURL}${ep.protocol === 'openai' ? '/chat/completions' : '/messages'}`, {
       method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(90000),
     });
@@ -1807,6 +1858,33 @@ const server = http.createServer(async (req, res) => {
     try {
       const { chatId, story_time, location, atmosphere, characters, costume, event } = JSON.parse(body);
       const rec = appendManualTurn(sanitizeId(chatId || ''), { story_time, location, atmosphere, characters, costume, event });
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(rec ? { ok: true, rec } : { ok: false, error: '写入失败' }));
+    } catch (e) {
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ error: String(e) }));
+    }
+  }
+  // 修改单条回合记录（界面编辑，按 id 重写；保留物品/情绪等附属字段）
+  if (p === '/api/timeline/update' && req.method === 'POST') {
+    let body = await readBody(req);
+    try {
+      const { chatId, id, story_time, location, atmosphere, characters, costume, event } = JSON.parse(body);
+      if (!id) throw new Error('缺少记录 id');
+      const rec = updateTurnRecord(sanitizeId(chatId || ''), String(id), { story_time, location, atmosphere, characters, costume, event });
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(rec ? { ok: true, rec } : { ok: false, error: '未找到该记录' }));
+    } catch (e) {
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ error: String(e) }));
+    }
+  }
+  // 在指定条目之后插入一条回合记录（界面「＋ 插」补充；afterId 为空/未找到 → 追加末尾）
+  if (p === '/api/timeline/insert' && req.method === 'POST') {
+    let body = await readBody(req);
+    try {
+      const { chatId, afterId, story_time, location, atmosphere, characters, costume, event } = JSON.parse(body);
+      const rec = insertTurnRecord(sanitizeId(chatId || ''), String(afterId || ''), { story_time, location, atmosphere, characters, costume, event });
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify(rec ? { ok: true, rec } : { ok: false, error: '写入失败' }));
     } catch (e) {

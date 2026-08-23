@@ -1445,8 +1445,20 @@ async function loadTimeline() {
       const emo = t.emotion && Object.keys(t.emotion).length ? `<span class="emotag"> 💗${Object.entries(t.emotion).map(([n, v]) => `${n}=${v}`).join('、')}</span>` : '';
       d.innerHTML = `<div class="t">${t.story_time || '?'}｜${ev || '（无事件摘要）'}</div>${loc}${gain}${loss}${emo}`;
       if (t.id) {
+        const act = document.createElement('div');
+        act.className = 'tm-actions';
+        const edit = document.createElement('button');
+        edit.className = 'ma-btn';
+        edit.textContent = '✏️ 改';
+        edit.title = '修改该条时间线记录';
+        edit.addEventListener('click', () => openTmItemEdit(d, t, 'edit'));
+        const ins = document.createElement('button');
+        ins.className = 'ma-btn';
+        ins.textContent = '＋ 插';
+        ins.title = '在该条之后补充一条时间线记录';
+        ins.addEventListener('click', () => openTmItemEdit(d, t, 'insert'));
         const del = document.createElement('button');
-        del.className = 'ma-btn tm-del';
+        del.className = 'ma-btn del';
         del.textContent = '✕ 删';
         del.title = '删除该条回合记录';
         del.addEventListener('click', async () => {
@@ -1461,11 +1473,63 @@ async function loadTimeline() {
             loadInventory();
           } catch (e) { /* 忽略 */ }
         });
-        d.appendChild(del);
+        act.append(edit, ins, del);
+        d.appendChild(act);
       }
       tmTimeline.appendChild(d);
     }
   } catch (e) { tmTimeline.textContent = '时间线读取失败'; }
+}
+
+// 时间线条目 修改/补充：行内编辑表单（edit=预填原值；insert=清空，插到该条之后）
+let tmItemEditBox = null;   // 当前展开的编辑容器（同一时间只开一个）
+function openTmItemEdit(itemEl, t, mode) {
+  if (tmItemEditBox && tmItemEditBox.parentNode) tmItemEditBox.remove();
+  const label = mode === 'edit' ? '✏️ 修改时间线记录' : '＋ 在该条之后补充时间线记录';
+  const box = document.createElement('div');
+  box.className = 'tm-edit tm-item-edit';
+  box.innerHTML = `
+    <div class="tm-edit-title">${label}</div>
+    <div class="em-row"><input data-f="story_time" type="text" placeholder="时间（如：8/9 早上）"><input data-f="location" type="text" placeholder="地点（可留空）"></div>
+    <div class="em-row"><input data-f="characters" type="text" placeholder="在场角色（顿号分隔，可留空）"><input data-f="costume" type="text" placeholder="着装变化（可留空）"></div>
+    <div class="em-row"><input data-f="atmosphere" type="text" placeholder="氛围（可留空）"><input data-f="event" type="text" placeholder="事件一句话（可留空）"></div>
+    <div class="em-row"><button class="head-btn">✅ 保存</button><button class="ma-btn">取消</button><span class="tm-item-note"></span></div>`;
+  if (mode === 'edit') {
+    box.querySelector('[data-f="story_time"]').value = t.story_time || '';
+    box.querySelector('[data-f="location"]').value = t.location || '';
+    box.querySelector('[data-f="characters"]').value = (t.characters || []).join('、');
+    box.querySelector('[data-f="costume"]').value = t.costume || '';
+    box.querySelector('[data-f="atmosphere"]').value = t.atmosphere || '';
+    box.querySelector('[data-f="event"]').value = t.event || '';
+  }
+  const note = box.querySelector('.tm-item-note');
+  const collect = () => ({
+    chatId,
+    story_time: box.querySelector('[data-f="story_time"]').value.trim(),
+    location: box.querySelector('[data-f="location"]').value.trim(),
+    characters: box.querySelector('[data-f="characters"]').value.trim(),
+    costume: box.querySelector('[data-f="costume"]').value.trim(),
+    atmosphere: box.querySelector('[data-f="atmosphere"]').value.trim(),
+    event: box.querySelector('[data-f="event"]').value.trim(),
+  });
+  box.querySelector('.head-btn').addEventListener('click', async () => {
+    const p = collect();
+    if (!p.story_time && !p.event) { note.textContent = '至少填时间或事件'; return; }
+    try {
+      const body = mode === 'edit' ? { ...p, id: t.id } : { ...p, afterId: t.id };
+      const r = await (await fetch(mode === 'edit' ? '/api/timeline/update' : '/api/timeline/insert', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })).json();
+      note.textContent = r.ok ? (mode === 'edit' ? '✓ 已保存，刷新中…' : '✓ 已补充，刷新中…') : `✗ ${r.error || '失败'}`;
+      if (r.ok) setTimeout(() => loadTimeline(), 400);
+    } catch (e) { note.textContent = '✗ ' + e.message; }
+  });
+  box.querySelector('.ma-btn').addEventListener('click', () => box.remove());
+  itemEl.insertAdjacentElement('afterend', box);
+  tmItemEditBox = box;
+  box.querySelector('input').focus();
 }
 
 async function loadInventory() {

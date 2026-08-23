@@ -411,8 +411,11 @@ main { flex: 1; display: flex; min-height: 0; }
 .tm-item .gain { color: #7fe0a9; font-size: 12px; }
 .tm-item .loss { color: #f0a3a3; font-size: 12px; }
 .tm-item .emotag { color: #f9a8d4; font-size: 12px; }
-.tm-item .tm-del { position: absolute; right: 0; top: 4px; padding: 0 6px; font-size: 11px; opacity: 0; transition: opacity 0.15s; }
-.tm-item:hover .tm-del { opacity: 1; }
+.tm-item .tm-actions { position: absolute; right: 0; top: 4px; display: flex; gap: 4px; opacity: 0; transition: opacity 0.15s; }
+.tm-item:hover .tm-actions { opacity: 1; }
+.tm-actions .ma-btn { padding: 0 6px; font-size: 11px; }
+.tm-item-edit { margin: 4px 0; border: 1px dashed var(--border); background: var(--bg2); border-radius: 8px; padding: 6px 7px 7px 7px; }
+.tm-item-note { font-size: 12px; color: var(--muted); align-self: center; margin-left: 6px; }
 .tm-edit { margin-top: 7px; border-top: 1px dashed var(--border); padding-top: 6px; }
 .tm-edit-title { font-size: 12px; color: var(--accent); font-weight: 700; margin-bottom: 5px; }
 
