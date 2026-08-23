@@ -1311,6 +1311,8 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/' || p === '/index.html') return sendFile(res, path.join(WWW, 'index.html'));
   if (p === '/favicon.ico' || p === '/favicon.png') return sendFile(res, path.join(WWW, 'favicon.png'), 'image/png');
+  if (p === '/logo.png') return sendFile(res, path.join(WWW, 'logo.png'), 'image/png');
+  if (p === '/share-card.png') return sendFile(res, path.join(WWW, 'share-card.png'), 'image/png');
   if (p === '/style.css') return sendFile(res, path.join(WWW, 'style.css'));
   if (p === '/app.js') return sendFile(res, path.join(WWW, 'app.js'));
 

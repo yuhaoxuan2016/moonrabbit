@@ -196,6 +196,7 @@ header {
 }
 .brand { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .brand-dot { width: 11px; height: 11px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 12px var(--accent); flex: none; }
+.brand-logo { width: 22px; height: 22px; flex: none; border-radius: 50%; }
 .brand h1 { font-size: 16px; letter-spacing: 1px; white-space: nowrap; }
 .subtitle { font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .header-right { display: flex; gap: 6px; flex: none; align-items: center; }
