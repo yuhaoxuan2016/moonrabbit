@@ -1999,643 +1999,11 @@ process.on('unhandledRejection', (err) => {
   console.error('[server] 未捕获的异步异常（已兜底，请求可能超时）:', err && err.message || err);
 });
 
-async function handleRequest(req, res) {
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  const p = url.pathname;
 
-  if (p === '/' || p === '/index.html') return sendFile(res, path.join(WWW, 'index.html'));
-  if (p === '/favicon.ico' || p === '/favicon.png') return sendFile(res, path.join(WWW, 'favicon.png'), 'image/png');
-  if (p === '/logo.png') return sendFile(res, path.join(WWW, 'logo.png'), 'image/png');
-  if (p === '/share-card.png') return sendFile(res, path.join(WWW, 'share-card.png'), 'image/png');
-  if (p === '/style.css') return sendFile(res, path.join(WWW, 'style.css'));
-  if (p === '/app.js') return sendFile(res, path.join(WWW, 'app.js'));
-
-  // 模型 / API 端点查看与切换（持久化 data/model.json；POST 时探测验证）
-  if (p === '/api/model' && req.method === 'GET') {
-    const k = State.endpoint.apiKey || '';
-    const ak = State.aux.apiKey || '';
-    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({
-      model: State.endpoint.model,
-      protocol: State.endpoint.protocol,
-      baseURL: State.endpoint.baseURL,
-      apiKeyMasked: k ? '...' + k.slice(-4) : '',
-      usingDefaultKey: (() => { try { return !fs.existsSync(MODEL_FILE) || !(JSON.parse(fs.readFileSync(MODEL_FILE, 'utf8') || '{}').apiKey); } catch (e) { return true; } })(),
-      maxTokens: State.endpoint.maxTokens,
-      thinking: State.endpoint.thinking,
-      thinkingBudget: State.endpoint.thinkingBudget,
-      maxContext: State.endpoint.maxContext,
-      autoSummary: State.endpoint.autoSummary,
-      autoSummaryThreshold: State.endpoint.autoSummaryThreshold,
-      // 辅助 API（后台任务独立端点）
-      aux: {
-        enabled: State.aux.enabled,
-        protocol: State.aux.protocol,
-        baseURL: State.aux.baseURL,
-        apiKeyMasked: ak ? '...' + ak.slice(-4) : '',
-        model: State.aux.model,
-        fallback: State.aux.fallback,
-      },
-      // 峰谷定价仅官方直连渠道适用（DeepSeek 官方：高峰 9-12 / 14-18 翻倍）
-      peakEligible: /api\.deepseek\.com/i.test(State.endpoint.baseURL || ''),
-    }));
-  }
-  if (p === '/api/model' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { model, baseURL, apiKey, protocol, maxTokens, thinking, thinkingBudget, maxContext, autoSummary, autoSummaryThreshold, aux } = JSON.parse(body);
-      const next = { ...State.endpoint };
-      if (protocol === 'anthropic' || protocol === 'openai') next.protocol = protocol;
-      if (baseURL && baseURL.trim()) next.baseURL = baseURL.trim().replace(/\/+$/, '');
-      if (apiKey && apiKey.trim()) next.apiKey = apiKey.trim();
-      if (model && model.trim()) next.model = model.trim();
-      if (Number.isFinite(maxTokens) && maxTokens >= 256 && maxTokens <= 393216) next.maxTokens = maxTokens;
-      if (['auto', 'disabled', 'low', 'medium', 'high', 'max', 'custom'].includes(thinking)) next.thinking = thinking;
-      else if (thinking === 'enabled') next.thinking = 'high';   // 旧「开启」→ 深度思考档
-      if (Number.isFinite(thinkingBudget) && thinkingBudget >= 256 && thinkingBudget <= 393216) next.thinkingBudget = thinkingBudget;
-      if (Number.isFinite(maxContext) && maxContext >= 0 && maxContext <= 1048576) next.maxContext = maxContext;
-      if (typeof autoSummary === 'boolean') next.autoSummary = autoSummary;
-      if (Number.isFinite(autoSummaryThreshold) && autoSummaryThreshold >= 2000 && autoSummaryThreshold <= 100000) next.autoSummaryThreshold = autoSummaryThreshold;
-      if (!next.apiKey) {
-        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ ok: false, error: '缺少 API Key' }));
-      }
-      // 辅助 API 配置（可选：不填 = 保持原值）
-      const nextAux = { ...State.aux };
-      if (aux && typeof aux === 'object') {
-        if (typeof aux.enabled === 'boolean') nextAux.enabled = aux.enabled;
-        if (aux.protocol === 'anthropic' || aux.protocol === 'openai') nextAux.protocol = aux.protocol;
-        if (aux.baseURL && typeof aux.baseURL === 'string' && aux.baseURL.trim()) nextAux.baseURL = aux.baseURL.trim().replace(/\/+$/, '');
-        if (aux.apiKey && typeof aux.apiKey === 'string' && aux.apiKey.trim()) nextAux.apiKey = aux.apiKey.trim();
-        if (aux.model && typeof aux.model === 'string' && aux.model.trim()) nextAux.model = aux.model.trim();
-        if (typeof aux.fallback === 'boolean') nextAux.fallback = aux.fallback;
-      }
-      const requested = next.model;
-      // 轻量探测（max_tokens:1）：验证端点/Key/模型，端点会把不存在的模型名静默映射到实际模型
-      const probed = await probeEndpoint(next);
-      next.model = probed.model;
-      State.endpoint = next;
-      State.aux = nextAux;
-      // Key 自动记忆：保存时把「端点 + Key」记入记忆，之后切到该端点档案自动带上
-      if (next.baseURL && next.apiKey) State.keyMemo.by[next.baseURL] = next.apiKey;
-      if (nextAux.baseURL && nextAux.apiKey) State.keyMemo.auxBy[nextAux.baseURL] = nextAux.apiKey;
-      saveKeyMemo();
-      backupConfig(MODEL_FILE);
-      fs.writeFileSync(MODEL_FILE, JSON.stringify({
-        protocol: State.endpoint.protocol, baseURL: State.endpoint.baseURL, apiKey: State.endpoint.apiKey,
-        model: State.endpoint.model, maxTokens: State.endpoint.maxTokens, thinking: State.endpoint.thinking,
-        thinkingBudget: State.endpoint.thinkingBudget, maxContext: State.endpoint.maxContext,
-        autoSummary: State.endpoint.autoSummary, autoSummaryThreshold: State.endpoint.autoSummaryThreshold,
-        aux: { enabled: State.aux.enabled, protocol: State.aux.protocol, baseURL: State.aux.baseURL, apiKey: State.aux.apiKey, model: State.aux.model, fallback: State.aux.fallback },
-        updatedAt: new Date().toISOString(),
-      }), 'utf8');
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: true, model: State.endpoint.model, requested, mapped: probed.model !== requested }));
-    } catch (e) {
-      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: false, error: String(e) }));
-    }
-  }
-
-  // 会话管理：列表 / 新建 / 读取 / 保存 / 删除
-  const chatM = p.match(/^\/api\/chats(?:\/([^/]+))?$/);
-  if (chatM) {
-    const id = chatM[1];
-    const sendJson = (obj, code = 200) => { res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
-    // POST /api/chats/unarchive — 恢复已归档会话（必须在 :id 路由之前匹配）
-    if (p === '/api/chats/unarchive' && req.method === 'POST') {
-      let body = await readBody(req);
-      try {
-        const { chatId } = JSON.parse(body);
-        if (!chatId) return sendJson({ error: 'missing chatId' }, 400);
-        const file = chatFilePath(chatId);
-        if (RW_ASYNC_IO) {
-          if (!(await fs.promises.stat(file).catch(() => null))) return sendJson({ error: 'chat not found' }, 404);
-          await writeQueued(file, async () => {
-            const chat = JSON.parse(await fs.promises.readFile(file, 'utf8'));   // 损坏 → 抛出 → 400（与原同步路径一致）
-            chat.hidden = false;
-            chat.updatedAt = new Date().toISOString();
-            await writeJson(file, chat);
-          });
-          return sendJson({ ok: true });
-        }
-        if (!fs.existsSync(file)) return sendJson({ error: 'chat not found' }, 404);
-        const chat = JSON.parse(fs.readFileSync(file, 'utf8'));
-        chat.hidden = false;
-        chat.updatedAt = new Date().toISOString();
-        fs.writeFileSync(file, JSON.stringify(chat), 'utf8');
-        return sendJson({ ok: true });
-      } catch (e) { return sendJson({ error: String(e) }, 400); }
-    }
-    if (!id) {
-      // GET /api/chats — 支持 ?archived=true 返回已归档会话（默认不返回）
-      if (req.method === 'GET') {
-        const urlObj = new URL(req.url, 'http://localhost');
-        const showArchived = urlObj.searchParams.get('archived') === 'true';
-        if (RW_ASYNC_IO) {
-          // 元数据缓存（文件签名未变不重新 parse）；排序在过滤前完成，语义与 readChats 一致
-          const metas = await loadChatMetas();
-          return sendJson({ chats: metas.filter((c) => showArchived ? c.hidden : !c.hidden) });
-        }
-        if (showArchived) {
-          const all = readChats(true);
-          const normal = new Set(readChats(false).map(c => c.id));
-          const archived = all.filter(c => !normal.has(c.id));
-          return sendJson({ chats: archived });
-        }
-        return sendJson({ chats: readChats() });
-      }
-      if (req.method === 'POST') {
-        const cid = Date.now() + '-' + Math.random().toString(36).slice(2, 7);
-        const chat = { id: cid, title: '新对话', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), messages: [] };
-        if (RW_ASYNC_IO) await writeQueued(chatFilePath(cid), () => writeJson(chatFilePath(cid), chat));
-        else fs.writeFileSync(chatFilePath(cid), JSON.stringify(chat), 'utf8');
-        return sendJson({ id: cid });
-      }
-    }
-    const file = chatFilePath(id);
-    if (req.method === 'GET') {
-      if (RW_ASYNC_IO) {
-        if (!(await fs.promises.stat(file).catch(() => null))) return sendJson({ error: 'not found' }, 404);
-        try {
-          const chat = JSON.parse(await fs.promises.readFile(file, 'utf8'));   // 损坏 → 500（与原同步路径一致）
-          if (Array.isArray(chat.messages)) chat.messages = cleanMsgs(chat.messages);   // 展示前清理「方块」乱码（不写盘）
-          return sendJson(chat);
-        } catch (e) { return sendJson({ error: 'failed to load chat' }, 500); }
-      }
-      if (!fs.existsSync(file)) return sendJson({ error: 'not found' }, 404);
-      try {
-        const chat = JSON.parse(fs.readFileSync(file, 'utf8'));
-        if (Array.isArray(chat.messages)) chat.messages = cleanMsgs(chat.messages);   // 展示前清理「方块」乱码（不写盘）
-        return sendJson(chat);
-      } catch (e) { return sendJson({ error: 'failed to load chat' }, 500); }
-    }
-    if (req.method === 'PUT') {
-      let body = await readBody(req);
-      try {
-        const { title, messages, pinned, hidden } = JSON.parse(body);
-        // 读-改-写整体进写队列：与并发保存（前端自动保存/其他页签）串行，消除交错写
-        if (RW_ASYNC_IO) {
-          await writeQueued(file, async () => {
-            let chat;
-            if (await fs.promises.stat(file).catch(() => null)) chat = JSON.parse(await fs.promises.readFile(file, 'utf8'));   // 损坏 → 抛出 → 400
-            else chat = { id, createdAt: new Date().toISOString() };
-            if (typeof pinned === 'boolean') chat.pinned = pinned;
-            if (typeof hidden === 'boolean') chat.hidden = hidden;
-            chat.title = (title || chat.title || '未命名').slice(0, 40);
-            // 写盘前清理「方块」乱码：即使浏览器/历史里带 U+FFFD，落盘也始终干净
-            chat.messages = Array.isArray(messages) ? cleanMsgs(messages) : (chat.messages || []);
-            chat.updatedAt = new Date().toISOString();
-            await writeJson(file, chat);
-          });
-          return sendJson({ ok: true });
-        }
-        const chat = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : { id, createdAt: new Date().toISOString() };
-        if (typeof pinned === 'boolean') chat.pinned = pinned;
-        if (typeof hidden === 'boolean') chat.hidden = hidden;
-        chat.title = (title || chat.title || '未命名').slice(0, 40);
-        // 写盘前清理「方块」乱码：即使浏览器/历史里带 U+FFFD，落盘也始终干净
-        chat.messages = Array.isArray(messages) ? cleanMsgs(messages) : (chat.messages || []);
-        chat.updatedAt = new Date().toISOString();
-        fs.writeFileSync(file, JSON.stringify(chat), 'utf8');
-        return sendJson({ ok: true });
-      } catch (e) { return sendJson({ error: String(e) }, 400); }
-    }
-    if (req.method === 'DELETE') {
-      if (RW_ASYNC_IO) {
-        await writeQueued(file, () => fs.promises.unlink(file).catch(() => {}));   // 与同文件写串行
-        await writeQueued(turnsFile(id), () => fs.promises.unlink(turnsFile(id)).catch(() => {}));
-        return sendJson({ ok: true });
-      }
-      try { fs.unlinkSync(file); } catch (e) { /* 可能已删 */ }
-      try { fs.unlinkSync(turnsFile(id)); } catch (e) { /* 无回合记录 */ }
-      return sendJson({ ok: true });
-    }
-    return sendJson({ error: 'method' }, 405);
-  }
-  // 存档点：保存当前会话完整副本 / 列表 / 读取恢复
-  if (p === '/api/savepoints/save' && req.method === 'POST') {
-    let body = await readBody(req);
-    const sendJson = (obj, code = 200) => { res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
-    try {
-      const { chatId, label } = JSON.parse(body);
-      const cid = sanitizeId(chatId || '');
-      const src = chatFilePath(cid);   // 读源必须用消毒后的 cid（防路径穿越外带任意 JSON）
-      if (!fs.existsSync(src)) return sendJson({ ok: false, error: '会话不存在' }, 404);
-      const chat = JSON.parse(fs.readFileSync(src, 'utf8'));
-      const ts = Date.now();
-      // 存档 = 会话完整副本（附带存档元信息 savepoint，读档时剥离）
-      const snap = { ...chat, savepoint: { ts, label: String(label || '').trim().slice(0, 40), savedAt: new Date().toISOString() } };
-      fs.writeFileSync(path.join(savepointsDirFor(chatId), `${ts}.json`), JSON.stringify(snap, null, 2), 'utf8');
-      return sendJson({ ok: true, ts, note: `已存档：${new Date(ts).toLocaleString()}${snap.savepoint.label ? '（' + snap.savepoint.label + '）' : ''}` });
-    } catch (e) {
-      return sendJson({ ok: false, error: String(e) }, 400);
-    }
-  }
-  if (p === '/api/savepoints/list' && req.method === 'GET') {
-    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ ok: true, savepoints: listSavepoints(url.searchParams.get('chatId') || '') }));
-  }
-  if (p === '/api/savepoints/load' && req.method === 'POST') {
-    let body = await readBody(req);
-    const sendJson = (obj, code = 200) => { res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
-    try {
-      const { chatId, ts } = JSON.parse(body);
-      const cid = sanitizeId(chatId || '');
-      const file = path.join(SAVEPOINTS_DIR, cid, `${Number(ts)}.json`);
-      if (!fs.existsSync(file)) return sendJson({ ok: false, error: '存档点不存在' }, 404);
-      const snap = JSON.parse(fs.readFileSync(file, 'utf8'));
-      // 恢复 = 用存档副本覆盖当前会话文件（剥离 savepoint 元信息，保持当前会话 id）
-      const { savepoint, ...rest } = snap;
-      const chat = { ...rest, id: cid, updatedAt: new Date().toISOString() };
-      fs.writeFileSync(chatFilePath(cid), JSON.stringify(chat), 'utf8');
-      return sendJson({ ok: true, note: '已从存档点恢复' });
-    } catch (e) {
-      return sendJson({ ok: false, error: String(e) }, 400);
-    }
-  }
-
-  // 界面操作：视角切换 / 换装（记账 + 状态持久化，供导出/时间线）
-  if (p === '/api/op/view' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { chatId, view } = JSON.parse(body);
-      const cid = sanitizeId(chatId || '');
-      const v = String(view || '').trim().slice(0, 30);
-      if (!v) {
-        // 空值 = 恢复默认（用户角色主观视角）
-        delete State.opState.views[cid];
-        saveOpState();
-        appendOpRecord(cid, '当前视角', '默认（用户角色）');
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ ok: true, view: '', note: '已恢复默认视角（用户角色主观视角）' }));
-      }
-      State.opState.views[cid] = v;
-      saveOpState();
-      appendOpRecord(cid, '当前视角', v);
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: true, view: v, note: `已切换视角：${v}（已记账，可导出回合记录）` }));
-    } catch (e) {
-      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ error: String(e) }));
-    }
-  }
-  if (p === '/api/op/wardrobe' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { chatId, character, outfit, worn } = JSON.parse(body);
-      const cid = sanitizeId(chatId || '');
-      const ch = String(character || '').trim().slice(0, 20);
-      const of = String(outfit || '').trim().slice(0, 200);
-      if (!ch || !of) throw new Error('缺少角色或着装描述');
-      const day = String(worn || '').trim() || '今日';
-      State.opState.wardrobes[cid] = `${ch}：${of}`;
-      saveOpState();
-      appendOpRecord(cid, '衣柜', `${ch}：${of}（${day}）`);
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: true, note: `✅ 已更新《衣柜》：${ch}：${of}（已记账，可导出回合记录）` }));
-    } catch (e) {
-      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ error: String(e) }));
-    }
-  }
-
-  // 界面操作：扩写指令开关（记账）
-  if (p === '/api/op/expand' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { chatId, enabled } = JSON.parse(body);
-      const cid = sanitizeId(chatId || '');
-      const en = Boolean(enabled);
-      if (en) State.opState.expands[cid] = true; else delete State.opState.expands[cid];
-      saveOpState();
-      appendOpRecord(cid, '扩写指令', en ? '开启' : '关闭');
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: true, enabled: en, note: en ? '扩写指令已开启（本会话生效，短指令将自动扩写）' : '扩写指令已关闭' }));
-    } catch (e) {
-      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ error: String(e) }));
-    }
-  }
-  // 界面操作：工具桥开关（自由选取工具集合；记账）
-  if (p === '/api/op/tools' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { chatId, tools } = JSON.parse(body);
-      const cid = sanitizeId(chatId || '');
-      const sel = (Array.isArray(tools) ? tools : []).filter((n) => BRIDGE_TOOL_NAMES.includes(String(n)));
-      if (sel.length) State.opState.tools[cid] = sel; else delete State.opState.tools[cid];
-      saveOpState();
-      appendOpRecord(cid, '工具桥', sel.length ? sel.map((n) => BRIDGE_TOOL_LABELS[n] || n).join('、') : '关闭');
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: true, tools: sel, note: sel.length ? '工具桥已开启：' + sel.map((n) => BRIDGE_TOOL_LABELS[n] || n).join('、') : '工具桥已关闭' }));
-    } catch (e) {
-      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ error: String(e) }));
-    }
-  }
-  // 界面操作：API 采样预设（命名预设）
-  if (p === '/api/presets' && req.method === 'GET') {
-    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ ok: true, presets: State.presets, active: State.activePreset, samplers: State.samplers }));
-  }
-  if (p === '/api/presets' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { action, name, preset } = JSON.parse(body);
-      const nm = String(name || '').trim().slice(0, 40);
-      if (action === 'apply') {
-        if (!State.presets[nm]) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '预设不存在：' + nm })); }
-        applyPreset(nm);
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, active: nm, samplers: State.samplers, note: `已应用预设「${nm}」` }));
-      }
-      if (action === 'save') {
-        if (!nm) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '预设名不能为空' })); }
-        State.presets[nm] = normPreset(preset || {});
-        applyPreset(nm);
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, active: nm, note: `预设「${nm}」已保存并应用` }));
-      }
-      if (action === 'delete') {
-        if (BUILTIN_PRESETS[nm]) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '内置预设不可删除' })); }
-        delete State.presets[nm];
-        savePresets();
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, note: `预设「${nm}」已删除` }));
-      }
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ error: '未知操作' }));
-    } catch (e) {
-      res.writeHead(400); return res.end(JSON.stringify({ error: String(e) }));
-    }
-  }
-  // 配置档案（Profile：端点 + 模型 + 参数整套一键切换）
-  if (p === '/api/profiles' && req.method === 'GET') {
-    const list = {};
-    for (const [k, v] of Object.entries(State.profiles)) {
-      const bu = v.baseURL ? v.baseURL.replace(/\/+$/, '') : '';
-      list[k] = { ...v, builtin: !!BUILTIN_PROFILES[k], keyReady: !!(bu && State.keyMemo.by[bu]) };
-    }
-    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ ok: true, profiles: list, active: State.activeProfile, current: snapshotEndpoint() }));
-  }
-  if (p === '/api/profiles' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { action, name, profile } = JSON.parse(body);
-      const nm = String(name || '').trim().slice(0, 40);
-      if (action === 'apply') {
-        if (!State.profiles[nm]) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '档案不存在：' + nm })); }
-        applyProfile(nm);
-        const k = State.endpoint.apiKey || '';
-        const ak = State.aux.apiKey || '';
-        const bu = State.endpoint.baseURL || '';
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, active: nm, model: State.endpoint.model, protocol: State.endpoint.protocol, baseURL: State.endpoint.baseURL, apiKeyMasked: k ? '...' + k.slice(-4) : '', keySource: State.keyMemo.by[bu] ? 'memo' : 'kept', keyReady: !!State.keyMemo.by[bu], auxKeyMasked: ak ? '...' + ak.slice(-4) : '', maxTokens: State.endpoint.maxTokens, thinking: State.endpoint.thinking, maxContext: State.endpoint.maxContext, preset: State.activePreset, note: `已切换到「${nm}」`, peakEligible: /api\.deepseek\.com/i.test(bu) }));
-      }
-      if (action === 'save') {
-        if (!nm) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '档案名不能为空' })); }
-        const snap = snapshotEndpoint();
-        State.profiles[nm] = { ...snap, ...(profile || {}), desc: (profile && profile.desc) || (BUILTIN_PROFILES[nm] ? BUILTIN_PROFILES[nm].desc : '') };
-        delete State.profiles[nm].apiKey;
-        delete State.profiles[nm].builtin;
-        saveProfiles();
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, active: nm, note: `档案「${nm}」已保存（端点 + 模型 + 参数）` }));
-      }
-      if (action === 'delete') {
-        if (BUILTIN_PROFILES[nm]) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '内置档案不可删除' })); }
-        if (!State.profiles[nm]) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '档案不存在：' + nm })); }
-        delete State.profiles[nm];
-        if (State.activeProfile === nm) State.activeProfile = '';
-        saveProfiles();
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, note: `档案「${nm}」已删除` }));
-      }
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ error: '未知操作' }));
-    } catch (e) {
-      res.writeHead(400); return res.end(JSON.stringify({ error: String(e) }));
-    }
-  }
-  // 对话配置档系统
-  if (p === '/api/chat-profiles' && req.method === 'GET') {
-    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, profiles: State.chatProfiles }));
-  }
-  if (p === '/api/chat-profiles' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { action, id, profile } = JSON.parse(body);
-      if (action === 'save') {
-        if (!id?.trim()) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: 'ID 不能为空' })); }
-        State.chatProfiles[id.trim().slice(0, 30)] = { ...State.chatProfiles[id.trim()], ...profile, label: (profile?.label || id).slice(0, 40) };
-        saveChatProfiles();
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true }));
-      }
-      if (action === 'delete') {
-        if (BUILTIN_CHAT_PROFILES[id]) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '内置不可删' })); }
-        delete State.chatProfiles[id]; saveChatProfiles();
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true }));
-      }
-      if (action === 'apply') {
-        const chatId = sanitizeId(profile?.chatId || '');
-        if (!chatId || !State.chatProfiles[id]) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '参数错误' })); }
-        try {
-          const f = path.join(DATA_DIR, 'chats', `${chatId}.json`);
-          const c = JSON.parse(fs.readFileSync(f, 'utf8')); c.chatProfile = id; fs.writeFileSync(f, JSON.stringify(c, null, 2), 'utf8');
-          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true }));
-        } catch (e) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '对话不存在' })); }
-      }
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ error: '未知操作' }));
-    } catch (e) { res.writeHead(400); return res.end(JSON.stringify({ error: String(e) })); }
-  }
-  // NPC 档案
-  const npcM = p.match(/^\/api\/npc-profiles(?:\/([^/]+))?$/);
-  if (npcM) {
-    const name = npcM[1] ? sanitizeFileName(decodeURIComponent(npcM[1]), 40) : null;
-    const sendJson = (o, c = 200) => { res.writeHead(c, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(o)); };
-    if (!name) {
-      if (req.method === 'GET') return sendJson({ ok: true, profiles: listNpcProfiles() });
-      if (req.method === 'POST') { let b = await readBody(req); try { const d = JSON.parse(b); const n = sanitizeFileName(d.name || '', 40); if (!n) return sendJson({error:'名称不能为空'},400); const p2={name:n,aliases:d.aliases||[],appearance:d.appearance||'',personality:d.personality||'',age:d.age||null,ageNote:d.ageNote||'',relationships:d.relationships||{},firstAppearance:d.firstAppearance||'',lastUpdated:new Date().toISOString(),notes:d.notes||''}; saveNpcProfile(n,p2); return sendJson({ok:true,profile:p2}); } catch(e){return sendJson({error:String(e)},400);} }
-    } else {
-      if (req.method === 'GET') { const p2=loadNpcProfile(name); return p2?sendJson({ok:true,profile:p2}):sendJson({error:'不存在'},404); }
-      if (req.method === 'DELETE') { try{fs.unlinkSync(path.join(NPC_PROFILES_DIR,`${name}.json`));}catch(e){} return sendJson({ok:true}); }
-    }
-  }
-  // 场景档案
-  const sceneM = p.match(/^\/api\/scenes(?:\/([^/]+))?$/);
-  if (sceneM) {
-    const name = sceneM[1] ? sanitizeFileName(decodeURIComponent(sceneM[1]), 40) : null;
-    const sendJson = (o, c = 200) => { res.writeHead(c, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(o)); };
-    if (!name) {
-      if (req.method === 'GET') return sendJson({ ok: true, scenes: listScenes() });
-      if (req.method === 'POST') { let b = await readBody(req); try { const d = JSON.parse(b); const n = sanitizeFileName(d.name || '', 40); if (!n) return sendJson({error:'名称不能为空'},400); const s={name:n,location:d.location||'',physicalFeatures:d.physicalFeatures||[],atmosphere:d.atmosphere||'',lastVisited:d.lastVisited||new Date().toISOString().slice(0,10),visitCount:d.visitCount||0,notes:d.notes||''}; saveScene(n,s); return sendJson({ok:true,scene:s}); } catch(e){return sendJson({error:String(e)},400);} }
-    } else {
-      if (req.method === 'GET') { const s=loadScene(name); return s?sendJson({ok:true,scene:s}):sendJson({error:'不存在'},404); }
-      if (req.method === 'DELETE') { try{fs.unlinkSync(path.join(SCENES_DIR,`${name}.json`));}catch(e){} return sendJson({ok:true}); }
-    }
-  }
-  // 特判：/api/expressions/config 是功能路由，须先于 expM 通配匹配（否则被当成角色名 config）
-  if (p === '/api/expressions/config' && req.method === 'POST') { let b=await readBody(req); try { const d=JSON.parse(b); if(d.emotionMap) State.emotionMap={...DEFAULT_EMOTION_MAP,...d.emotionMap}; if(typeof d.enableAutoSwitch==='boolean') State.enableAutoSwitch=d.enableAutoSwitch; saveExpressionConfig(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true})); } catch(e){res.writeHead(400,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:String(e)})); } }
-  // 表情系统
-  const expM = p.match(/^\/api\/expressions(?:\/([^/]+))?$/);
-  if (expM) {
-    const charName = expM[1] ? sanitizeFileName(decodeURIComponent(expM[1]), 40) : null;
-    const sendJson = (o, c = 200) => { res.writeHead(c, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(o)); };
-    if (!charName) {
-      if (req.method === 'GET') { try { const cs=fs.readdirSync(EXPRESSIONS_DIR).filter(f=>fs.statSync(path.join(EXPRESSIONS_DIR,f)).isDirectory()); const r={}; for(const c of cs) r[c]=listExpressions(c); return sendJson({ok:true,expressions:r,config:{emotionMap: State.emotionMap,enableAutoSwitch: State.enableAutoSwitch}}); } catch(e){return sendJson({ok:true,expressions:{},config:{emotionMap: State.emotionMap,enableAutoSwitch: State.enableAutoSwitch}}); } }
-    } else {
-      if (req.method === 'GET') return sendJson({ ok: true, expressions: listExpressions(charName) });
-      if (req.method === 'DELETE') {
-        // 删除单个表情（?name=表情名）
-        const name = decodeURIComponent(req.url?.match(/[?&]name=([^&]+)/)?.[1] || '');
-        if (!name) return sendJson({ error: '缺少表情名' }, 400);
-        const safeName = sanitizeFileName(name, 40);
-        const dir = path.join(EXPRESSIONS_DIR, charName);
-        const file = path.join(dir, safeName);
-        if (!file.startsWith(dir + path.sep) || !fs.existsSync(file)) return sendJson({ error: '表情不存在' }, 404);
-        try { fs.unlinkSync(file); return sendJson({ ok: true, deleted: safeName }); }
-        catch (e) { return sendJson({ error: String(e) }, 400); }
-      }
-      if (req.method === 'POST') { const dir=path.join(EXPRESSIONS_DIR,charName); fs.mkdirSync(dir,{recursive:true}); let b=await readBody(req); try { const {name,imageData}=JSON.parse(b); const n=sanitizeFileName(name || '', 30); if(!n||!imageData) return sendJson({error:'缺少数据'},400); const m=imageData.match(/^data:image\/(png|jpeg|jpg|webp|gif);base64,(.+)$/); if(!m) return sendJson({error:'格式不支持'},400); const ext=m[1]==='jpeg'?'jpg':m[1]; fs.writeFileSync(path.join(dir,`${n}.${ext}`),Buffer.from(m[2],'base64')); return sendJson({ok:true}); } catch(e){return sendJson({error:String(e)},400);} }
-    }
-  }
-  const expSM = p.match(/^\/api\/expressions\/static\/([^/]+)\/(.+)$/);
-  if (expSM) { const charName = sanitizeFileName(decodeURIComponent(expSM[1]), 40); const fileName = sanitizeFileName(decodeURIComponent(expSM[2]), 60); if (!charName || !fileName) { res.writeHead(404); return res.end(); } const f=path.join(EXPRESSIONS_DIR,charName,fileName); if(fs.existsSync(f)){const ext=path.extname(f).toLowerCase(); const mime={'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.gif':'image/gif'}[ext]||'application/octet-stream'; res.writeHead(200,{'content-type':mime,'cache-control':'public, max-age=86400'}); return res.end(fs.readFileSync(f));} res.writeHead(404); return res.end(); }
-  // 输出过滤器
-  if (p === '/api/regex-rules' && req.method === 'GET') { res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,rules:State.regexRules})); }
-  if (p === '/api/regex-rules' && req.method === 'POST') { let b=await readBody(req); try { const {action,rule}=JSON.parse(b); if(action==='save'){const id=rule?.id||'rule_'+Date.now(); const idx=State.regexRules.findIndex(r=>r.id===id); const nr={id,name:String(rule?.name||'').slice(0,40),pattern:rule?.pattern||'',replacement:rule?.replacement||'',flags:rule?.flags||'g',enabled:rule?.enabled!==false}; if(idx>=0)State.regexRules[idx]=nr; else State.regexRules.push(nr); saveRegexRules(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,rule:nr})); } if(action==='delete'){State.regexRules=State.regexRules.filter(r=>r.id!==rule?.id); saveRegexRules(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true})); } if(action==='test'){try{const re=new RegExp(rule?.pattern||'',rule?.flags||'g'); const result=(rule?.testText||'').replace(re,rule?.replacement||''); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,result}));}catch(e){res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:'正则错误：'+e.message}));} } res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); res.end(JSON.stringify({error:'未知操作'})); } catch(e){res.writeHead(400,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:String(e)})); } }
-  // 剧情建议
-  if (p === '/api/suggestions/generate' && req.method === 'POST') { let b=await readBody(req); try { const {chatId}=JSON.parse(b); const cid=sanitizeId(chatId||''); const f=path.join(DATA_DIR,'chats',`${cid}.json`); if(!fs.existsSync(f)){res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:'对话不存在'}));} const chat=JSON.parse(fs.readFileSync(f,'utf8')); const recent=(chat.messages||[]).slice(-10).map(m=>`${m.role==='user'?'用户':'AI'}：${String(m.content||'').slice(0,200)}`).join('\n'); const prompt=`你是一位 RP 剧情顾问。基于当前对话上下文，给出 3-5 条后续剧情发展方向建议。\n每条建议包含：\n- title：30 字以内的方向概述\n- detail：100-200 字的具体展开\n- mood：建议的氛围（日常/紧张/温馨/战斗/悬疑）\n\n当前对话：\n${recent}\n\n输出纯 JSON 数组，不要其他文字。`; const result=await auxCall(prompt); try{const sg=JSON.parse(result); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,suggestions:sg}));}catch(e){const m=result.match(/```(?:json)?\s*([\s\S]*?)```/); if(m){try{const sg=JSON.parse(m[1].trim()); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,suggestions:sg}));}catch(e2){}} res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:'AI 返回格式错误',raw:result.slice(0,500)}));} } catch(e){res.writeHead(400,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:String(e)})); } }
-  // 设定触发器（Lorebook）
-  if (p === '/api/lorebook' && req.method === 'GET') { res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,entries:State.lorebookEntries,settings:State.lorebookSettings})); }
-  if (p === '/api/lorebook' && req.method === 'POST') { let b=await readBody(req); try { const {action,id,entry,settings,testText}=JSON.parse(b); if(action==='save'){const eid=id||'entry_'+Date.now(); State.lorebookEntries[eid]={...State.lorebookEntries[eid],...entry,id:eid}; saveLorebook(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,id:eid}));} if(action==='delete'){delete State.lorebookEntries[id]; saveLorebook(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true}));} if(action==='settings'){State.lorebookSettings={...State.lorebookSettings,...settings}; saveLorebook(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,settings:State.lorebookSettings}));} if(action==='scan'){const chatId=entry?.chatId||''; const f=path.join(DATA_DIR,'chats',`${sanitizeId(chatId)}.json`); let msgs=[]; if(fs.existsSync(f)){try{msgs=JSON.parse(fs.readFileSync(f,'utf8')).messages||[];}catch(e){}} const result=scanLorebook(msgs,testText||'',State.endpoint.maxContext); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,...result}));} if(action==='import'){try{const imp=JSON.parse(entry?.json||'{}'); if(imp.entries) Object.assign(State.lorebookEntries,imp.entries); saveLorebook(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,count:Object.keys(imp.entries||{}).length}));}catch(e){res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:'导入格式错误'}));}} if(action==='list-worldbook'){try{const customPath=entry?.path?path.resolve(ROOT,String(entry.path).trim()):null; const dir=customPath||path.join(ROOT,'canonical','lore','entries'); if(!fs.existsSync(dir)){res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,entries:[],note:'canonical/lore/entries 不存在'}));} const files=fs.readdirSync(dir).filter(f=>f.endsWith('.md')).sort(); const list=[]; for(const f of files){try{const text=fs.readFileSync(path.join(dir,f),'utf8'); const fm=text.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/); if(!fm) continue; const meta={}; for(const line of fm[1].split('\n')){const kv=line.match(/^(\w+):\s*(.+)$/); if(kv){const val=kv[2].trim(); if(val.startsWith('[')){try{meta[kv[1]]=JSON.parse(val);}catch(e){meta[kv[1]]=val.replace(/^\[|\]$/g,'').split(',').map(s=>s.trim().replace(/^"|"$/g,''));}} else meta[kv[1]]=val.replace(/^"|"$/g,'');}} const content=(fm[2]||'').trim().slice(0,3000); if(!meta.name||!content) continue; const key='wb-'+(meta.uid??f.replace(/.md$/,'')); const exists=!!State.lorebookEntries[key]||Object.values(State.lorebookEntries).some(e=>e.name===meta.name&&e.source==='worldbook'); list.push({id:key,name:meta.name,keywords:Array.isArray(meta.keywords)?meta.keywords:(meta.keywords?String(meta.keywords).split(',').map(s=>s.trim()):[meta.name]),constant:meta.constant===true||meta.constant==='true',contentLength:content.length,contentPreview:content.slice(0,80),exists});}catch(e){}} res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,total:files.length,entries:list}));}catch(e){res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:false,error:String(e)}));}} if(action==='import-worldbook'){try{const ids=Array.isArray(entry?.ids)?entry.ids:[]; const customPath=entry?.path?path.resolve(ROOT,String(entry.path).trim()):null; const dir=customPath||path.join(ROOT,'canonical','lore','entries'); if(!fs.existsSync(dir)){res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:'canonical/lore/entries 不存在'}));} const files=fs.readdirSync(dir).filter(f=>f.endsWith('.md')); let imported=0; for(const f of files){try{const text=fs.readFileSync(path.join(dir,f),'utf8'); const fm=text.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/); if(!fm) continue; const meta={}; for(const line of fm[1].split('\n')){const kv=line.match(/^(\w+):\s*(.+)$/); if(kv){const val=kv[2].trim(); if(val.startsWith('[')){try{meta[kv[1]]=JSON.parse(val);}catch(e){meta[kv[1]]=val.replace(/^\[|\]$/g,'').split(',').map(s=>s.trim().replace(/^"|"$/g,''));}} else meta[kv[1]]=val.replace(/^"|"$/g,'');}} const key='wb-'+(meta.uid??f.replace(/.md$/,'')); if(!ids.includes(key)) continue; const content=(fm[2]||'').trim().slice(0,3000); if(!meta.name||!content) continue; State.lorebookEntries[key]={name:String(meta.name).slice(0,40),keywords:(Array.isArray(meta.keywords)?meta.keywords:[meta.name]).map(k=>String(k).slice(0,30)).slice(0,10),content:content,priority:Number(meta.order)||200,enabled:true,constant:meta.constant===true||meta.constant==='true',source:'worldbook'}; imported++;}catch(e){}} saveLorebook(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,imported}));}catch(e){res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:String(e)}));}} if(action==='export'){res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,data:{entries:State.lorebookEntries,settings:State.lorebookSettings}}));} res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); res.end(JSON.stringify({error:'未知操作'})); } catch(e){res.writeHead(400,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:String(e)})); } }
-  // 关系图谱
-  if (p === '/api/graph' && req.method === 'GET') { res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,...State.graphData})); }
-  if (p === '/api/graph' && req.method === 'POST') { let b=await readBody(req); try { const {action,node,edge}=JSON.parse(b); if(action==='addNode'||action==='updateNode'){const id=node?.id||'node_'+Date.now(); const idx=State.graphData.nodes.findIndex(n=>n.id===id); const nn={id,name:node?.name||id,type:node?.type||'character',description:node?.description||'',tags:node?.tags||[]}; if(idx>=0)State.graphData.nodes[idx]=nn; else State.graphData.nodes.push(nn); saveGraph(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,node:nn}));} if(action==='addEdge'||action==='updateEdge'){const id=edge?.id||'edge_'+Date.now(); const idx=State.graphData.edges.findIndex(e=>e.id===id); const ne={id,from:edge?.from||'',to:edge?.to||'',label:edge?.label||'',weight:edge?.weight||1,description:edge?.description||''}; if(idx>=0)State.graphData.edges[idx]=ne; else State.graphData.edges.push(ne); saveGraph(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,edge:ne}));} if(action==='deleteNode'){State.graphData.nodes=State.graphData.nodes.filter(n=>n.id!==node?.id); State.graphData.edges=State.graphData.edges.filter(e=>e.from!==node?.id&&e.to!==node?.id); saveGraph(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true}));} if(action==='deleteEdge'){State.graphData.edges=State.graphData.edges.filter(e=>e.id!==edge?.id); saveGraph(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true}));} if(action==='import'){try{const imp=JSON.parse(node?.json||'{}'); if(imp.nodes) State.graphData.nodes=imp.nodes; if(imp.edges) State.graphData.edges=imp.edges; saveGraph(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true}));}catch(e){res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:'导入格式错误'}));}} if(action==='export'){res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,data:State.graphData}));} res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); res.end(JSON.stringify({error:'未知操作'})); } catch(e){res.writeHead(400,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:String(e)})); } }
-  // 玩家身份
-  if (p === '/api/personas' && req.method === 'GET') { res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,personas: State.personas,active:State.activePersona})); }
-  if (p === '/api/personas' && req.method === 'POST') { let b=await readBody(req); try { const {action,id,persona}=JSON.parse(b); if(action==='save'){const pid=id||'persona_'+Date.now(); State.personas[pid]={...State.personas[pid],...persona,name:(persona?.name||pid).slice(0,40)}; savePersonas(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,id:pid}));} if(action==='delete'){delete State.personas[id]; if(State.activePersona===id) State.activePersona=''; savePersonas(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true}));} if(action==='activate'){if(!State.personas[id]){res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:'身份不存在'}));} State.activePersona=id; savePersonas(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,active:id}));} res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); res.end(JSON.stringify({error:'未知操作'})); } catch(e){res.writeHead(400,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:String(e)})); } }
-  // 剧情记忆配置（注入开关）
-  if (p === '/api/story-memory/config' && req.method === 'GET') {
-    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, config: State.storyMemoryConfig }));
-  }
-  if (p === '/api/story-memory/config' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const updates = JSON.parse(body);
-      State.storyMemoryConfig = { ...State.storyMemoryConfig, ...updates };
-      saveStoryMemoryConfig();
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, config: State.storyMemoryConfig }));
-    } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: String(e) })); }
-  }
-  // 剧情记忆数据（前端展示用）
-  if (p === '/api/story-memory/data' && req.method === 'GET') {
-    const chatId = sanitizeId(req.url?.match(/chatId=([^&]+)/)?.[1] || '');
-    if (!chatId) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '缺少 chatId' })); }
-    const turns = readTurns(chatId);
-    // 全部历史场景（按出现顺序保留，含时间/氛围/事件）
-    const scenes = turns.filter(t => t.location).map(t => ({ story_time: t.story_time || '', location: t.location, atmosphere: t.atmosphere || '', event: t.event || '' }));
-    const latestScene = scenes.length ? scenes[scenes.length - 1] : null;
-    const allCharacterIntros = {};
-    for (const t of turns) {
-      if (t.character_intro && typeof t.character_intro === 'object') {
-        for (const [name, intro] of Object.entries(t.character_intro)) {
-          if (!allCharacterIntros[name]) allCharacterIntros[name] = intro;
-        }
-      }
-    }
-    const allRelationships = [];
-    const seenRelKeys = new Set();
-    for (const t of turns) {
-      if (Array.isArray(t.relationships)) {
-        for (const rel of t.relationships) {
-          const key = `${rel.from}-${rel.to}`;
-          if (!seenRelKeys.has(key)) { seenRelKeys.add(key); allRelationships.push(rel); }
-        }
-      }
-    }
-    // 地点详细档案（location_detail，按分组聚合，去重）
-    const locationDetails = [];
-    const seenLocKeys = new Set();
-    for (const t of turns) {
-      if (Array.isArray(t.location_detail)) {
-        for (const loc of t.location_detail) {
-          const key = `${loc.group}|${loc.name}`;
-          if (!seenLocKeys.has(key)) { seenLocKeys.add(key); locationDetails.push(loc); }
-        }
-      }
-    }
-    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, scene: latestScene, scenes, characters: allCharacterIntros, relationships: allRelationships, locationDetails }));
-  }
-  // 地点档案合入 canonical/lore/地点.txt（带备份）
-  // 剧情备忘
-  const agendaM = p.match(/^\/api\/agenda(?:\/([^/]+))?$/);
-  if (agendaM) { const cid = agendaM[1] ? sanitizeId(decodeURIComponent(agendaM[1])) : null; const sendJson = (o, c = 200) => { res.writeHead(c, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(o)); }; if (cid) { if (req.method === 'GET') return sendJson({ ok: true, ...loadAgenda(cid) }); if (req.method === 'POST') { let b = await readBody(req); try { const { action, item } = JSON.parse(b); const a = loadAgenda(cid); if (action === 'add') { const id = 'agenda_' + Date.now(); a.items.push({ id, content: item?.content || '', createdAt: new Date().toISOString(), status: 'pending', priority: item?.priority || 'normal', source: item?.source || 'manual' }); saveAgenda(cid, a); return sendJson({ ok: true, id }); } if (action === 'complete') { const idx = a.items.findIndex(i => i.id === item?.id); if (idx >= 0) { a.items[idx].status = 'completed'; a.items[idx].completedAt = new Date().toISOString(); saveAgenda(cid, a); } return sendJson({ ok: true }); } if (action === 'delete') { a.items = a.items.filter(i => i.id !== item?.id); saveAgenda(cid, a); return sendJson({ ok: true }); } return sendJson({ error: '未知操作' }); } catch (e) { return sendJson({ error: String(e) }, 400); } } } }
-  // 报告系统
-  if (p === '/api/report/list' && req.method === 'GET') { const cid = url.searchParams.get('chatId') || ''; res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, reports: listReports(cid) })); }
-  // 报告内容读取（M6：前端 loadReportListUI 点击报告使用；filename 白名单校验防穿越）
-  const reportReadM = p.match(/^\/api\/report\/([^/]+)\/([^/]+)$/);
-  if (reportReadM && req.method === 'GET') {
-    const cid = sanitizeId(decodeURIComponent(reportReadM[1]));
-    const filename = sanitizeFileName(decodeURIComponent(reportReadM[2]), 80);
-    const dir = path.join(REPORTS_DIR, cid);
-    const file = path.join(dir, filename);
-    try {
-      if (!fs.existsSync(file) || path.dirname(file) !== dir) {
-        res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '报告不存在' }));
-      }
-      const content = fs.readFileSync(file, 'utf8');
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, content }));
-    } catch (e) {
-      res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: String(e) }));
-    }
-  }
-  if (p === '/api/report/overview' && req.method === 'POST') { let b = await readBody(req); try { const { chatId, range } = JSON.parse(b); const cid = sanitizeId(chatId || ''); const f = path.join(DATA_DIR, 'chats', `${cid}.json`); if (!fs.existsSync(f)) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '对话不存在' })); } const chat = JSON.parse(fs.readFileSync(f, 'utf8')); const msgs = (chat.messages || []).slice(range === 'last10' ? -10 : range === 'today' ? -50 : -200); const recent = msgs.map(m => `${m.role === 'user' ? '用户' : 'AI'}：${String(m.content || '').slice(0, 300)}`).join('\n'); const prompt = `你是一位 RP 回顾分析师。基于以下对话，生成回顾报告。\n\n报告格式：\n# RP 回顾报告\n\n## 关键事件\n- [时间] 事件描述\n\n## 角色发展\n- 角色名：成长/变化\n\n## 互动要点\n- 重要对话/决策\n\n## 未完事项\n- 伏笔/待续\n\n对话内容：\n${recent}\n\n输出 Markdown 格式的报告。`; const result = await auxCall(prompt); const filename = saveReport(cid, 'overview', result); res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, content: result, filename })); } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: String(e) })); } }
-  if (p === '/api/report/audit' && req.method === 'POST') { let b = await readBody(req); try { const { chatId, range } = JSON.parse(b); const cid = sanitizeId(chatId || ''); const f = path.join(DATA_DIR, 'chats', `${cid}.json`); if (!fs.existsSync(f)) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '对话不存在' })); } const chat = JSON.parse(fs.readFileSync(f, 'utf8')); const msgs = (chat.messages || []).slice(range === 'last10' ? -10 : range === 'today' ? -50 : -200); const recent = msgs.map(m => `${m.role === 'user' ? '用户' : 'AI'}：${String(m.content || '').slice(0, 300)}`).join('\n'); const prompt = `你是一位 RP 质量审查员。基于以下对话，生成自检报告。\n\n评估维度：\n1. 角色一致性（言行是否符合设定）\n2. 时间线连贯性（时间/地点是否矛盾）\n3. 物品/状态一致性（持有物/能力是否合理）\n4. 对话质量（回复长度/风格/情感）\n5. 伏笔追踪（已埋伏笔是否被遗忘）\n\n报告格式：\n# AI 自检报告\n\n## 总评\n- 综合评分：X/10\n\n## 各维度评分\n| 维度 | 评分 | 问题 |\n|---|---|---|\n| 角色一致性 | X/10 | ... |\n\n## 具体问题\n- 问题描述 + 对应消息\n\n## 改进建议\n- 建议内容\n\n对话内容：\n${recent}\n\n输出 Markdown 格式的报告。`; const result = await auxCall(prompt); const filename = saveReport(cid, 'audit', result); res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, content: result, filename })); } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: String(e) })); } }
-  // 回溯分析
-  if (p === '/api/analyze/retro' && req.method === 'POST') { let b = await readBody(req); try { const { chatId } = JSON.parse(b); const cid = sanitizeId(chatId || ''); const f = path.join(DATA_DIR, 'chats', `${cid}.json`); if (!fs.existsSync(f)) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '对话不存在' })); } const chat = JSON.parse(fs.readFileSync(f, 'utf8')); const allMsgs = chat.messages || []; const batchSize = 20; const results = []; for (let i = 0; i < allMsgs.length; i += batchSize) { const batch = allMsgs.slice(i, i + batchSize); const batchText = batch.map(m => `${m.role === 'user' ? '用户' : 'AI'}：${String(m.content || '').slice(0, 200)}`).join('\n'); const prompt = `分析以下 RP 对话片段，提取关键信息：\n1. 新出现的角色\n2. 关系变化\n3. 重要事件\n4. 物品/状态变化\n5. 场景变化\n\n对话：\n${batchText}\n\n输出 JSON 格式：{"characters":[],"relationships":[],"events":[],"items":[],"scenes":[]}`; try { const result = await auxCall(prompt); const parsed = JSON.parse(result.replace(/```(?:json)?\s*([\s\S]*?)```/, '$1').trim()); results.push(parsed); } catch (e) {} } const merged = { characters: [], relationships: [], events: [], items: [], scenes: [] }; for (const r of results) { if (r.characters) merged.characters.push(...r.characters); if (r.relationships) merged.relationships.push(...r.relationships); if (r.events) merged.events.push(...r.events); if (r.items) merged.items.push(...r.items); if (r.scenes) merged.scenes.push(...r.scenes); } const report = `# 回溯分析报告\n\n## 角色（${merged.characters.length}）\n${merged.characters.map(c => `- ${typeof c === 'string' ? c : JSON.stringify(c)}`).join('\n')}\n\n## 关系变化（${merged.relationships.length}）\n${merged.relationships.map(r => `- ${typeof r === 'string' ? r : JSON.stringify(r)}`).join('\n')}\n\n## 重要事件（${merged.events.length}）\n${merged.events.map(e => `- ${typeof e === 'string' ? e : JSON.stringify(e)}`).join('\n')}\n\n## 物品/状态（${merged.items.length}）\n${merged.items.map(i => `- ${typeof i === 'string' ? i : JSON.stringify(i)}`).join('\n')}\n\n## 场景（${merged.scenes.length}）\n${merged.scenes.map(s => `- ${typeof s === 'string' ? s : JSON.stringify(s)}`).join('\n')}`; const filename = saveReport(cid, 'retro', report); res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, content: report, filename, stats: { messages: allMsgs.length, batches: results.length } })); } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: String(e) })); } }
-  // 语义回忆：BM25 搜索聊天历史（跨会话或指定会话）
-  if (p === '/api/memory/search' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { query, chatId, limit: lim } = JSON.parse(body);
-      if (!query || !String(query).trim()) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '缺少查询词' })); }
-      const limNum = Number(lim);
-      const maxResults = Math.min(Number.isFinite(limNum) ? limNum : 20, 50);
-      const qTokens = tokenize(String(query));
-      if (!qTokens.length) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, results: [], total: 0 })); }
-      const MAX_MSGS = 5000;
-      const chatFiles = chatId
-        ? [path.join(DATA_DIR, 'chats', `${sanitizeId(chatId)}.json`)]
-        : (() => { try { return fs.readdirSync(path.join(DATA_DIR, 'chats')).filter(f => f.endsWith('.json')).map(f => path.join(DATA_DIR, 'chats', f)); } catch (e) { return []; } })();
-      const allMsgs = [];
-      for (const f of chatFiles) {
-        if (!fs.existsSync(f)) continue;
-        try {
-          const chat = JSON.parse(fs.readFileSync(f, 'utf8'));
-          const cid = chat.id || path.basename(f, '.json');
-          for (const m of (chat.messages || [])) {
-            if (allMsgs.length >= MAX_MSGS) break;
-            const txt = String(m.content || '');
-            if (txt.length < 5) continue;
-            allMsgs.push({ chatId: cid, role: m.role || 'unknown', content: txt.slice(0, 1000), seq: m.seq || 0, chatTitle: chat.title || cid });
-          }
-          if (allMsgs.length >= MAX_MSGS) break;
-        } catch (e) { /* 跳过 */ }
-      }
-      const avgDl = allMsgs.length ? allMsgs.reduce((s, m) => s + tokenize(m.content).length, 0) / allMsgs.length : 1;
-      const df = {};
-      const msgTokens = allMsgs.map(m => { const t = tokenize(m.content); for (const w of new Set(t)) df[w] = (df[w] || 0) + 1; return t; });
-      const N = allMsgs.length;
-      const k1 = 1.5, b = 0.75;
-      const scored = allMsgs.map((m, i) => {
-        const tokens = msgTokens[i]; const dl = tokens.length || 1;
-        const tfMap = {}; for (const t of tokens) tfMap[t] = (tfMap[t] || 0) + 1;
-        let score = 0;
-        for (const qt of qTokens) { const tf = tfMap[qt] || 0; const docFreq = df[qt] || 0; const idf = Math.log((N - docFreq + 0.5) / (docFreq + 0.5) + 1); score += idf * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl / avgDl)); }
-        return { ...m, score };
-      });
-      scored.sort((a, b) => b.score - a.score);
-      const results = scored.filter(r => r.score > 0.1).slice(0, maxResults);
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: true, results, total: N, queryTokens: qTokens.length }));
-    } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: String(e) })); }
-  }
-  // 卡片交换：PNG tEXt chunk 工具函数（兼容酒馆角色卡格式）
+// ===== 分区：路由处理（阶段 5 路由表化机械搬运，函数体逐字保留） =====
+// handler 由原 handleRequest if 链逐块搬出；块内顶层 return 机械改写为
+// 「执行原表达式 + return true」（响应行为不变），块尾 return false = 原链 fall-through。
+// 卡片交换：PNG tEXt chunk 工具函数（兼容酒馆角色卡格式）
   function pngReadTextChunks(buffer) {
     const chunks = [];
     try {
@@ -2657,7 +2025,8 @@ async function handleRequest(req, res) {
     } catch (e) {}
     return chunks;
   }
-  function pngCreateWithTextChunk(imageBuffer, keyword, text) {
+
+function pngCreateWithTextChunk(imageBuffer, keyword, text) {
     try {
       const sig = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
       if (!imageBuffer.slice(0, 8).equals(sig)) return null;
@@ -2677,55 +2046,20 @@ async function handleRequest(req, res) {
       return Buffer.concat([imageBuffer.slice(0, iendPos), textChunk, imageBuffer.slice(iendPos)]);
     } catch (e) { return null; }
   }
-  // 卡片交换 API：导出角色卡 PNG
-  const cardsExpM = p.match(/^\/api\/cards\/export\/([^/]+)$/);
-  if (cardsExpM && req.method === 'GET') {
-    try {
-      const charName = sanitizeFileName(decodeURIComponent(cardsExpM[1]));
-      const profileFile = path.join(NPC_PROFILES_DIR, `${charName}.json`);
-      if (!fs.existsSync(profileFile)) { res.writeHead(404); return res.end('角色不存在'); }
-      const profile = JSON.parse(fs.readFileSync(profileFile, 'utf8'));
-      const charCard = { name: profile.name || charName, description: profile.appearance || '', personality: profile.personality || '', mes_example: '', system_prompt: '', tags: profile.tags || [], creator: 'rabbit-web', character_version: '1.0', extensions: { relationships: profile.relationships || {}, age: profile.age, ageNote: profile.ageNote, firstAppearance: profile.firstAppearance, notes: profile.notes } };
-      const charJson = JSON.stringify(charCard);
-      const pngBuffer = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
-      const result = pngCreateWithTextChunk(pngBuffer, 'chara', Buffer.from(charJson).toString('base64'));
-      if (!result) { res.writeHead(500); return res.end('PNG 生成失败'); }
-      // RFC 5987：filename* 支持中文文件名，filename 用 ASCII 兜底
-      res.writeHead(200, { 'content-type': 'image/png', 'content-disposition': `attachment; filename="card.png"; filename*=UTF-8''${encodeURIComponent(charName)}.png` });
-      return res.end(result);
-    } catch (e) { res.writeHead(500); return res.end('导出失败：' + String(e)); }
-  }
-  // 卡片交换 API：导入角色卡 PNG
-  if (p === '/api/cards/import' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { imageData } = JSON.parse(body);
-      if (!imageData) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '缺少图片数据' })); }
-      let buf;
-      if (typeof imageData === 'string' && imageData.startsWith('data:image/png;base64,')) buf = Buffer.from(imageData.split(',')[1], 'base64');
-      else if (typeof imageData === 'string') buf = Buffer.from(imageData, 'base64');
-      else buf = Buffer.from(imageData);
-      const chunks = pngReadTextChunks(buf);
-      const charaChunk = chunks.find(c => c.keyword === 'chara');
-      if (!charaChunk) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: 'PNG 中未找到角色卡数据（缺少 chara tEXt chunk）' })); }
-      const charData = JSON.parse(Buffer.from(charaChunk.text, 'base64').toString('utf8'));
-      const profile = { name: sanitizeFileName(String(charData.name || '未命名').slice(0, 40)), aliases: charData.tags || [], appearance: charData.description || '', personality: charData.personality || '', age: charData.extensions?.age || null, ageNote: charData.extensions?.ageNote || '', relationships: charData.extensions?.relationships || {}, firstAppearance: charData.extensions?.firstAppearance || '导入自酒馆角色卡', lastUpdated: new Date().toISOString(), notes: charData.extensions?.notes || '', tags: charData.tags || [] };
-      saveNpcProfile(profile.name, profile);
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: true, profile, source: 'png-import' }));
-    } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: String(e) })); }
-  }
-  // 场景插图：AI 图片生成（硅基流动，OpenAI 兼容 /images/generations）
+
+// 场景插图：AI 图片生成（硅基流动，OpenAI 兼容 /images/generations）
   // Kolors 免费；Z-Image/Qwen-Image/ERNIE 等按张计费（¥0.10-0.30/张，共用同一 key）
   const SILICON_BASE = 'https://api.siliconflow.cn/v1';
-  const SILICON_IMG_MODELS = {
+
+const SILICON_IMG_MODELS = {
     kolors:  { id: 'Kwai-Kolors/Kolors',               label: 'Kolors（免费）',       price: '免费' },
     zimage:  { id: 'Tongyi-MAI/Z-Image',               label: 'Z-Image（高质量）',     price: '¥0.30/张' },
     zturb:   { id: 'Tongyi-MAI/Z-Image-Turbo',         label: 'Z-Image-Turbo（快速）', price: '¥0.10/张' },
     qwenimg: { id: 'Qwen/Qwen-Image',                  label: 'Qwen-Image（通用）',    price: '¥0.30/张' },
     ernie:   { id: 'baidu/ERNIE-Image-Turbo',          label: 'ERNIE-Image（快速）',   price: '¥0.11/张' }
   };
-  function getSiliconImgKey() {
+
+function getSiliconImgKey() {
     try {
       const cfgPath = path.join(process.env.USERPROFILE || process.env.HOME || '', '.workbuddy', 'models.json');
       if (!fs.existsSync(cfgPath)) return '';
@@ -2734,64 +2068,8 @@ async function handleRequest(req, res) {
       return (entry && entry.apiKey) || '';
     } catch (e) { return ''; }
   }
-  if (p === '/api/illustration/generate' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { prompt, style, chatId, sceneryOnly } = JSON.parse(body);
-      if (!prompt || !String(prompt).trim()) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '缺少场景描述' })); }
-      const illustConfigFile = path.join(DATA_DIR, 'illustration-config.json');
-      let config = { engine: 'kolors', apiKey: '', baseURL: SILICON_BASE };
-      try { if (fs.existsSync(illustConfigFile)) config = Object.assign({ engine: 'kolors', apiKey: '', baseURL: SILICON_BASE }, JSON.parse(fs.readFileSync(illustConfigFile, 'utf8'))); } catch (e) {}
-      const key = config.apiKey || getSiliconImgKey();
-      if (!key) {
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ error: '图片生成功能未配置。请在设置中配置硅基流动 API Key，或确认 ~/.workbuddy/models.json 中存在硅基流动端点。', needConfig: true }));
-      }
-      const baseURL = (config.baseURL || SILICON_BASE).replace(/\/+$/, '');
-      const modelKey = String(config.engine || 'kolors');
-      const modelCfg = SILICON_IMG_MODELS[modelKey] || SILICON_IMG_MODELS.kolors;
-      const model = typeof modelCfg === 'string' ? modelCfg : modelCfg.id;
-      const body_s = { model, prompt: String(prompt).trim(), image_size: '1024x1024', batch_size: 1, num_inference_steps: 24, guidance_scale: 7.5 };
-      // 纯场景模式：用 negative_prompt 排除人物，让图片只出场景/环境
-      if (sceneryOnly) {
-        body_s.negative_prompt = 'person, people, human, character, figure, portrait, man, woman, boy, girl, face, body, crowd, group, silhouette';
-      }
-      const r = await fetch(`${baseURL}/images/generations`, {
-        method: 'POST',
-        headers: { 'authorization': `Bearer ${key}`, 'content-type': 'application/json' },
-        body: JSON.stringify(body_s)
-      });
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        const errMsg = (data && data.message) || (data && data.error && data.error.message) || `接口错误(${r.status})`;
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ error: errMsg, status: r.status }));
-      }
-      const img = (data.images && Array.isArray(data.images) && data.images[0]) || null;
-      if (!img) {
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ error: '接口返回了意外的数据结构', status: 502 }));
-      }
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: true, image: img, model, engine: modelKey, label: modelCfg.label || model, price: modelCfg.price || '' }));
-    } catch (e) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: String(e), status: 500 })); }
-  }
-  if (p === '/api/illustration/config' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { engine, apiKey, baseURL } = JSON.parse(body);
-      const illustConfigFile = path.join(DATA_DIR, 'illustration-config.json');
-      let config = { engine: 'kolors', apiKey: '', baseURL: SILICON_BASE };
-      try { if (fs.existsSync(illustConfigFile)) config = Object.assign(config, JSON.parse(fs.readFileSync(illustConfigFile, 'utf8'))); } catch (e) {}
-      if (engine) config.engine = String(engine).slice(0, 20);
-      if (apiKey) config.apiKey = String(apiKey).slice(0, 200);
-      if (baseURL) config.baseURL = String(baseURL).slice(0, 300);
-      fs.writeFileSync(illustConfigFile, JSON.stringify(config, null, 2), 'utf8');
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: true, config: { engine: config.engine, configured: !!config.apiKey } }));
-    } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: String(e) })); }
-  }
-  // 提示词优化：把中文场景描述润色成高质量英文生图提示词。
+
+// 提示词优化：把中文场景描述润色成高质量英文生图提示词。
   // 独立用 models.json 里的硅基流动对话端点（生图同款 key 可通用于 chat），不依赖主端点(可能失效的 key)
   function getSiliconChatCfg() {
     try {
@@ -2805,35 +2083,16 @@ async function handleRequest(req, res) {
       return { chatUrl, key: entry.apiKey, model: entry.id || entry.name || 'deepseek-ai/DeepSeek-V4-Flash' };
     } catch (e) { return null; }
   }
-  if (p === '/api/illustration/enhance' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { prompt, style } = JSON.parse(body);
-      if (!prompt || !String(prompt).trim()) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '缺少场景描述' })); }
-      const cfg = getSiliconChatCfg();
-      if (!cfg) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '未能从 ~/.workbuddy/models.json 读取硅基流动对话端点，无法优化提示词', status: 503 })); }
-      const styleHint = style ? `（风格：${style}）` : '';
-      const sys = '你是专业 AI 绘画提示词工程师。请把用户的中文场景描述改写成一段高质量、可直接用于文生图模型的英文提示词。要求：只输出英文提示词正文，不要任何解释、编号、引号或多余文字；用逗号分隔的关键词短语，包含场景环境、光线、氛围、主体、材质/风格关键词；控制在 6-12 个短语内。';
-      const callR = await fetch(cfg.chatUrl, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.key}` },
-        body: JSON.stringify({ model: cfg.model, messages: [{ role: 'user', content: `${sys}\n\n${prompt}\n${styleHint}` }], max_tokens: 400 }),
-        signal: AbortSignal.timeout(60000),
-      });
-      if (!callR.ok) { const t = await callR.text().catch(()=>''); res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: `LLM 调用失败: HTTP ${callR.status} ${t.slice(0,160)}`, status: callR.status })); }
-      const dd = await callR.json().catch(() => ({}));
-      const enhanced = ((dd.choices && dd.choices[0] && dd.choices[0].message && dd.choices[0].message.content) || '').trim();
-      if (!enhanced) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '优化失败，返回为空', status: 502 })); }
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: true, enhanced }));
-    } catch (e) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: String(e), status: 500 })); }
-  }
-  // 语音朗读：TTS 配置和合成
+
+// 语音朗读：TTS 配置和合成
   // MiMo 官方 TTS（token-plan 免费，OpenAI 兼容 chat/completions + audio）
   const MIMO_TTS_MODEL = 'mimo-v2.5-tts';
-  const MIMO_TTS_BASE = 'https://token-plan-cn.xiaomimimo.com/v1';
-  const MIMO_TTS_VOICES = ['mimo_default', 'default_zh', 'default_en', 'Mia', 'Chloe', 'Milo', 'Dean'];
-  function getMimoTtsKey() {
+
+const MIMO_TTS_BASE = 'https://token-plan-cn.xiaomimimo.com/v1';
+
+const MIMO_TTS_VOICES = ['mimo_default', 'default_zh', 'default_en', 'Mia', 'Chloe', 'Milo', 'Dean'];
+
+function getMimoTtsKey() {
     // 复用 WorkBuddy 模型配置里的 MiMo key（tp-...，token-plan 免费）
     try {
       const cfgPath = path.join(process.env.USERPROFILE || process.env.HOME || '', '.workbuddy', 'models.json');
@@ -2843,696 +2102,1827 @@ async function handleRequest(req, res) {
       return (entry && entry.apiKey) || '';
     } catch (e) { return ''; }
   }
-  const defaultTtsConfig = () => ({ engine: 'mimo', apiKey: '', voice: 'mimo_default', rate: '1.0', baseURL: MIMO_TTS_BASE });
-  if (p === '/api/tts/config' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { engine, apiKey, voice, rate, baseURL, model } = JSON.parse(body);
-      const ttsConfigFile = path.join(DATA_DIR, 'tts-config.json');
-      let config = defaultTtsConfig();
-      try { if (fs.existsSync(ttsConfigFile)) config = JSON.parse(fs.readFileSync(ttsConfigFile, 'utf8')); } catch (e) {}
-      if (engine) config.engine = String(engine).slice(0, 20);
-      if (apiKey) config.apiKey = String(apiKey).slice(0, 200);
-      if (voice) config.voice = String(voice).slice(0, 50);
-      if (rate) config.rate = String(rate).slice(0, 10);
-      if (baseURL) config.baseURL = String(baseURL).slice(0, 300);
-      if (model) config.model = String(model).slice(0, 40);
-      fs.writeFileSync(ttsConfigFile, JSON.stringify(config, null, 2), 'utf8');
+
+const defaultTtsConfig = () => ({ engine: 'mimo', apiKey: '', voice: 'mimo_default', rate: '1.0', baseURL: MIMO_TTS_BASE });
+
+async function h_route_0(req, res, url, p) {
+  if (p === '/' || p === '/index.html') { sendFile(res, path.join(WWW, 'index.html')); return true; };
+  return false;
+}
+
+async function h_favicon_ico_1(req, res, url, p) {
+  if (p === '/favicon.ico' || p === '/favicon.png') { sendFile(res, path.join(WWW, 'favicon.png'), 'image/png'); return true; };
+  return false;
+}
+
+async function h_logo_png_2(req, res, url, p) {
+  if (p === '/logo.png') { sendFile(res, path.join(WWW, 'logo.png'), 'image/png'); return true; };
+  return false;
+}
+
+async function h_share_card_png_3(req, res, url, p) {
+  if (p === '/share-card.png') { sendFile(res, path.join(WWW, 'share-card.png'), 'image/png'); return true; };
+  return false;
+}
+
+async function h_style_css_4(req, res, url, p) {
+  if (p === '/style.css') { sendFile(res, path.join(WWW, 'style.css')); return true; };
+  return false;
+}
+
+async function h_app_js_5(req, res, url, p) {
+  if (p === '/app.js') { sendFile(res, path.join(WWW, 'app.js')); return true; };
+  return false;
+}
+
+async function h_api_model_6(req, res, url, p) {
+  // 模型 / API 端点查看与切换（持久化 data/model.json；POST 时探测验证）
+    if (p === '/api/model' && req.method === 'GET') {
+      const k = State.endpoint.apiKey || '';
+      const ak = State.aux.apiKey || '';
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: true, config: { engine: config.engine, voice: config.voice, rate: config.rate, configured: config.engine !== 'none' } }));
-    } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: String(e) })); }
-  }
+      { res.end(JSON.stringify({
+        model: State.endpoint.model,
+        protocol: State.endpoint.protocol,
+        baseURL: State.endpoint.baseURL,
+        apiKeyMasked: k ? '...' + k.slice(-4) : '',
+        usingDefaultKey: (() => { try { return !fs.existsSync(MODEL_FILE) || !(JSON.parse(fs.readFileSync(MODEL_FILE, 'utf8') || '{}').apiKey); } catch (e) { return true; } })(),
+        maxTokens: State.endpoint.maxTokens,
+        thinking: State.endpoint.thinking,
+        thinkingBudget: State.endpoint.thinkingBudget,
+        maxContext: State.endpoint.maxContext,
+        autoSummary: State.endpoint.autoSummary,
+        autoSummaryThreshold: State.endpoint.autoSummaryThreshold,
+        // 辅助 API（后台任务独立端点）
+        aux: {
+          enabled: State.aux.enabled,
+          protocol: State.aux.protocol,
+          baseURL: State.aux.baseURL,
+          apiKeyMasked: ak ? '...' + ak.slice(-4) : '',
+          model: State.aux.model,
+          fallback: State.aux.fallback,
+        },
+        // 峰谷定价仅官方直连渠道适用（DeepSeek 官方：高峰 9-12 / 14-18 翻倍）
+        peakEligible: /api\.deepseek\.com/i.test(State.endpoint.baseURL || ''),
+      })); return true; };
+    }
+  return false;
+}
+
+async function h_api_model_7(req, res, url, p) {
+  if (p === '/api/model' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { model, baseURL, apiKey, protocol, maxTokens, thinking, thinkingBudget, maxContext, autoSummary, autoSummaryThreshold, aux } = JSON.parse(body);
+        const next = { ...State.endpoint };
+        if (protocol === 'anthropic' || protocol === 'openai') next.protocol = protocol;
+        if (baseURL && baseURL.trim()) next.baseURL = baseURL.trim().replace(/\/+$/, '');
+        if (apiKey && apiKey.trim()) next.apiKey = apiKey.trim();
+        if (model && model.trim()) next.model = model.trim();
+        if (Number.isFinite(maxTokens) && maxTokens >= 256 && maxTokens <= 393216) next.maxTokens = maxTokens;
+        if (['auto', 'disabled', 'low', 'medium', 'high', 'max', 'custom'].includes(thinking)) next.thinking = thinking;
+        else if (thinking === 'enabled') next.thinking = 'high';   // 旧「开启」→ 深度思考档
+        if (Number.isFinite(thinkingBudget) && thinkingBudget >= 256 && thinkingBudget <= 393216) next.thinkingBudget = thinkingBudget;
+        if (Number.isFinite(maxContext) && maxContext >= 0 && maxContext <= 1048576) next.maxContext = maxContext;
+        if (typeof autoSummary === 'boolean') next.autoSummary = autoSummary;
+        if (Number.isFinite(autoSummaryThreshold) && autoSummaryThreshold >= 2000 && autoSummaryThreshold <= 100000) next.autoSummaryThreshold = autoSummaryThreshold;
+        if (!next.apiKey) {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+          { res.end(JSON.stringify({ ok: false, error: '缺少 API Key' })); return true; };
+        }
+        // 辅助 API 配置（可选：不填 = 保持原值）
+        const nextAux = { ...State.aux };
+        if (aux && typeof aux === 'object') {
+          if (typeof aux.enabled === 'boolean') nextAux.enabled = aux.enabled;
+          if (aux.protocol === 'anthropic' || aux.protocol === 'openai') nextAux.protocol = aux.protocol;
+          if (aux.baseURL && typeof aux.baseURL === 'string' && aux.baseURL.trim()) nextAux.baseURL = aux.baseURL.trim().replace(/\/+$/, '');
+          if (aux.apiKey && typeof aux.apiKey === 'string' && aux.apiKey.trim()) nextAux.apiKey = aux.apiKey.trim();
+          if (aux.model && typeof aux.model === 'string' && aux.model.trim()) nextAux.model = aux.model.trim();
+          if (typeof aux.fallback === 'boolean') nextAux.fallback = aux.fallback;
+        }
+        const requested = next.model;
+        // 轻量探测（max_tokens:1）：验证端点/Key/模型，端点会把不存在的模型名静默映射到实际模型
+        const probed = await probeEndpoint(next);
+        next.model = probed.model;
+        State.endpoint = next;
+        State.aux = nextAux;
+        // Key 自动记忆：保存时把「端点 + Key」记入记忆，之后切到该端点档案自动带上
+        if (next.baseURL && next.apiKey) State.keyMemo.by[next.baseURL] = next.apiKey;
+        if (nextAux.baseURL && nextAux.apiKey) State.keyMemo.auxBy[nextAux.baseURL] = nextAux.apiKey;
+        saveKeyMemo();
+        backupConfig(MODEL_FILE);
+        fs.writeFileSync(MODEL_FILE, JSON.stringify({
+          protocol: State.endpoint.protocol, baseURL: State.endpoint.baseURL, apiKey: State.endpoint.apiKey,
+          model: State.endpoint.model, maxTokens: State.endpoint.maxTokens, thinking: State.endpoint.thinking,
+          thinkingBudget: State.endpoint.thinkingBudget, maxContext: State.endpoint.maxContext,
+          autoSummary: State.endpoint.autoSummary, autoSummaryThreshold: State.endpoint.autoSummaryThreshold,
+          aux: { enabled: State.aux.enabled, protocol: State.aux.protocol, baseURL: State.aux.baseURL, apiKey: State.aux.apiKey, model: State.aux.model, fallback: State.aux.fallback },
+          updatedAt: new Date().toISOString(),
+        }), 'utf8');
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ ok: true, model: State.endpoint.model, requested, mapped: probed.model !== requested })); return true; };
+      } catch (e) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ ok: false, error: String(e) })); return true; };
+      }
+    }
+  return false;
+}
+
+async function h_route_8(req, res, url, p) {
+  // 会话管理：列表 / 新建 / 读取 / 保存 / 删除
+    const chatM = p.match(/^\/api\/chats(?:\/([^/]+))?$/);
+  if (chatM) {
+      const id = chatM[1];
+      const sendJson = (obj, code = 200) => { res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
+      // POST /api/chats/unarchive — 恢复已归档会话（必须在 :id 路由之前匹配）
+      if (p === '/api/chats/unarchive' && req.method === 'POST') {
+        let body = await readBody(req);
+        try {
+          const { chatId } = JSON.parse(body);
+          if (!chatId) { sendJson({ error: 'missing chatId' }, 400); return true; };
+          const file = chatFilePath(chatId);
+          if (RW_ASYNC_IO) {
+            if (!(await fs.promises.stat(file).catch(() => null))) { sendJson({ error: 'chat not found' }, 404); return true; };
+            await writeQueued(file, async () => {
+              const chat = JSON.parse(await fs.promises.readFile(file, 'utf8'));   // 损坏 → 抛出 → 400（与原同步路径一致）
+              chat.hidden = false;
+              chat.updatedAt = new Date().toISOString();
+              await writeJson(file, chat);
+            });
+            { sendJson({ ok: true }); return true; };
+          }
+          if (!fs.existsSync(file)) { sendJson({ error: 'chat not found' }, 404); return true; };
+          const chat = JSON.parse(fs.readFileSync(file, 'utf8'));
+          chat.hidden = false;
+          chat.updatedAt = new Date().toISOString();
+          fs.writeFileSync(file, JSON.stringify(chat), 'utf8');
+          { sendJson({ ok: true }); return true; };
+        } catch (e) { { sendJson({ error: String(e) }, 400); return true; }; }
+      }
+      if (!id) {
+        // GET /api/chats — 支持 ?archived=true 返回已归档会话（默认不返回）
+        if (req.method === 'GET') {
+          const urlObj = new URL(req.url, 'http://localhost');
+          const showArchived = urlObj.searchParams.get('archived') === 'true';
+          if (RW_ASYNC_IO) {
+            // 元数据缓存（文件签名未变不重新 parse）；排序在过滤前完成，语义与 readChats 一致
+            const metas = await loadChatMetas();
+            { sendJson({ chats: metas.filter((c) => showArchived ? c.hidden : !c.hidden) }); return true; };
+          }
+          if (showArchived) {
+            const all = readChats(true);
+            const normal = new Set(readChats(false).map(c => c.id));
+            const archived = all.filter(c => !normal.has(c.id));
+            { sendJson({ chats: archived }); return true; };
+          }
+          { sendJson({ chats: readChats() }); return true; };
+        }
+        if (req.method === 'POST') {
+          const cid = Date.now() + '-' + Math.random().toString(36).slice(2, 7);
+          const chat = { id: cid, title: '新对话', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), messages: [] };
+          if (RW_ASYNC_IO) await writeQueued(chatFilePath(cid), () => writeJson(chatFilePath(cid), chat));
+          else fs.writeFileSync(chatFilePath(cid), JSON.stringify(chat), 'utf8');
+          { sendJson({ id: cid }); return true; };
+        }
+      }
+      const file = chatFilePath(id);
+      if (req.method === 'GET') {
+        if (RW_ASYNC_IO) {
+          if (!(await fs.promises.stat(file).catch(() => null))) { sendJson({ error: 'not found' }, 404); return true; };
+          try {
+            const chat = JSON.parse(await fs.promises.readFile(file, 'utf8'));   // 损坏 → 500（与原同步路径一致）
+            if (Array.isArray(chat.messages)) chat.messages = cleanMsgs(chat.messages);   // 展示前清理「方块」乱码（不写盘）
+            { sendJson(chat); return true; };
+          } catch (e) { { sendJson({ error: 'failed to load chat' }, 500); return true; }; }
+        }
+        if (!fs.existsSync(file)) { sendJson({ error: 'not found' }, 404); return true; };
+        try {
+          const chat = JSON.parse(fs.readFileSync(file, 'utf8'));
+          if (Array.isArray(chat.messages)) chat.messages = cleanMsgs(chat.messages);   // 展示前清理「方块」乱码（不写盘）
+          { sendJson(chat); return true; };
+        } catch (e) { { sendJson({ error: 'failed to load chat' }, 500); return true; }; }
+      }
+      if (req.method === 'PUT') {
+        let body = await readBody(req);
+        try {
+          const { title, messages, pinned, hidden } = JSON.parse(body);
+          // 读-改-写整体进写队列：与并发保存（前端自动保存/其他页签）串行，消除交错写
+          if (RW_ASYNC_IO) {
+            await writeQueued(file, async () => {
+              let chat;
+              if (await fs.promises.stat(file).catch(() => null)) chat = JSON.parse(await fs.promises.readFile(file, 'utf8'));   // 损坏 → 抛出 → 400
+              else chat = { id, createdAt: new Date().toISOString() };
+              if (typeof pinned === 'boolean') chat.pinned = pinned;
+              if (typeof hidden === 'boolean') chat.hidden = hidden;
+              chat.title = (title || chat.title || '未命名').slice(0, 40);
+              // 写盘前清理「方块」乱码：即使浏览器/历史里带 U+FFFD，落盘也始终干净
+              chat.messages = Array.isArray(messages) ? cleanMsgs(messages) : (chat.messages || []);
+              chat.updatedAt = new Date().toISOString();
+              await writeJson(file, chat);
+            });
+            { sendJson({ ok: true }); return true; };
+          }
+          const chat = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : { id, createdAt: new Date().toISOString() };
+          if (typeof pinned === 'boolean') chat.pinned = pinned;
+          if (typeof hidden === 'boolean') chat.hidden = hidden;
+          chat.title = (title || chat.title || '未命名').slice(0, 40);
+          // 写盘前清理「方块」乱码：即使浏览器/历史里带 U+FFFD，落盘也始终干净
+          chat.messages = Array.isArray(messages) ? cleanMsgs(messages) : (chat.messages || []);
+          chat.updatedAt = new Date().toISOString();
+          fs.writeFileSync(file, JSON.stringify(chat), 'utf8');
+          { sendJson({ ok: true }); return true; };
+        } catch (e) { { sendJson({ error: String(e) }, 400); return true; }; }
+      }
+      if (req.method === 'DELETE') {
+        if (RW_ASYNC_IO) {
+          await writeQueued(file, () => fs.promises.unlink(file).catch(() => {}));   // 与同文件写串行
+          await writeQueued(turnsFile(id), () => fs.promises.unlink(turnsFile(id)).catch(() => {}));
+          { sendJson({ ok: true }); return true; };
+        }
+        try { fs.unlinkSync(file); } catch (e) { /* 可能已删 */ }
+        try { fs.unlinkSync(turnsFile(id)); } catch (e) { /* 无回合记录 */ }
+        { sendJson({ ok: true }); return true; };
+      }
+      { sendJson({ error: 'method' }, 405); return true; };
+    }
+  return false;
+}
+
+async function h_api_savepoints_save_9(req, res, url, p) {
+  // 存档点：保存当前会话完整副本 / 列表 / 读取恢复
+    if (p === '/api/savepoints/save' && req.method === 'POST') {
+      let body = await readBody(req);
+      const sendJson = (obj, code = 200) => { res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
+      try {
+        const { chatId, label } = JSON.parse(body);
+        const cid = sanitizeId(chatId || '');
+        const src = chatFilePath(cid);   // 读源必须用消毒后的 cid（防路径穿越外带任意 JSON）
+        if (!fs.existsSync(src)) { sendJson({ ok: false, error: '会话不存在' }, 404); return true; };
+        const chat = JSON.parse(fs.readFileSync(src, 'utf8'));
+        const ts = Date.now();
+        // 存档 = 会话完整副本（附带存档元信息 savepoint，读档时剥离）
+        const snap = { ...chat, savepoint: { ts, label: String(label || '').trim().slice(0, 40), savedAt: new Date().toISOString() } };
+        fs.writeFileSync(path.join(savepointsDirFor(chatId), `${ts}.json`), JSON.stringify(snap, null, 2), 'utf8');
+        { sendJson({ ok: true, ts, note: `已存档：${new Date(ts).toLocaleString()}${snap.savepoint.label ? '（' + snap.savepoint.label + '）' : ''}` }); return true; };
+      } catch (e) {
+        { sendJson({ ok: false, error: String(e) }, 400); return true; };
+      }
+    }
+  return false;
+}
+
+async function h_api_savepoints_list_10(req, res, url, p) {
+  if (p === '/api/savepoints/list' && req.method === 'GET') {
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      { res.end(JSON.stringify({ ok: true, savepoints: listSavepoints(url.searchParams.get('chatId') || '') })); return true; };
+    }
+  return false;
+}
+
+async function h_api_savepoints_load_11(req, res, url, p) {
+  if (p === '/api/savepoints/load' && req.method === 'POST') {
+      let body = await readBody(req);
+      const sendJson = (obj, code = 200) => { res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
+      try {
+        const { chatId, ts } = JSON.parse(body);
+        const cid = sanitizeId(chatId || '');
+        const file = path.join(SAVEPOINTS_DIR, cid, `${Number(ts)}.json`);
+        if (!fs.existsSync(file)) { sendJson({ ok: false, error: '存档点不存在' }, 404); return true; };
+        const snap = JSON.parse(fs.readFileSync(file, 'utf8'));
+        // 恢复 = 用存档副本覆盖当前会话文件（剥离 savepoint 元信息，保持当前会话 id）
+        const { savepoint, ...rest } = snap;
+        const chat = { ...rest, id: cid, updatedAt: new Date().toISOString() };
+        fs.writeFileSync(chatFilePath(cid), JSON.stringify(chat), 'utf8');
+        { sendJson({ ok: true, note: '已从存档点恢复' }); return true; };
+      } catch (e) {
+        { sendJson({ ok: false, error: String(e) }, 400); return true; };
+      }
+    }
+  return false;
+}
+
+async function h_api_op_view_12(req, res, url, p) {
+  // 界面操作：视角切换 / 换装（记账 + 状态持久化，供导出/时间线）
+    if (p === '/api/op/view' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { chatId, view } = JSON.parse(body);
+        const cid = sanitizeId(chatId || '');
+        const v = String(view || '').trim().slice(0, 30);
+        if (!v) {
+          // 空值 = 恢复默认（用户角色主观视角）
+          delete State.opState.views[cid];
+          saveOpState();
+          appendOpRecord(cid, '当前视角', '默认（用户角色）');
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+          { res.end(JSON.stringify({ ok: true, view: '', note: '已恢复默认视角（用户角色主观视角）' })); return true; };
+        }
+        State.opState.views[cid] = v;
+        saveOpState();
+        appendOpRecord(cid, '当前视角', v);
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ ok: true, view: v, note: `已切换视角：${v}（已记账，可导出回合记录）` })); return true; };
+      } catch (e) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ error: String(e) })); return true; };
+      }
+    }
+  return false;
+}
+
+async function h_api_op_wardrobe_13(req, res, url, p) {
+  if (p === '/api/op/wardrobe' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { chatId, character, outfit, worn } = JSON.parse(body);
+        const cid = sanitizeId(chatId || '');
+        const ch = String(character || '').trim().slice(0, 20);
+        const of = String(outfit || '').trim().slice(0, 200);
+        if (!ch || !of) throw new Error('缺少角色或着装描述');
+        const day = String(worn || '').trim() || '今日';
+        State.opState.wardrobes[cid] = `${ch}：${of}`;
+        saveOpState();
+        appendOpRecord(cid, '衣柜', `${ch}：${of}（${day}）`);
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ ok: true, note: `✅ 已更新《衣柜》：${ch}：${of}（已记账，可导出回合记录）` })); return true; };
+      } catch (e) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ error: String(e) })); return true; };
+      }
+    }
+  return false;
+}
+
+async function h_api_op_expand_14(req, res, url, p) {
+  // 界面操作：扩写指令开关（记账）
+    if (p === '/api/op/expand' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { chatId, enabled } = JSON.parse(body);
+        const cid = sanitizeId(chatId || '');
+        const en = Boolean(enabled);
+        if (en) State.opState.expands[cid] = true; else delete State.opState.expands[cid];
+        saveOpState();
+        appendOpRecord(cid, '扩写指令', en ? '开启' : '关闭');
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ ok: true, enabled: en, note: en ? '扩写指令已开启（本会话生效，短指令将自动扩写）' : '扩写指令已关闭' })); return true; };
+      } catch (e) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ error: String(e) })); return true; };
+      }
+    }
+  return false;
+}
+
+async function h_api_op_tools_15(req, res, url, p) {
+  // 界面操作：工具桥开关（自由选取工具集合；记账）
+    if (p === '/api/op/tools' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { chatId, tools } = JSON.parse(body);
+        const cid = sanitizeId(chatId || '');
+        const sel = (Array.isArray(tools) ? tools : []).filter((n) => BRIDGE_TOOL_NAMES.includes(String(n)));
+        if (sel.length) State.opState.tools[cid] = sel; else delete State.opState.tools[cid];
+        saveOpState();
+        appendOpRecord(cid, '工具桥', sel.length ? sel.map((n) => BRIDGE_TOOL_LABELS[n] || n).join('、') : '关闭');
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ ok: true, tools: sel, note: sel.length ? '工具桥已开启：' + sel.map((n) => BRIDGE_TOOL_LABELS[n] || n).join('、') : '工具桥已关闭' })); return true; };
+      } catch (e) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ error: String(e) })); return true; };
+      }
+    }
+  return false;
+}
+
+async function h_api_presets_16(req, res, url, p) {
+  // 界面操作：API 采样预设（命名预设）
+    if (p === '/api/presets' && req.method === 'GET') {
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      { res.end(JSON.stringify({ ok: true, presets: State.presets, active: State.activePreset, samplers: State.samplers })); return true; };
+    }
+  return false;
+}
+
+async function h_api_presets_17(req, res, url, p) {
+  if (p === '/api/presets' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { action, name, preset } = JSON.parse(body);
+        const nm = String(name || '').trim().slice(0, 40);
+        if (action === 'apply') {
+          if (!State.presets[nm]) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '预设不存在：' + nm })); return true; }; }
+          applyPreset(nm);
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ ok: true, active: nm, samplers: State.samplers, note: `已应用预设「${nm}」` })); return true; };
+        }
+        if (action === 'save') {
+          if (!nm) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '预设名不能为空' })); return true; }; }
+          State.presets[nm] = normPreset(preset || {});
+          applyPreset(nm);
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ ok: true, active: nm, note: `预设「${nm}」已保存并应用` })); return true; };
+        }
+        if (action === 'delete') {
+          if (BUILTIN_PRESETS[nm]) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '内置预设不可删除' })); return true; }; }
+          delete State.presets[nm];
+          savePresets();
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ ok: true, note: `预设「${nm}」已删除` })); return true; };
+        }
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ error: '未知操作' }));
+      } catch (e) {
+        res.writeHead(400); { res.end(JSON.stringify({ error: String(e) })); return true; };
+      }
+    }
+  return false;
+}
+
+async function h_api_profiles_18(req, res, url, p) {
+  // 配置档案（Profile：端点 + 模型 + 参数整套一键切换）
+    if (p === '/api/profiles' && req.method === 'GET') {
+      const list = {};
+      for (const [k, v] of Object.entries(State.profiles)) {
+        const bu = v.baseURL ? v.baseURL.replace(/\/+$/, '') : '';
+        list[k] = { ...v, builtin: !!BUILTIN_PROFILES[k], keyReady: !!(bu && State.keyMemo.by[bu]) };
+      }
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      { res.end(JSON.stringify({ ok: true, profiles: list, active: State.activeProfile, current: snapshotEndpoint() })); return true; };
+    }
+  return false;
+}
+
+async function h_api_profiles_19(req, res, url, p) {
+  if (p === '/api/profiles' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { action, name, profile } = JSON.parse(body);
+        const nm = String(name || '').trim().slice(0, 40);
+        if (action === 'apply') {
+          if (!State.profiles[nm]) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '档案不存在：' + nm })); return true; }; }
+          applyProfile(nm);
+          const k = State.endpoint.apiKey || '';
+          const ak = State.aux.apiKey || '';
+          const bu = State.endpoint.baseURL || '';
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ ok: true, active: nm, model: State.endpoint.model, protocol: State.endpoint.protocol, baseURL: State.endpoint.baseURL, apiKeyMasked: k ? '...' + k.slice(-4) : '', keySource: State.keyMemo.by[bu] ? 'memo' : 'kept', keyReady: !!State.keyMemo.by[bu], auxKeyMasked: ak ? '...' + ak.slice(-4) : '', maxTokens: State.endpoint.maxTokens, thinking: State.endpoint.thinking, maxContext: State.endpoint.maxContext, preset: State.activePreset, note: `已切换到「${nm}」`, peakEligible: /api\.deepseek\.com/i.test(bu) })); return true; };
+        }
+        if (action === 'save') {
+          if (!nm) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '档案名不能为空' })); return true; }; }
+          const snap = snapshotEndpoint();
+          State.profiles[nm] = { ...snap, ...(profile || {}), desc: (profile && profile.desc) || (BUILTIN_PROFILES[nm] ? BUILTIN_PROFILES[nm].desc : '') };
+          delete State.profiles[nm].apiKey;
+          delete State.profiles[nm].builtin;
+          saveProfiles();
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ ok: true, active: nm, note: `档案「${nm}」已保存（端点 + 模型 + 参数）` })); return true; };
+        }
+        if (action === 'delete') {
+          if (BUILTIN_PROFILES[nm]) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '内置档案不可删除' })); return true; }; }
+          if (!State.profiles[nm]) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '档案不存在：' + nm })); return true; }; }
+          delete State.profiles[nm];
+          if (State.activeProfile === nm) State.activeProfile = '';
+          saveProfiles();
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ ok: true, note: `档案「${nm}」已删除` })); return true; };
+        }
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ error: '未知操作' }));
+      } catch (e) {
+        res.writeHead(400); { res.end(JSON.stringify({ error: String(e) })); return true; };
+      }
+    }
+  return false;
+}
+
+async function h_api_chat_profiles_20(req, res, url, p) {
+  // 对话配置档系统
+    if (p === '/api/chat-profiles' && req.method === 'GET') {
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ ok: true, profiles: State.chatProfiles })); return true; };
+    }
+  return false;
+}
+
+async function h_api_chat_profiles_21(req, res, url, p) {
+  if (p === '/api/chat-profiles' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { action, id, profile } = JSON.parse(body);
+        if (action === 'save') {
+          if (!id?.trim()) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: 'ID 不能为空' })); return true; }; }
+          State.chatProfiles[id.trim().slice(0, 30)] = { ...State.chatProfiles[id.trim()], ...profile, label: (profile?.label || id).slice(0, 40) };
+          saveChatProfiles();
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ ok: true })); return true; };
+        }
+        if (action === 'delete') {
+          if (BUILTIN_CHAT_PROFILES[id]) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '内置不可删' })); return true; }; }
+          delete State.chatProfiles[id]; saveChatProfiles();
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ ok: true })); return true; };
+        }
+        if (action === 'apply') {
+          const chatId = sanitizeId(profile?.chatId || '');
+          if (!chatId || !State.chatProfiles[id]) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '参数错误' })); return true; }; }
+          try {
+            const f = path.join(DATA_DIR, 'chats', `${chatId}.json`);
+            const c = JSON.parse(fs.readFileSync(f, 'utf8')); c.chatProfile = id; fs.writeFileSync(f, JSON.stringify(c, null, 2), 'utf8');
+            res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ ok: true })); return true; };
+          } catch (e) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '对话不存在' })); return true; }; }
+        }
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ error: '未知操作' }));
+      } catch (e) { res.writeHead(400); { res.end(JSON.stringify({ error: String(e) })); return true; }; }
+    }
+  return false;
+}
+
+async function h_route_22(req, res, url, p) {
+  // NPC 档案
+    const npcM = p.match(/^\/api\/npc-profiles(?:\/([^/]+))?$/);
+  if (npcM) {
+      const name = npcM[1] ? sanitizeFileName(decodeURIComponent(npcM[1]), 40) : null;
+      const sendJson = (o, c = 200) => { res.writeHead(c, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(o)); };
+      if (!name) {
+        if (req.method === 'GET') { sendJson({ ok: true, profiles: listNpcProfiles() }); return true; };
+        if (req.method === 'POST') { let b = await readBody(req); try { const d = JSON.parse(b); const n = sanitizeFileName(d.name || '', 40); if (!n) { sendJson({error:'名称不能为空'},400); return true; }; const p2={name:n,aliases:d.aliases||[],appearance:d.appearance||'',personality:d.personality||'',age:d.age||null,ageNote:d.ageNote||'',relationships:d.relationships||{},firstAppearance:d.firstAppearance||'',lastUpdated:new Date().toISOString(),notes:d.notes||''}; saveNpcProfile(n,p2); return sendJson({ok:true,profile:p2}); } catch(e){return sendJson({error:String(e)},400);} }
+      } else {
+        if (req.method === 'GET') { const p2=loadNpcProfile(name); { p2?sendJson({ok:true,profile:p2}):sendJson({error:'不存在'},404); return true; }; }
+        if (req.method === 'DELETE') { try{fs.unlinkSync(path.join(NPC_PROFILES_DIR,`${name}.json`));}catch(e){} { sendJson({ok:true}); return true; }; }
+      }
+    }
+  return false;
+}
+
+async function h_route_23(req, res, url, p) {
+  // 场景档案
+    const sceneM = p.match(/^\/api\/scenes(?:\/([^/]+))?$/);
+  if (sceneM) {
+      const name = sceneM[1] ? sanitizeFileName(decodeURIComponent(sceneM[1]), 40) : null;
+      const sendJson = (o, c = 200) => { res.writeHead(c, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(o)); };
+      if (!name) {
+        if (req.method === 'GET') { sendJson({ ok: true, scenes: listScenes() }); return true; };
+        if (req.method === 'POST') { let b = await readBody(req); try { const d = JSON.parse(b); const n = sanitizeFileName(d.name || '', 40); if (!n) { sendJson({error:'名称不能为空'},400); return true; }; const s={name:n,location:d.location||'',physicalFeatures:d.physicalFeatures||[],atmosphere:d.atmosphere||'',lastVisited:d.lastVisited||new Date().toISOString().slice(0,10),visitCount:d.visitCount||0,notes:d.notes||''}; saveScene(n,s); return sendJson({ok:true,scene:s}); } catch(e){return sendJson({error:String(e)},400);} }
+      } else {
+        if (req.method === 'GET') { const s=loadScene(name); { s?sendJson({ok:true,scene:s}):sendJson({error:'不存在'},404); return true; }; }
+        if (req.method === 'DELETE') { try{fs.unlinkSync(path.join(SCENES_DIR,`${name}.json`));}catch(e){} { sendJson({ok:true}); return true; }; }
+      }
+    }
+  return false;
+}
+
+async function h_api_expressions_config_24(req, res, url, p) {
+  // 特判：/api/expressions/config 是功能路由，须先于 expM 通配匹配（否则被当成角色名 config）
+    if (p === '/api/expressions/config' && req.method === 'POST') { let b=await readBody(req); try { const d=JSON.parse(b); if(d.emotionMap) State.emotionMap={...DEFAULT_EMOTION_MAP,...d.emotionMap}; if(typeof d.enableAutoSwitch==='boolean') State.enableAutoSwitch=d.enableAutoSwitch; saveExpressionConfig(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); { res.end(JSON.stringify({ok:true})); return true; }; } catch(e){res.writeHead(400,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:String(e)})); } }
+  return false;
+}
+
+async function h_route_25(req, res, url, p) {
+  // 表情系统
+    const expM = p.match(/^\/api\/expressions(?:\/([^/]+))?$/);
+  if (expM) {
+      const charName = expM[1] ? sanitizeFileName(decodeURIComponent(expM[1]), 40) : null;
+      const sendJson = (o, c = 200) => { res.writeHead(c, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(o)); };
+      if (!charName) {
+        if (req.method === 'GET') { try { const cs=fs.readdirSync(EXPRESSIONS_DIR).filter(f=>fs.statSync(path.join(EXPRESSIONS_DIR,f)).isDirectory()); const r={}; for(const c of cs) r[c]=listExpressions(c); { sendJson({ok:true,expressions:r,config:{emotionMap: State.emotionMap,enableAutoSwitch: State.enableAutoSwitch}}); return true; }; } catch(e){return sendJson({ok:true,expressions:{},config:{emotionMap: State.emotionMap,enableAutoSwitch: State.enableAutoSwitch}}); } }
+      } else {
+        if (req.method === 'GET') { sendJson({ ok: true, expressions: listExpressions(charName) }); return true; };
+        if (req.method === 'DELETE') {
+          // 删除单个表情（?name=表情名）
+          const name = decodeURIComponent(req.url?.match(/[?&]name=([^&]+)/)?.[1] || '');
+          if (!name) { sendJson({ error: '缺少表情名' }, 400); return true; };
+          const safeName = sanitizeFileName(name, 40);
+          const dir = path.join(EXPRESSIONS_DIR, charName);
+          const file = path.join(dir, safeName);
+          if (!file.startsWith(dir + path.sep) || !fs.existsSync(file)) { sendJson({ error: '表情不存在' }, 404); return true; };
+          try { fs.unlinkSync(file); { sendJson({ ok: true, deleted: safeName }); return true; }; }
+          catch (e) { { sendJson({ error: String(e) }, 400); return true; }; }
+        }
+        if (req.method === 'POST') { const dir=path.join(EXPRESSIONS_DIR,charName); fs.mkdirSync(dir,{recursive:true}); let b=await readBody(req); try { const {name,imageData}=JSON.parse(b); const n=sanitizeFileName(name || '', 30); if(!n||!imageData) { sendJson({error:'缺少数据'},400); return true; }; const m=imageData.match(/^data:image\/(png|jpeg|jpg|webp|gif);base64,(.+)$/); if(!m) return sendJson({error:'格式不支持'},400); const ext=m[1]==='jpeg'?'jpg':m[1]; fs.writeFileSync(path.join(dir,`${n}.${ext}`),Buffer.from(m[2],'base64')); return sendJson({ok:true}); } catch(e){return sendJson({error:String(e)},400);} }
+      }
+    }
+  return false;
+}
+
+async function h_route_26(req, res, url, p) {
+  const expSM = p.match(/^\/api\/expressions\/static\/([^/]+)\/(.+)$/);
+  if (expSM) { const charName = sanitizeFileName(decodeURIComponent(expSM[1]), 40); const fileName = sanitizeFileName(decodeURIComponent(expSM[2]), 60); if (!charName || !fileName) { res.writeHead(404); { res.end(); return true; }; } const f=path.join(EXPRESSIONS_DIR,charName,fileName); if(fs.existsSync(f)){const ext=path.extname(f).toLowerCase(); const mime={'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.gif':'image/gif'}[ext]||'application/octet-stream'; res.writeHead(200,{'content-type':mime,'cache-control':'public, max-age=86400'}); return res.end(fs.readFileSync(f));} res.writeHead(404); return res.end(); }
+  return false;
+}
+
+async function h_api_regex_rules_27(req, res, url, p) {
+  // 输出过滤器
+    if (p === '/api/regex-rules' && req.method === 'GET') { res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); { res.end(JSON.stringify({ok:true,rules:State.regexRules})); return true; }; }
+  return false;
+}
+
+async function h_api_regex_rules_28(req, res, url, p) {
+  if (p === '/api/regex-rules' && req.method === 'POST') { let b=await readBody(req); try { const {action,rule}=JSON.parse(b); if(action==='save'){const id=rule?.id||'rule_'+Date.now(); const idx=State.regexRules.findIndex(r=>r.id===id); const nr={id,name:String(rule?.name||'').slice(0,40),pattern:rule?.pattern||'',replacement:rule?.replacement||'',flags:rule?.flags||'g',enabled:rule?.enabled!==false}; if(idx>=0)State.regexRules[idx]=nr; else State.regexRules.push(nr); saveRegexRules(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); { res.end(JSON.stringify({ok:true,rule:nr})); return true; }; } if(action==='delete'){State.regexRules=State.regexRules.filter(r=>r.id!==rule?.id); saveRegexRules(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true})); } if(action==='test'){try{const re=new RegExp(rule?.pattern||'',rule?.flags||'g'); const result=(rule?.testText||'').replace(re,rule?.replacement||''); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,result}));}catch(e){res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:'正则错误：'+e.message}));} } res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); res.end(JSON.stringify({error:'未知操作'})); } catch(e){res.writeHead(400,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:String(e)})); } }
+  return false;
+}
+
+async function h_api_suggestions_generate_29(req, res, url, p) {
+  // 剧情建议
+    if (p === '/api/suggestions/generate' && req.method === 'POST') { let b=await readBody(req); try { const {chatId}=JSON.parse(b); const cid=sanitizeId(chatId||''); const f=path.join(DATA_DIR,'chats',`${cid}.json`); if(!fs.existsSync(f)){res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); { res.end(JSON.stringify({error:'对话不存在'})); return true; };} const chat=JSON.parse(fs.readFileSync(f,'utf8')); const recent=(chat.messages||[]).slice(-10).map(m=>`${m.role==='user'?'用户':'AI'}：${String(m.content||'').slice(0,200)}`).join('\n'); const prompt=`你是一位 RP 剧情顾问。基于当前对话上下文，给出 3-5 条后续剧情发展方向建议。\n每条建议包含：\n- title：30 字以内的方向概述\n- detail：100-200 字的具体展开\n- mood：建议的氛围（日常/紧张/温馨/战斗/悬疑）\n\n当前对话：\n${recent}\n\n输出纯 JSON 数组，不要其他文字。`; const result=await auxCall(prompt); try{const sg=JSON.parse(result); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,suggestions:sg}));}catch(e){const m=result.match(/```(?:json)?\s*([\s\S]*?)```/); if(m){try{const sg=JSON.parse(m[1].trim()); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,suggestions:sg}));}catch(e2){}} res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:'AI 返回格式错误',raw:result.slice(0,500)}));} } catch(e){res.writeHead(400,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:String(e)})); } }
+  return false;
+}
+
+async function h_api_lorebook_30(req, res, url, p) {
+  // 设定触发器（Lorebook）
+    if (p === '/api/lorebook' && req.method === 'GET') { res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); { res.end(JSON.stringify({ok:true,entries:State.lorebookEntries,settings:State.lorebookSettings})); return true; }; }
+  return false;
+}
+
+async function h_api_lorebook_31(req, res, url, p) {
+  if (p === '/api/lorebook' && req.method === 'POST') { let b=await readBody(req); try { const {action,id,entry,settings,testText}=JSON.parse(b); if(action==='save'){const eid=id||'entry_'+Date.now(); State.lorebookEntries[eid]={...State.lorebookEntries[eid],...entry,id:eid}; saveLorebook(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); { res.end(JSON.stringify({ok:true,id:eid})); return true; };} if(action==='delete'){delete State.lorebookEntries[id]; saveLorebook(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true}));} if(action==='settings'){State.lorebookSettings={...State.lorebookSettings,...settings}; saveLorebook(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,settings:State.lorebookSettings}));} if(action==='scan'){const chatId=entry?.chatId||''; const f=path.join(DATA_DIR,'chats',`${sanitizeId(chatId)}.json`); let msgs=[]; if(fs.existsSync(f)){try{msgs=JSON.parse(fs.readFileSync(f,'utf8')).messages||[];}catch(e){}} const result=scanLorebook(msgs,testText||'',State.endpoint.maxContext); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,...result}));} if(action==='import'){try{const imp=JSON.parse(entry?.json||'{}'); if(imp.entries) Object.assign(State.lorebookEntries,imp.entries); saveLorebook(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,count:Object.keys(imp.entries||{}).length}));}catch(e){res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:'导入格式错误'}));}} if(action==='list-worldbook'){try{const customPath=entry?.path?path.resolve(ROOT,String(entry.path).trim()):null; const dir=customPath||path.join(ROOT,'canonical','lore','entries'); if(!fs.existsSync(dir)){res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,entries:[],note:'canonical/lore/entries 不存在'}));} const files=fs.readdirSync(dir).filter(f=>f.endsWith('.md')).sort(); const list=[]; for(const f of files){try{const text=fs.readFileSync(path.join(dir,f),'utf8'); const fm=text.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/); if(!fm) continue; const meta={}; for(const line of fm[1].split('\n')){const kv=line.match(/^(\w+):\s*(.+)$/); if(kv){const val=kv[2].trim(); if(val.startsWith('[')){try{meta[kv[1]]=JSON.parse(val);}catch(e){meta[kv[1]]=val.replace(/^\[|\]$/g,'').split(',').map(s=>s.trim().replace(/^"|"$/g,''));}} else meta[kv[1]]=val.replace(/^"|"$/g,'');}} const content=(fm[2]||'').trim().slice(0,3000); if(!meta.name||!content) continue; const key='wb-'+(meta.uid??f.replace(/.md$/,'')); const exists=!!State.lorebookEntries[key]||Object.values(State.lorebookEntries).some(e=>e.name===meta.name&&e.source==='worldbook'); list.push({id:key,name:meta.name,keywords:Array.isArray(meta.keywords)?meta.keywords:(meta.keywords?String(meta.keywords).split(',').map(s=>s.trim()):[meta.name]),constant:meta.constant===true||meta.constant==='true',contentLength:content.length,contentPreview:content.slice(0,80),exists});}catch(e){}} res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,total:files.length,entries:list}));}catch(e){res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:false,error:String(e)}));}} if(action==='import-worldbook'){try{const ids=Array.isArray(entry?.ids)?entry.ids:[]; const customPath=entry?.path?path.resolve(ROOT,String(entry.path).trim()):null; const dir=customPath||path.join(ROOT,'canonical','lore','entries'); if(!fs.existsSync(dir)){res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:'canonical/lore/entries 不存在'}));} const files=fs.readdirSync(dir).filter(f=>f.endsWith('.md')); let imported=0; for(const f of files){try{const text=fs.readFileSync(path.join(dir,f),'utf8'); const fm=text.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/); if(!fm) continue; const meta={}; for(const line of fm[1].split('\n')){const kv=line.match(/^(\w+):\s*(.+)$/); if(kv){const val=kv[2].trim(); if(val.startsWith('[')){try{meta[kv[1]]=JSON.parse(val);}catch(e){meta[kv[1]]=val.replace(/^\[|\]$/g,'').split(',').map(s=>s.trim().replace(/^"|"$/g,''));}} else meta[kv[1]]=val.replace(/^"|"$/g,'');}} const key='wb-'+(meta.uid??f.replace(/.md$/,'')); if(!ids.includes(key)) continue; const content=(fm[2]||'').trim().slice(0,3000); if(!meta.name||!content) continue; State.lorebookEntries[key]={name:String(meta.name).slice(0,40),keywords:(Array.isArray(meta.keywords)?meta.keywords:[meta.name]).map(k=>String(k).slice(0,30)).slice(0,10),content:content,priority:Number(meta.order)||200,enabled:true,constant:meta.constant===true||meta.constant==='true',source:'worldbook'}; imported++;}catch(e){}} saveLorebook(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,imported}));}catch(e){res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:String(e)}));}} if(action==='export'){res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,data:{entries:State.lorebookEntries,settings:State.lorebookSettings}}));} res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); res.end(JSON.stringify({error:'未知操作'})); } catch(e){res.writeHead(400,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:String(e)})); } }
+  return false;
+}
+
+async function h_api_graph_32(req, res, url, p) {
+  // 关系图谱
+    if (p === '/api/graph' && req.method === 'GET') { res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); { res.end(JSON.stringify({ok:true,...State.graphData})); return true; }; }
+  return false;
+}
+
+async function h_api_graph_33(req, res, url, p) {
+  if (p === '/api/graph' && req.method === 'POST') { let b=await readBody(req); try { const {action,node,edge}=JSON.parse(b); if(action==='addNode'||action==='updateNode'){const id=node?.id||'node_'+Date.now(); const idx=State.graphData.nodes.findIndex(n=>n.id===id); const nn={id,name:node?.name||id,type:node?.type||'character',description:node?.description||'',tags:node?.tags||[]}; if(idx>=0)State.graphData.nodes[idx]=nn; else State.graphData.nodes.push(nn); saveGraph(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); { res.end(JSON.stringify({ok:true,node:nn})); return true; };} if(action==='addEdge'||action==='updateEdge'){const id=edge?.id||'edge_'+Date.now(); const idx=State.graphData.edges.findIndex(e=>e.id===id); const ne={id,from:edge?.from||'',to:edge?.to||'',label:edge?.label||'',weight:edge?.weight||1,description:edge?.description||''}; if(idx>=0)State.graphData.edges[idx]=ne; else State.graphData.edges.push(ne); saveGraph(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,edge:ne}));} if(action==='deleteNode'){State.graphData.nodes=State.graphData.nodes.filter(n=>n.id!==node?.id); State.graphData.edges=State.graphData.edges.filter(e=>e.from!==node?.id&&e.to!==node?.id); saveGraph(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true}));} if(action==='deleteEdge'){State.graphData.edges=State.graphData.edges.filter(e=>e.id!==edge?.id); saveGraph(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true}));} if(action==='import'){try{const imp=JSON.parse(node?.json||'{}'); if(imp.nodes) State.graphData.nodes=imp.nodes; if(imp.edges) State.graphData.edges=imp.edges; saveGraph(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true}));}catch(e){res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:'导入格式错误'}));}} if(action==='export'){res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,data:State.graphData}));} res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); res.end(JSON.stringify({error:'未知操作'})); } catch(e){res.writeHead(400,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:String(e)})); } }
+  return false;
+}
+
+async function h_api_personas_34(req, res, url, p) {
+  // 玩家身份
+    if (p === '/api/personas' && req.method === 'GET') { res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); { res.end(JSON.stringify({ok:true,personas: State.personas,active:State.activePersona})); return true; }; }
+  return false;
+}
+
+async function h_api_personas_35(req, res, url, p) {
+  if (p === '/api/personas' && req.method === 'POST') { let b=await readBody(req); try { const {action,id,persona}=JSON.parse(b); if(action==='save'){const pid=id||'persona_'+Date.now(); State.personas[pid]={...State.personas[pid],...persona,name:(persona?.name||pid).slice(0,40)}; savePersonas(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); { res.end(JSON.stringify({ok:true,id:pid})); return true; };} if(action==='delete'){delete State.personas[id]; if(State.activePersona===id) State.activePersona=''; savePersonas(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true}));} if(action==='activate'){if(!State.personas[id]){res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:'身份不存在'}));} State.activePersona=id; savePersonas(); res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ok:true,active:id}));} res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); res.end(JSON.stringify({error:'未知操作'})); } catch(e){res.writeHead(400,{'content-type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({error:String(e)})); } }
+  return false;
+}
+
+async function h_api_story_memory_config_36(req, res, url, p) {
+  // 剧情记忆配置（注入开关）
+    if (p === '/api/story-memory/config' && req.method === 'GET') {
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ ok: true, config: State.storyMemoryConfig })); return true; };
+    }
+  return false;
+}
+
+async function h_api_story_memory_config_37(req, res, url, p) {
+  if (p === '/api/story-memory/config' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const updates = JSON.parse(body);
+        State.storyMemoryConfig = { ...State.storyMemoryConfig, ...updates };
+        saveStoryMemoryConfig();
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ ok: true, config: State.storyMemoryConfig })); return true; };
+      } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: String(e) })); return true; }; }
+    }
+  return false;
+}
+
+async function h_api_story_memory_data_38(req, res, url, p) {
+  // 剧情记忆数据（前端展示用）
+    if (p === '/api/story-memory/data' && req.method === 'GET') {
+      const chatId = sanitizeId(req.url?.match(/chatId=([^&]+)/)?.[1] || '');
+      if (!chatId) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '缺少 chatId' })); return true; }; }
+      const turns = readTurns(chatId);
+      // 全部历史场景（按出现顺序保留，含时间/氛围/事件）
+      const scenes = turns.filter(t => t.location).map(t => ({ story_time: t.story_time || '', location: t.location, atmosphere: t.atmosphere || '', event: t.event || '' }));
+      const latestScene = scenes.length ? scenes[scenes.length - 1] : null;
+      const allCharacterIntros = {};
+      for (const t of turns) {
+        if (t.character_intro && typeof t.character_intro === 'object') {
+          for (const [name, intro] of Object.entries(t.character_intro)) {
+            if (!allCharacterIntros[name]) allCharacterIntros[name] = intro;
+          }
+        }
+      }
+      const allRelationships = [];
+      const seenRelKeys = new Set();
+      for (const t of turns) {
+        if (Array.isArray(t.relationships)) {
+          for (const rel of t.relationships) {
+            const key = `${rel.from}-${rel.to}`;
+            if (!seenRelKeys.has(key)) { seenRelKeys.add(key); allRelationships.push(rel); }
+          }
+        }
+      }
+      // 地点详细档案（location_detail，按分组聚合，去重）
+      const locationDetails = [];
+      const seenLocKeys = new Set();
+      for (const t of turns) {
+        if (Array.isArray(t.location_detail)) {
+          for (const loc of t.location_detail) {
+            const key = `${loc.group}|${loc.name}`;
+            if (!seenLocKeys.has(key)) { seenLocKeys.add(key); locationDetails.push(loc); }
+          }
+        }
+      }
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ ok: true, scene: latestScene, scenes, characters: allCharacterIntros, relationships: allRelationships, locationDetails })); return true; };
+    }
+  return false;
+}
+
+async function h_route_39(req, res, url, p) {
+  // 地点档案合入 canonical/lore/地点.txt（带备份）
+    // 剧情备忘
+    const agendaM = p.match(/^\/api\/agenda(?:\/([^/]+))?$/);
+  if (agendaM) { const cid = agendaM[1] ? sanitizeId(decodeURIComponent(agendaM[1])) : null; const sendJson = (o, c = 200) => { res.writeHead(c, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(o)); }; if (cid) { if (req.method === 'GET') { sendJson({ ok: true, ...loadAgenda(cid) }); return true; }; if (req.method === 'POST') { let b = await readBody(req); try { const { action, item } = JSON.parse(b); const a = loadAgenda(cid); if (action === 'add') { const id = 'agenda_' + Date.now(); a.items.push({ id, content: item?.content || '', createdAt: new Date().toISOString(), status: 'pending', priority: item?.priority || 'normal', source: item?.source || 'manual' }); saveAgenda(cid, a); return sendJson({ ok: true, id }); } if (action === 'complete') { const idx = a.items.findIndex(i => i.id === item?.id); if (idx >= 0) { a.items[idx].status = 'completed'; a.items[idx].completedAt = new Date().toISOString(); saveAgenda(cid, a); } return sendJson({ ok: true }); } if (action === 'delete') { a.items = a.items.filter(i => i.id !== item?.id); saveAgenda(cid, a); return sendJson({ ok: true }); } return sendJson({ error: '未知操作' }); } catch (e) { return sendJson({ error: String(e) }, 400); } } } }
+  return false;
+}
+
+async function h_api_report_list_40(req, res, url, p) {
+  // 报告系统
+    if (p === '/api/report/list' && req.method === 'GET') { const cid = url.searchParams.get('chatId') || ''; res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ ok: true, reports: listReports(cid) })); return true; }; }
+  return false;
+}
+
+async function h_route_41(req, res, url, p) {
+  // 报告内容读取（M6：前端 loadReportListUI 点击报告使用；filename 白名单校验防穿越）
+    const reportReadM = p.match(/^\/api\/report\/([^/]+)\/([^/]+)$/);
+  if (reportReadM && req.method === 'GET') {
+      const cid = sanitizeId(decodeURIComponent(reportReadM[1]));
+      const filename = sanitizeFileName(decodeURIComponent(reportReadM[2]), 80);
+      const dir = path.join(REPORTS_DIR, cid);
+      const file = path.join(dir, filename);
+      try {
+        if (!fs.existsSync(file) || path.dirname(file) !== dir) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '报告不存在' })); return true; };
+        }
+        const content = fs.readFileSync(file, 'utf8');
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ ok: true, content })); return true; };
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: String(e) })); return true; };
+      }
+    }
+  return false;
+}
+
+async function h_api_report_overview_42(req, res, url, p) {
+  if (p === '/api/report/overview' && req.method === 'POST') { let b = await readBody(req); try { const { chatId, range } = JSON.parse(b); const cid = sanitizeId(chatId || ''); const f = path.join(DATA_DIR, 'chats', `${cid}.json`); if (!fs.existsSync(f)) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '对话不存在' })); return true; }; } const chat = JSON.parse(fs.readFileSync(f, 'utf8')); const msgs = (chat.messages || []).slice(range === 'last10' ? -10 : range === 'today' ? -50 : -200); const recent = msgs.map(m => `${m.role === 'user' ? '用户' : 'AI'}：${String(m.content || '').slice(0, 300)}`).join('\n'); const prompt = `你是一位 RP 回顾分析师。基于以下对话，生成回顾报告。\n\n报告格式：\n# RP 回顾报告\n\n## 关键事件\n- [时间] 事件描述\n\n## 角色发展\n- 角色名：成长/变化\n\n## 互动要点\n- 重要对话/决策\n\n## 未完事项\n- 伏笔/待续\n\n对话内容：\n${recent}\n\n输出 Markdown 格式的报告。`; const result = await auxCall(prompt); const filename = saveReport(cid, 'overview', result); res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, content: result, filename })); } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: String(e) })); } }
+  return false;
+}
+
+async function h_api_report_audit_43(req, res, url, p) {
+  if (p === '/api/report/audit' && req.method === 'POST') { let b = await readBody(req); try { const { chatId, range } = JSON.parse(b); const cid = sanitizeId(chatId || ''); const f = path.join(DATA_DIR, 'chats', `${cid}.json`); if (!fs.existsSync(f)) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '对话不存在' })); return true; }; } const chat = JSON.parse(fs.readFileSync(f, 'utf8')); const msgs = (chat.messages || []).slice(range === 'last10' ? -10 : range === 'today' ? -50 : -200); const recent = msgs.map(m => `${m.role === 'user' ? '用户' : 'AI'}：${String(m.content || '').slice(0, 300)}`).join('\n'); const prompt = `你是一位 RP 质量审查员。基于以下对话，生成自检报告。\n\n评估维度：\n1. 角色一致性（言行是否符合设定）\n2. 时间线连贯性（时间/地点是否矛盾）\n3. 物品/状态一致性（持有物/能力是否合理）\n4. 对话质量（回复长度/风格/情感）\n5. 伏笔追踪（已埋伏笔是否被遗忘）\n\n报告格式：\n# AI 自检报告\n\n## 总评\n- 综合评分：X/10\n\n## 各维度评分\n| 维度 | 评分 | 问题 |\n|---|---|---|\n| 角色一致性 | X/10 | ... |\n\n## 具体问题\n- 问题描述 + 对应消息\n\n## 改进建议\n- 建议内容\n\n对话内容：\n${recent}\n\n输出 Markdown 格式的报告。`; const result = await auxCall(prompt); const filename = saveReport(cid, 'audit', result); res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, content: result, filename })); } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: String(e) })); } }
+  return false;
+}
+
+async function h_api_analyze_retro_44(req, res, url, p) {
+  // 回溯分析
+    if (p === '/api/analyze/retro' && req.method === 'POST') { let b = await readBody(req); try { const { chatId } = JSON.parse(b); const cid = sanitizeId(chatId || ''); const f = path.join(DATA_DIR, 'chats', `${cid}.json`); if (!fs.existsSync(f)) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '对话不存在' })); return true; }; } const chat = JSON.parse(fs.readFileSync(f, 'utf8')); const allMsgs = chat.messages || []; const batchSize = 20; const results = []; for (let i = 0; i < allMsgs.length; i += batchSize) { const batch = allMsgs.slice(i, i + batchSize); const batchText = batch.map(m => `${m.role === 'user' ? '用户' : 'AI'}：${String(m.content || '').slice(0, 200)}`).join('\n'); const prompt = `分析以下 RP 对话片段，提取关键信息：\n1. 新出现的角色\n2. 关系变化\n3. 重要事件\n4. 物品/状态变化\n5. 场景变化\n\n对话：\n${batchText}\n\n输出 JSON 格式：{"characters":[],"relationships":[],"events":[],"items":[],"scenes":[]}`; try { const result = await auxCall(prompt); const parsed = JSON.parse(result.replace(/```(?:json)?\s*([\s\S]*?)```/, '$1').trim()); results.push(parsed); } catch (e) {} } const merged = { characters: [], relationships: [], events: [], items: [], scenes: [] }; for (const r of results) { if (r.characters) merged.characters.push(...r.characters); if (r.relationships) merged.relationships.push(...r.relationships); if (r.events) merged.events.push(...r.events); if (r.items) merged.items.push(...r.items); if (r.scenes) merged.scenes.push(...r.scenes); } const report = `# 回溯分析报告\n\n## 角色（${merged.characters.length}）\n${merged.characters.map(c => `- ${typeof c === 'string' ? c : JSON.stringify(c)}`).join('\n')}\n\n## 关系变化（${merged.relationships.length}）\n${merged.relationships.map(r => `- ${typeof r === 'string' ? r : JSON.stringify(r)}`).join('\n')}\n\n## 重要事件（${merged.events.length}）\n${merged.events.map(e => `- ${typeof e === 'string' ? e : JSON.stringify(e)}`).join('\n')}\n\n## 物品/状态（${merged.items.length}）\n${merged.items.map(i => `- ${typeof i === 'string' ? i : JSON.stringify(i)}`).join('\n')}\n\n## 场景（${merged.scenes.length}）\n${merged.scenes.map(s => `- ${typeof s === 'string' ? s : JSON.stringify(s)}`).join('\n')}`; const filename = saveReport(cid, 'retro', report); res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok: true, content: report, filename, stats: { messages: allMsgs.length, batches: results.length } })); } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: String(e) })); } }
+  return false;
+}
+
+async function h_api_memory_search_45(req, res, url, p) {
+  // 语义回忆：BM25 搜索聊天历史（跨会话或指定会话）
+    if (p === '/api/memory/search' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { query, chatId, limit: lim } = JSON.parse(body);
+        if (!query || !String(query).trim()) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '缺少查询词' })); return true; }; }
+        const limNum = Number(lim);
+        const maxResults = Math.min(Number.isFinite(limNum) ? limNum : 20, 50);
+        const qTokens = tokenize(String(query));
+        if (!qTokens.length) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ ok: true, results: [], total: 0 })); return true; }; }
+        const MAX_MSGS = 5000;
+        const chatFiles = chatId
+          ? [path.join(DATA_DIR, 'chats', `${sanitizeId(chatId)}.json`)]
+          : (() => { try { return fs.readdirSync(path.join(DATA_DIR, 'chats')).filter(f => f.endsWith('.json')).map(f => path.join(DATA_DIR, 'chats', f)); } catch (e) { return []; } })();
+        const allMsgs = [];
+        for (const f of chatFiles) {
+          if (!fs.existsSync(f)) continue;
+          try {
+            const chat = JSON.parse(fs.readFileSync(f, 'utf8'));
+            const cid = chat.id || path.basename(f, '.json');
+            for (const m of (chat.messages || [])) {
+              if (allMsgs.length >= MAX_MSGS) break;
+              const txt = String(m.content || '');
+              if (txt.length < 5) continue;
+              allMsgs.push({ chatId: cid, role: m.role || 'unknown', content: txt.slice(0, 1000), seq: m.seq || 0, chatTitle: chat.title || cid });
+            }
+            if (allMsgs.length >= MAX_MSGS) break;
+          } catch (e) { /* 跳过 */ }
+        }
+        const avgDl = allMsgs.length ? allMsgs.reduce((s, m) => s + tokenize(m.content).length, 0) / allMsgs.length : 1;
+        const df = {};
+        const msgTokens = allMsgs.map(m => { const t = tokenize(m.content); for (const w of new Set(t)) df[w] = (df[w] || 0) + 1; return t; });
+        const N = allMsgs.length;
+        const k1 = 1.5, b = 0.75;
+        const scored = allMsgs.map((m, i) => {
+          const tokens = msgTokens[i]; const dl = tokens.length || 1;
+          const tfMap = {}; for (const t of tokens) tfMap[t] = (tfMap[t] || 0) + 1;
+          let score = 0;
+          for (const qt of qTokens) { const tf = tfMap[qt] || 0; const docFreq = df[qt] || 0; const idf = Math.log((N - docFreq + 0.5) / (docFreq + 0.5) + 1); score += idf * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl / avgDl)); }
+          return { ...m, score };
+        });
+        scored.sort((a, b) => b.score - a.score);
+        const results = scored.filter(r => r.score > 0.1).slice(0, maxResults);
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ ok: true, results, total: N, queryTokens: qTokens.length })); return true; };
+      } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: String(e) })); return true; }; }
+    }
+  return false;
+}
+
+async function h_route_46(req, res, url, p) {
+  // 卡片交换 API：导出角色卡 PNG
+    const cardsExpM = p.match(/^\/api\/cards\/export\/([^/]+)$/);
+  if (cardsExpM && req.method === 'GET') {
+      try {
+        const charName = sanitizeFileName(decodeURIComponent(cardsExpM[1]));
+        const profileFile = path.join(NPC_PROFILES_DIR, `${charName}.json`);
+        if (!fs.existsSync(profileFile)) { res.writeHead(404); { res.end('角色不存在'); return true; }; }
+        const profile = JSON.parse(fs.readFileSync(profileFile, 'utf8'));
+        const charCard = { name: profile.name || charName, description: profile.appearance || '', personality: profile.personality || '', mes_example: '', system_prompt: '', tags: profile.tags || [], creator: 'rabbit-web', character_version: '1.0', extensions: { relationships: profile.relationships || {}, age: profile.age, ageNote: profile.ageNote, firstAppearance: profile.firstAppearance, notes: profile.notes } };
+        const charJson = JSON.stringify(charCard);
+        const pngBuffer = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+        const result = pngCreateWithTextChunk(pngBuffer, 'chara', Buffer.from(charJson).toString('base64'));
+        if (!result) { res.writeHead(500); { res.end('PNG 生成失败'); return true; }; }
+        // RFC 5987：filename* 支持中文文件名，filename 用 ASCII 兜底
+        res.writeHead(200, { 'content-type': 'image/png', 'content-disposition': `attachment; filename="card.png"; filename*=UTF-8''${encodeURIComponent(charName)}.png` });
+        { res.end(result); return true; };
+      } catch (e) { res.writeHead(500); { res.end('导出失败：' + String(e)); return true; }; }
+    }
+  return false;
+}
+
+async function h_api_cards_import_47(req, res, url, p) {
+  // 卡片交换 API：导入角色卡 PNG
+    if (p === '/api/cards/import' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { imageData } = JSON.parse(body);
+        if (!imageData) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '缺少图片数据' })); return true; }; }
+        let buf;
+        if (typeof imageData === 'string' && imageData.startsWith('data:image/png;base64,')) buf = Buffer.from(imageData.split(',')[1], 'base64');
+        else if (typeof imageData === 'string') buf = Buffer.from(imageData, 'base64');
+        else buf = Buffer.from(imageData);
+        const chunks = pngReadTextChunks(buf);
+        const charaChunk = chunks.find(c => c.keyword === 'chara');
+        if (!charaChunk) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: 'PNG 中未找到角色卡数据（缺少 chara tEXt chunk）' })); return true; }; }
+        const charData = JSON.parse(Buffer.from(charaChunk.text, 'base64').toString('utf8'));
+        const profile = { name: sanitizeFileName(String(charData.name || '未命名').slice(0, 40)), aliases: charData.tags || [], appearance: charData.description || '', personality: charData.personality || '', age: charData.extensions?.age || null, ageNote: charData.extensions?.ageNote || '', relationships: charData.extensions?.relationships || {}, firstAppearance: charData.extensions?.firstAppearance || '导入自酒馆角色卡', lastUpdated: new Date().toISOString(), notes: charData.extensions?.notes || '', tags: charData.tags || [] };
+        saveNpcProfile(profile.name, profile);
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ ok: true, profile, source: 'png-import' })); return true; };
+      } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: String(e) })); return true; }; }
+    }
+  return false;
+}
+
+async function h_api_illustration_generate_48(req, res, url, p) {
+  if (p === '/api/illustration/generate' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { prompt, style, chatId, sceneryOnly } = JSON.parse(body);
+        if (!prompt || !String(prompt).trim()) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '缺少场景描述' })); return true; }; }
+        const illustConfigFile = path.join(DATA_DIR, 'illustration-config.json');
+        let config = { engine: 'kolors', apiKey: '', baseURL: SILICON_BASE };
+        try { if (fs.existsSync(illustConfigFile)) config = Object.assign({ engine: 'kolors', apiKey: '', baseURL: SILICON_BASE }, JSON.parse(fs.readFileSync(illustConfigFile, 'utf8'))); } catch (e) {}
+        const key = config.apiKey || getSiliconImgKey();
+        if (!key) {
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+          { res.end(JSON.stringify({ error: '图片生成功能未配置。请在设置中配置硅基流动 API Key，或确认 ~/.workbuddy/models.json 中存在硅基流动端点。', needConfig: true })); return true; };
+        }
+        const baseURL = (config.baseURL || SILICON_BASE).replace(/\/+$/, '');
+        const modelKey = String(config.engine || 'kolors');
+        const modelCfg = SILICON_IMG_MODELS[modelKey] || SILICON_IMG_MODELS.kolors;
+        const model = typeof modelCfg === 'string' ? modelCfg : modelCfg.id;
+        const body_s = { model, prompt: String(prompt).trim(), image_size: '1024x1024', batch_size: 1, num_inference_steps: 24, guidance_scale: 7.5 };
+        // 纯场景模式：用 negative_prompt 排除人物，让图片只出场景/环境
+        if (sceneryOnly) {
+          body_s.negative_prompt = 'person, people, human, character, figure, portrait, man, woman, boy, girl, face, body, crowd, group, silhouette';
+        }
+        const r = await fetch(`${baseURL}/images/generations`, {
+          method: 'POST',
+          headers: { 'authorization': `Bearer ${key}`, 'content-type': 'application/json' },
+          body: JSON.stringify(body_s)
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          const errMsg = (data && data.message) || (data && data.error && data.error.message) || `接口错误(${r.status})`;
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+          { res.end(JSON.stringify({ error: errMsg, status: r.status })); return true; };
+        }
+        const img = (data.images && Array.isArray(data.images) && data.images[0]) || null;
+        if (!img) {
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+          { res.end(JSON.stringify({ error: '接口返回了意外的数据结构', status: 502 })); return true; };
+        }
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ ok: true, image: img, model, engine: modelKey, label: modelCfg.label || model, price: modelCfg.price || '' })); return true; };
+      } catch (e) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: String(e), status: 500 })); return true; }; }
+    }
+  return false;
+}
+
+async function h_api_illustration_config_49(req, res, url, p) {
+  if (p === '/api/illustration/config' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { engine, apiKey, baseURL } = JSON.parse(body);
+        const illustConfigFile = path.join(DATA_DIR, 'illustration-config.json');
+        let config = { engine: 'kolors', apiKey: '', baseURL: SILICON_BASE };
+        try { if (fs.existsSync(illustConfigFile)) config = Object.assign(config, JSON.parse(fs.readFileSync(illustConfigFile, 'utf8'))); } catch (e) {}
+        if (engine) config.engine = String(engine).slice(0, 20);
+        if (apiKey) config.apiKey = String(apiKey).slice(0, 200);
+        if (baseURL) config.baseURL = String(baseURL).slice(0, 300);
+        fs.writeFileSync(illustConfigFile, JSON.stringify(config, null, 2), 'utf8');
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ ok: true, config: { engine: config.engine, configured: !!config.apiKey } })); return true; };
+      } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: String(e) })); return true; }; }
+    }
+  return false;
+}
+
+async function h_api_illustration_enhance_50(req, res, url, p) {
+  if (p === '/api/illustration/enhance' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { prompt, style } = JSON.parse(body);
+        if (!prompt || !String(prompt).trim()) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '缺少场景描述' })); return true; }; }
+        const cfg = getSiliconChatCfg();
+        if (!cfg) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '未能从 ~/.workbuddy/models.json 读取硅基流动对话端点，无法优化提示词', status: 503 })); return true; }; }
+        const styleHint = style ? `（风格：${style}）` : '';
+        const sys = '你是专业 AI 绘画提示词工程师。请把用户的中文场景描述改写成一段高质量、可直接用于文生图模型的英文提示词。要求：只输出英文提示词正文，不要任何解释、编号、引号或多余文字；用逗号分隔的关键词短语，包含场景环境、光线、氛围、主体、材质/风格关键词；控制在 6-12 个短语内。';
+        const callR = await fetch(cfg.chatUrl, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.key}` },
+          body: JSON.stringify({ model: cfg.model, messages: [{ role: 'user', content: `${sys}\n\n${prompt}\n${styleHint}` }], max_tokens: 400 }),
+          signal: AbortSignal.timeout(60000),
+        });
+        if (!callR.ok) { const t = await callR.text().catch(()=>''); res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: `LLM 调用失败: HTTP ${callR.status} ${t.slice(0,160)}`, status: callR.status })); return true; }; }
+        const dd = await callR.json().catch(() => ({}));
+        const enhanced = ((dd.choices && dd.choices[0] && dd.choices[0].message && dd.choices[0].message.content) || '').trim();
+        if (!enhanced) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '优化失败，返回为空', status: 502 })); return true; }; }
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ ok: true, enhanced })); return true; };
+      } catch (e) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: String(e), status: 500 })); return true; }; }
+    }
+  return false;
+}
+
+async function h_api_tts_config_51(req, res, url, p) {
+  if (p === '/api/tts/config' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { engine, apiKey, voice, rate, baseURL, model } = JSON.parse(body);
+        const ttsConfigFile = path.join(DATA_DIR, 'tts-config.json');
+        let config = defaultTtsConfig();
+        try { if (fs.existsSync(ttsConfigFile)) config = JSON.parse(fs.readFileSync(ttsConfigFile, 'utf8')); } catch (e) {}
+        if (engine) config.engine = String(engine).slice(0, 20);
+        if (apiKey) config.apiKey = String(apiKey).slice(0, 200);
+        if (voice) config.voice = String(voice).slice(0, 50);
+        if (rate) config.rate = String(rate).slice(0, 10);
+        if (baseURL) config.baseURL = String(baseURL).slice(0, 300);
+        if (model) config.model = String(model).slice(0, 40);
+        fs.writeFileSync(ttsConfigFile, JSON.stringify(config, null, 2), 'utf8');
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ ok: true, config: { engine: config.engine, voice: config.voice, rate: config.rate, configured: config.engine !== 'none' } })); return true; };
+      } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: String(e) })); return true; }; }
+    }
+  return false;
+}
+
+async function h_api_tts_config_52(req, res, url, p) {
   if (p === '/api/tts/config' && req.method === 'GET') {
-    const ttsConfigFile = path.join(DATA_DIR, 'tts-config.json');
-    let config = defaultTtsConfig();
-    try { if (fs.existsSync(ttsConfigFile)) config = JSON.parse(fs.readFileSync(ttsConfigFile, 'utf8')); } catch (e) {}
-    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ ok: true, config: { engine: config.engine, voice: config.voice, rate: config.rate, configured: config.engine !== 'none' } }));
-  }
-  if (p === '/api/tts/synthesize' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { text, voice, rate, model, style, referenceAudio, character } = JSON.parse(body);
-      if (!text || !String(text).trim()) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '缺少文本' })); }
       const ttsConfigFile = path.join(DATA_DIR, 'tts-config.json');
       let config = defaultTtsConfig();
       try { if (fs.existsSync(ttsConfigFile)) config = JSON.parse(fs.readFileSync(ttsConfigFile, 'utf8')); } catch (e) {}
-      const useVoice = voice || config.voice || 'mimo_default';
-      const useRate = rate || config.rate || '1.0';
-      
-      // 角色绑定：如果指定了角色，从 character-voices.json 读取对应的参考音频和语音提示词
-      let characterRefAudio = null;
-      let characterModel = null;
-      let characterStyle = null;
-      if (character && !referenceAudio) {
-        try {
-          const charVoiceFile = path.join(DATA_DIR, 'character-voices.json');
-          if (fs.existsSync(charVoiceFile)) {
-            const charVoices = JSON.parse(fs.readFileSync(charVoiceFile, 'utf8'));
-            const charConfig = charVoices['角色音色映射'][character];
-            if (charConfig) {
-              // 读取参考音频
-              if (charConfig['参考音频']) {
-                const refPath = path.join(CHARACTERS_DIR, '参考音频', charConfig['参考音频']);
-                if (fs.existsSync(refPath)) {
-                  characterRefAudio = { mime: 'audio/mpeg', data: fs.readFileSync(refPath).toString('base64') };
-                  characterModel = 'mimo-v2.5-tts-voiceclone';
-                  console.log(`[TTS] 角色绑定: ${character} → ${charConfig['参考音频']}`);
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      { res.end(JSON.stringify({ ok: true, config: { engine: config.engine, voice: config.voice, rate: config.rate, configured: config.engine !== 'none' } })); return true; };
+    }
+  return false;
+}
+
+async function h_api_tts_synthesize_53(req, res, url, p) {
+  if (p === '/api/tts/synthesize' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { text, voice, rate, model, style, referenceAudio, character } = JSON.parse(body);
+        if (!text || !String(text).trim()) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '缺少文本' })); return true; }; }
+        const ttsConfigFile = path.join(DATA_DIR, 'tts-config.json');
+        let config = defaultTtsConfig();
+        try { if (fs.existsSync(ttsConfigFile)) config = JSON.parse(fs.readFileSync(ttsConfigFile, 'utf8')); } catch (e) {}
+        const useVoice = voice || config.voice || 'mimo_default';
+        const useRate = rate || config.rate || '1.0';
+        
+        // 角色绑定：如果指定了角色，从 character-voices.json 读取对应的参考音频和语音提示词
+        let characterRefAudio = null;
+        let characterModel = null;
+        let characterStyle = null;
+        if (character && !referenceAudio) {
+          try {
+            const charVoiceFile = path.join(DATA_DIR, 'character-voices.json');
+            if (fs.existsSync(charVoiceFile)) {
+              const charVoices = JSON.parse(fs.readFileSync(charVoiceFile, 'utf8'));
+              const charConfig = charVoices['角色音色映射'][character];
+              if (charConfig) {
+                // 读取参考音频
+                if (charConfig['参考音频']) {
+                  const refPath = path.join(CHARACTERS_DIR, '参考音频', charConfig['参考音频']);
+                  if (fs.existsSync(refPath)) {
+                    characterRefAudio = { mime: 'audio/mpeg', data: fs.readFileSync(refPath).toString('base64') };
+                    characterModel = 'mimo-v2.5-tts-voiceclone';
+                    console.log(`[TTS] 角色绑定: ${character} → ${charConfig['参考音频']}`);
+                  }
+                }
+                // 读取语音提示词（用于 style 参数）
+                if (charConfig['语音提示词']) {
+                  characterStyle = charConfig['语音提示词'];
+                  console.log(`[TTS] 角色提示词: ${character} → ${characterStyle.slice(0, 50)}...`);
                 }
               }
-              // 读取语音提示词（用于 style 参数）
-              if (charConfig['语音提示词']) {
-                characterStyle = charConfig['语音提示词'];
-                console.log(`[TTS] 角色提示词: ${character} → ${characterStyle.slice(0, 50)}...`);
-              }
             }
-          }
-        } catch (e) { console.error('[TTS] 角色绑定失败:', e.message); }
-      }
-      
-      if (config.engine === 'mimo') {
-        // MiMo 官方 TTS：文本放 assistant 消息，audio 参数指定音色（token-plan 免费）
-        // 三模型：mimo-v2.5-tts（内置音色）/ -voicedesign（文字设计声线）/ -voiceclone（参考音频克隆）
-        const mimoKey = config.apiKey || getMimoTtsKey();
-        if (!mimoKey) {
-          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-          return res.end(JSON.stringify({ error: '未找到 MiMo API Key。可在 TTS 配置中手动填写，或确认 ~/.workbuddy/models.json 里有 MiMo (tp-) 配置。', needConfig: true }));
+          } catch (e) { console.error('[TTS] 角色绑定失败:', e.message); }
         }
-        const useModel = String(model || characterModel || config.model || MIMO_TTS_MODEL).slice(0, 40);
-        if (!/^mimo-v2\.5-tts/.test(useModel)) {
-          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-          return res.end(JSON.stringify({ error: '不支持的 TTS 模型：' + useModel }));
-        }
-        // 组装 messages：风格/声音描述放 user（voicedesign 必填），朗读文本放 assistant
-        // 优先级：请求中的 style > 角色绑定的语音提示词 > 默认提示词
-        const styleText = String(style || characterStyle || '').trim();
-        const messages = [
-          ...(styleText ? [{ role: 'user', content: styleText.slice(0, 800) }] : []),
-          ...(useModel === 'mimo-v2.5-tts-voicedesign' && !styleText ? [{ role: 'user', content: '请用自然、生动、清晰的语气朗读下面这段文本。' }] : []),
-          { role: 'assistant', content: String(text).trim().slice(0, 2000) },
-        ];
-        const audioParam = { format: 'mp3' };
-        let voiceLabel = useVoice;
-        if (useModel === 'mimo-v2.5-tts') {
-          audioParam.voice = useVoice;
-        } else if (useModel === 'mimo-v2.5-tts-voiceclone') {
-          // 参考音频来源：优先使用角色绑定的参考音频，其次使用请求中的 referenceAudio
-          const ref = characterRefAudio || (referenceAudio && referenceAudio.data ? referenceAudio : null);
-          if (!ref) {
+        
+        if (config.engine === 'mimo') {
+          // MiMo 官方 TTS：文本放 assistant 消息，audio 参数指定音色（token-plan 免费）
+          // 三模型：mimo-v2.5-tts（内置音色）/ -voicedesign（文字设计声线）/ -voiceclone（参考音频克隆）
+          const mimoKey = config.apiKey || getMimoTtsKey();
+          if (!mimoKey) {
             res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-            return res.end(JSON.stringify({ error: '声音克隆需要参考音频（mp3/wav）或指定角色' }));
+            { res.end(JSON.stringify({ error: '未找到 MiMo API Key。可在 TTS 配置中手动填写，或确认 ~/.workbuddy/models.json 里有 MiMo (tp-) 配置。', needConfig: true })); return true; };
           }
-          const mime = /wav/i.test(ref.mime || '') ? 'audio/wav' : 'audio/mpeg';
-          audioParam.voice = `data:${mime};base64,${String(ref.data).slice(0, 14 * 1024 * 1024)}`;
-          audioParam.format = 'wav';   // 官方 clone 示例用 wav
-          voiceLabel = character ? `${character}的声音` : '克隆音色';
-        }
-        // voicedesign：不传 audio.voice（由风格描述生成声线）
-        const base = (config.baseURL || MIMO_TTS_BASE).replace(/\/+$/, '');
-        const audioResp = await fetch(base + '/chat/completions', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', 'authorization': 'Bearer ' + mimoKey },
-          body: JSON.stringify({ model: useModel, messages, audio: audioParam, stream: false }),
-        });
-        if (!audioResp.ok) {
-          const errText = await audioResp.text();
+          const useModel = String(model || characterModel || config.model || MIMO_TTS_MODEL).slice(0, 40);
+          if (!/^mimo-v2\.5-tts/.test(useModel)) {
+            res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+            { res.end(JSON.stringify({ error: '不支持的 TTS 模型：' + useModel })); return true; };
+          }
+          // 组装 messages：风格/声音描述放 user（voicedesign 必填），朗读文本放 assistant
+          // 优先级：请求中的 style > 角色绑定的语音提示词 > 默认提示词
+          const styleText = String(style || characterStyle || '').trim();
+          const messages = [
+            ...(styleText ? [{ role: 'user', content: styleText.slice(0, 800) }] : []),
+            ...(useModel === 'mimo-v2.5-tts-voicedesign' && !styleText ? [{ role: 'user', content: '请用自然、生动、清晰的语气朗读下面这段文本。' }] : []),
+            { role: 'assistant', content: String(text).trim().slice(0, 2000) },
+          ];
+          const audioParam = { format: 'mp3' };
+          let voiceLabel = useVoice;
+          if (useModel === 'mimo-v2.5-tts') {
+            audioParam.voice = useVoice;
+          } else if (useModel === 'mimo-v2.5-tts-voiceclone') {
+            // 参考音频来源：优先使用角色绑定的参考音频，其次使用请求中的 referenceAudio
+            const ref = characterRefAudio || (referenceAudio && referenceAudio.data ? referenceAudio : null);
+            if (!ref) {
+              res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+              { res.end(JSON.stringify({ error: '声音克隆需要参考音频（mp3/wav）或指定角色' })); return true; };
+            }
+            const mime = /wav/i.test(ref.mime || '') ? 'audio/wav' : 'audio/mpeg';
+            audioParam.voice = `data:${mime};base64,${String(ref.data).slice(0, 14 * 1024 * 1024)}`;
+            audioParam.format = 'wav';   // 官方 clone 示例用 wav
+            voiceLabel = character ? `${character}的声音` : '克隆音色';
+          }
+          // voicedesign：不传 audio.voice（由风格描述生成声线）
+          const base = (config.baseURL || MIMO_TTS_BASE).replace(/\/+$/, '');
+          const audioResp = await fetch(base + '/chat/completions', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'authorization': 'Bearer ' + mimoKey },
+            body: JSON.stringify({ model: useModel, messages, audio: audioParam, stream: false }),
+          });
+          if (!audioResp.ok) {
+            const errText = await audioResp.text();
+            res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+            { res.end(JSON.stringify({ error: `MiMo TTS 请求失败（HTTP ${audioResp.status}）：${errText.slice(0, 200)}` })); return true; };
+          }
+          const ar = await audioResp.json();
+          const audioData = ar && ar.choices && ar.choices[0] && ar.choices[0].message && ar.choices[0].message.audio && ar.choices[0].message.audio.data;
+          if (!audioData) {
+            res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+            { res.end(JSON.stringify({ error: 'MiMo TTS 响应缺少音频数据', raw: JSON.stringify(ar).slice(0, 200) })); return true; };
+          }
           res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-          return res.end(JSON.stringify({ error: `MiMo TTS 请求失败（HTTP ${audioResp.status}）：${errText.slice(0, 200)}` }));
+          { res.end(JSON.stringify({ ok: true, audio: audioData, format: audioParam.format, voice: voiceLabel, model: useModel, message: `MiMo TTS 合成成功（${useModel === 'mimo-v2.5-tts' ? voiceLabel : useModel === 'mimo-v2.5-tts-voicedesign' ? '声线设计' : '声音克隆'}）` })); return true; };
         }
-        const ar = await audioResp.json();
-        const audioData = ar && ar.choices && ar.choices[0] && ar.choices[0].message && ar.choices[0].message.audio && ar.choices[0].message.audio.data;
-        if (!audioData) {
+        if (config.engine === 'none') {
           res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-          return res.end(JSON.stringify({ error: 'MiMo TTS 响应缺少音频数据', raw: JSON.stringify(ar).slice(0, 200) }));
+          { res.end(JSON.stringify({ error: '语音合成功能未配置。请在设置中配置 TTS 引擎（支持 MiMo TTS / Edge TTS / OpenAI TTS）。', needConfig: true })); return true; };
         }
+        // edge/openai 引擎：预留（需接入对应 SDK/API 后启用）
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ ok: true, audio: audioData, format: audioParam.format, voice: voiceLabel, model: useModel, message: `MiMo TTS 合成成功（${useModel === 'mimo-v2.5-tts' ? voiceLabel : useModel === 'mimo-v2.5-tts-voicedesign' ? '声线设计' : '声音克隆'}）` }));
-      }
-      if (config.engine === 'none') {
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ error: '语音合成功能未配置。请在设置中配置 TTS 引擎（支持 MiMo TTS / Edge TTS / OpenAI TTS）。', needConfig: true }));
-      }
-      // edge/openai 引擎：预留（需接入对应 SDK/API 后启用）
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: true, status: 'pending', message: `TTS 引擎 ${config.engine} 尚未接入实际合成，当前请使用 MiMo 引擎。`, config: { engine: config.engine, voice: useVoice, rate: useRate } }));
-    } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: String(e) })); }
-  }
+        { res.end(JSON.stringify({ ok: true, status: 'pending', message: `TTS 引擎 ${config.engine} 尚未接入实际合成，当前请使用 MiMo 引擎。`, config: { engine: config.engine, voice: useVoice, rate: useRate } })); return true; };
+      } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: String(e) })); return true; }; }
+    }
+  return false;
+}
+
+async function h_route_54(req, res, url, p) {
   // 旁注
-  const annotM = p.match(/^\/api\/annotations(?:\/([^/]+))?$/);
-  if (annotM) { const cid = annotM[1] ? sanitizeId(decodeURIComponent(annotM[1])) : null; const sendJson = (o, c = 200) => { res.writeHead(c, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(o)); }; if (cid) { if (req.method === 'GET') return sendJson({ ok: true, ...loadAnnotations(cid) }); if (req.method === 'POST') { let b = await readBody(req); try { const { action, note } = JSON.parse(b); const ann = loadAnnotations(cid); if (action === 'add') { const id = 'ann_' + Date.now(); ann.notes.push({ id, position: note?.position || 3, content: note?.content || '', enabled: true, createdAt: new Date().toISOString() }); saveAnnotations(cid, ann); return sendJson({ ok: true, id }); } if (action === 'update') { const idx = ann.notes.findIndex(n => n.id === note?.id); if (idx >= 0) { ann.notes[idx] = { ...ann.notes[idx], ...note }; saveAnnotations(cid, ann); } return sendJson({ ok: true }); } if (action === 'delete') { ann.notes = ann.notes.filter(n => n.id !== note?.id); saveAnnotations(cid, ann); return sendJson({ ok: true }); } return sendJson({ error: '未知操作' }); } catch (e) { return sendJson({ error: String(e) }, 400); } } } }
+    const annotM = p.match(/^\/api\/annotations(?:\/([^/]+))?$/);
+  if (annotM) { const cid = annotM[1] ? sanitizeId(decodeURIComponent(annotM[1])) : null; const sendJson = (o, c = 200) => { res.writeHead(c, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(o)); }; if (cid) { if (req.method === 'GET') { sendJson({ ok: true, ...loadAnnotations(cid) }); return true; }; if (req.method === 'POST') { let b = await readBody(req); try { const { action, note } = JSON.parse(b); const ann = loadAnnotations(cid); if (action === 'add') { const id = 'ann_' + Date.now(); ann.notes.push({ id, position: note?.position || 3, content: note?.content || '', enabled: true, createdAt: new Date().toISOString() }); saveAnnotations(cid, ann); return sendJson({ ok: true, id }); } if (action === 'update') { const idx = ann.notes.findIndex(n => n.id === note?.id); if (idx >= 0) { ann.notes[idx] = { ...ann.notes[idx], ...note }; saveAnnotations(cid, ann); } return sendJson({ ok: true }); } if (action === 'delete') { ann.notes = ann.notes.filter(n => n.id !== note?.id); saveAnnotations(cid, ann); return sendJson({ ok: true }); } return sendJson({ error: '未知操作' }); } catch (e) { return sendJson({ error: String(e) }, 400); } } } }
+  return false;
+}
+
+async function h_api_op_note_55(req, res, url, p) {
   // 界面操作：会话常驻设定（📌 每轮注入 system，不被上下文裁剪；按会话隔离）
-  // Task15 多槽位：GET 返回 {note:合并文本, slots:{背景,关系,规则,其他}}；POST 支持 slots 对象或旧字符串 note
-  if (p === '/api/op/note' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { chatId, note, get, slots } = JSON.parse(body);
-      const cid = sanitizeId(chatId || '');
-      if (get) {
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ note: noteText(cid), slots: noteSlots(cid) }));
-      }
-      // 多槽位保存（新前端）：slots 对象 → 存对象（仅保留已知槽位；全空 = 清空）
-      if (slots && typeof slots === 'object') {
-        const clean = {};
-        let hasAny = false;
-        for (const k of NOTE_SLOTS) {
-          const v = slots[k];
-          if (v != null && typeof v === 'string' && v.trim()) { clean[k] = v.trim().slice(0, 4000); hasAny = true; }
+    // Task15 多槽位：GET 返回 {note:合并文本, slots:{背景,关系,规则,其他}}；POST 支持 slots 对象或旧字符串 note
+    if (p === '/api/op/note' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { chatId, note, get, slots } = JSON.parse(body);
+        const cid = sanitizeId(chatId || '');
+        if (get) {
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+          { res.end(JSON.stringify({ note: noteText(cid), slots: noteSlots(cid) })); return true; };
         }
-        if (hasAny) State.opState.notes[cid] = clean; else delete State.opState.notes[cid];
+        // 多槽位保存（新前端）：slots 对象 → 存对象（仅保留已知槽位；全空 = 清空）
+        if (slots && typeof slots === 'object') {
+          const clean = {};
+          let hasAny = false;
+          for (const k of NOTE_SLOTS) {
+            const v = slots[k];
+            if (v != null && typeof v === 'string' && v.trim()) { clean[k] = v.trim().slice(0, 4000); hasAny = true; }
+          }
+          if (hasAny) State.opState.notes[cid] = clean; else delete State.opState.notes[cid];
+          saveOpState();
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+          { res.end(JSON.stringify({ ok: true, saved: hasAny, note: hasAny ? '会话常驻设定已保存（每轮注入 system）' : '会话常驻设定已清空' })); return true; };
+        }
+        // 旧接口兼容：字符串 note → 视为「其他」槽（读取时按迁移逻辑归位）；与 slots 路径一致截断 4000
+        const n = String(note || '').trim().slice(0, 4000);
+        if (n) State.opState.notes[cid] = n; else delete State.opState.notes[cid];
         saveOpState();
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ ok: true, saved: hasAny, note: hasAny ? '会话常驻设定已保存（每轮注入 system）' : '会话常驻设定已清空' }));
+        { res.end(JSON.stringify({ ok: true, saved: !!n, note: n ? '会话常驻设定已保存（每轮注入 system）' : '会话常驻设定已清空' })); return true; };
+      } catch (e) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ error: String(e) })); return true; };
       }
-      // 旧接口兼容：字符串 note → 视为「其他」槽（读取时按迁移逻辑归位）；与 slots 路径一致截断 4000
-      const n = String(note || '').trim().slice(0, 4000);
-      if (n) State.opState.notes[cid] = n; else delete State.opState.notes[cid];
-      saveOpState();
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: true, saved: !!n, note: n ? '会话常驻设定已保存（每轮注入 system）' : '会话常驻设定已清空' }));
-    } catch (e) {
-      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ error: String(e) }));
     }
-  }
+  return false;
+}
 
+async function h_api_op_inject_56(req, res, url, p) {
   // 界面操作：自定义注入槽（⚙️ 前缀 / 后缀，按会话，随 system 注入）
-  if (p === '/api/op/inject' && req.method === 'GET') {
-    const inj = customInjections(url.searchParams.get('chatId') || '');
-    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ ok: true, ...inj }));
-  }
+    if (p === '/api/op/inject' && req.method === 'GET') {
+      const inj = customInjections(url.searchParams.get('chatId') || '');
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      { res.end(JSON.stringify({ ok: true, ...inj })); return true; };
+    }
+  return false;
+}
+
+async function h_api_op_inject_57(req, res, url, p) {
   if (p === '/api/op/inject' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { chatId, prefix, suffix } = JSON.parse(body);
-      const cid = sanitizeId(chatId || '');
-      const cur = customInjections(chatId || '');
-      const next = {
-        prefix: String(prefix != null ? prefix : cur.prefix).trim().slice(0, 2000),
-        suffix: String(suffix != null ? suffix : cur.suffix).trim().slice(0, 2000),
-      };
-      if (!State.opState.customInjections) State.opState.customInjections = {};
-      if (next.prefix || next.suffix) State.opState.customInjections[cid] = next;
-      else delete State.opState.customInjections[cid];
-      saveOpState();
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: true, note: next.prefix || next.suffix ? '自定义注入已保存（前缀/后缀随 system 注入，下一轮生效）' : '自定义注入已清空' }));
-    } catch (e) {
-      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ error: String(e) }));
-    }
-  }
-
-  // 情绪追踪：查看（按会话聚合） / 设置 / 清除
-  if (p === '/api/emotions' && req.method === 'GET') {
-    const emo = buildEmotions(sanitizeId(url.searchParams.get('chatId') || ''));
-    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ emotions: emo }));
-  }
-  if (p === '/api/op/emotion' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { chatId, name, emotion } = JSON.parse(body);
-      const cid = sanitizeId(chatId || '');
-      const nm = String(name || '').trim().slice(0, 20);
-      if (!nm) throw new Error('缺少角色名');
-      setEmotion(cid, nm, String(emotion || '').trim().slice(0, 120));
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      const cur = buildEmotions(cid);
-      return res.end(JSON.stringify({ ok: true, emotions: cur, note: emotion && String(emotion).trim() ? `已记录 ${nm} 的情绪（已记账，可导出回合记录）` : `已清除 ${nm} 的情绪记录` }));
-    } catch (e) {
-      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ error: String(e) }));
-    }
-  }
-
-  // 历史消息检索（本地关键词，零 API）
-  if (p === '/api/history/search' && req.method === 'GET') return handleHistorySearch(url, res);
-
-  // 会话统计：当前模型 + 全部合计 + 每日费用（Task6）
-  if (p === '/api/stats' && req.method === 'GET') {
-    const cur = summarize(stats.byModel[State.endpoint.model] || emptyBucket());
-    const total = Object.values(stats.byModel).reduce((acc, b) => {
-      acc.turns += b.turns; acc.calls += b.calls; acc.llmMs += b.llmMs;
-      acc.firstTokenSum += b.firstTokenSum; acc.firstTokenN += b.firstTokenN;
-      acc.tokensIn += b.tokensIn; acc.tokensOut += b.tokensOut;
-      acc.cacheRead += b.cacheRead; acc.cacheMiss += b.cacheMiss;
-      return acc;
-    }, emptyBucket());
-    const t = summarize(total);
-    // 每日费用统计（按调用完成日期分桶；价目 PRICE_TABLE，仅估算非账单）
-    const daily = Object.entries(stats.daily || {}).map(([date, d]) => {
-      let cost = 0;
-      const models = [];
-      for (const [m, mb] of Object.entries(d.models || {})) {
-        const c = estimateCost(mb, m);
-        cost += c;
-        models.push({ model: m, calls: mb.calls, tokensIn: mb.tokensIn, tokensOut: mb.tokensOut, cacheRead: mb.cacheRead, cacheMiss: mb.cacheMiss, cost: Math.round(c * 10000) / 10000 });
+      let body = await readBody(req);
+      try {
+        const { chatId, prefix, suffix } = JSON.parse(body);
+        const cid = sanitizeId(chatId || '');
+        const cur = customInjections(chatId || '');
+        const next = {
+          prefix: String(prefix != null ? prefix : cur.prefix).trim().slice(0, 2000),
+          suffix: String(suffix != null ? suffix : cur.suffix).trim().slice(0, 2000),
+        };
+        if (!State.opState.customInjections) State.opState.customInjections = {};
+        if (next.prefix || next.suffix) State.opState.customInjections[cid] = next;
+        else delete State.opState.customInjections[cid];
+        saveOpState();
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ ok: true, note: next.prefix || next.suffix ? '自定义注入已保存（前缀/后缀随 system 注入，下一轮生效）' : '自定义注入已清空' })); return true; };
+      } catch (e) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ error: String(e) })); return true; };
       }
-      models.sort((a, b) => b.cost - a.cost);
-      return { date, calls: d.calls, tokensIn: d.tokensIn, tokensOut: d.tokensOut, cacheRead: d.cacheRead, cacheMiss: d.cacheMiss, cost: Math.round(cost * 10000) / 10000, models };
-    }).sort((a, b) => a.date.localeCompare(b.date)).slice(-30);
-    const currentCost = Math.round(estimateCost(stats.byModel[State.endpoint.model] || emptyBucket(), State.endpoint.model) * 10000) / 10000;
-    const totalCost = Math.round(Object.entries(stats.byModel).reduce((a, [m, b]) => a + estimateCost(b, m), 0) * 10000) / 10000;
-    // 本对话统计（?chatId= 指定会话的完整桶；累计口径见 current/total）
-    const qcid = (url.searchParams.get('chatId') || '').trim();
-    const cb = qcid ? (stats.byChat[sanitizeId(qcid)] || null) : null;
-    const chat = cb ? summarize(cb) : null;
-    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ model: State.endpoint.model, current: cur, total: t, chat, daily, currentCost, totalCost }));
-  }
+    }
+  return false;
+}
 
-  // 剧情记忆：时间线 / 物品栏 / 导出（按会话 chatId 隔离）
+async function h_api_emotions_58(req, res, url, p) {
+  // 情绪追踪：查看（按会话聚合） / 设置 / 清除
+    if (p === '/api/emotions' && req.method === 'GET') {
+      const emo = buildEmotions(sanitizeId(url.searchParams.get('chatId') || ''));
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      { res.end(JSON.stringify({ emotions: emo })); return true; };
+    }
+  return false;
+}
+
+async function h_api_op_emotion_59(req, res, url, p) {
+  if (p === '/api/op/emotion' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { chatId, name, emotion } = JSON.parse(body);
+        const cid = sanitizeId(chatId || '');
+        const nm = String(name || '').trim().slice(0, 20);
+        if (!nm) throw new Error('缺少角色名');
+        setEmotion(cid, nm, String(emotion || '').trim().slice(0, 120));
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        const cur = buildEmotions(cid);
+        { res.end(JSON.stringify({ ok: true, emotions: cur, note: emotion && String(emotion).trim() ? `已记录 ${nm} 的情绪（已记账，可导出回合记录）` : `已清除 ${nm} 的情绪记录` })); return true; };
+      } catch (e) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ error: String(e) })); return true; };
+      }
+    }
+  return false;
+}
+
+async function h_api_history_search_60(req, res, url, p) {
+  // 历史消息检索（本地关键词，零 API）
+    if (p === '/api/history/search' && req.method === 'GET') { handleHistorySearch(url, res); return true; };
+  return false;
+}
+
+async function h_api_stats_61(req, res, url, p) {
+  // 会话统计：当前模型 + 全部合计 + 每日费用（Task6）
+    if (p === '/api/stats' && req.method === 'GET') {
+      const cur = summarize(stats.byModel[State.endpoint.model] || emptyBucket());
+      const total = Object.values(stats.byModel).reduce((acc, b) => {
+        acc.turns += b.turns; acc.calls += b.calls; acc.llmMs += b.llmMs;
+        acc.firstTokenSum += b.firstTokenSum; acc.firstTokenN += b.firstTokenN;
+        acc.tokensIn += b.tokensIn; acc.tokensOut += b.tokensOut;
+        acc.cacheRead += b.cacheRead; acc.cacheMiss += b.cacheMiss;
+        return acc;
+      }, emptyBucket());
+      const t = summarize(total);
+      // 每日费用统计（按调用完成日期分桶；价目 PRICE_TABLE，仅估算非账单）
+      const daily = Object.entries(stats.daily || {}).map(([date, d]) => {
+        let cost = 0;
+        const models = [];
+        for (const [m, mb] of Object.entries(d.models || {})) {
+          const c = estimateCost(mb, m);
+          cost += c;
+          models.push({ model: m, calls: mb.calls, tokensIn: mb.tokensIn, tokensOut: mb.tokensOut, cacheRead: mb.cacheRead, cacheMiss: mb.cacheMiss, cost: Math.round(c * 10000) / 10000 });
+        }
+        models.sort((a, b) => b.cost - a.cost);
+        return { date, calls: d.calls, tokensIn: d.tokensIn, tokensOut: d.tokensOut, cacheRead: d.cacheRead, cacheMiss: d.cacheMiss, cost: Math.round(cost * 10000) / 10000, models };
+      }).sort((a, b) => a.date.localeCompare(b.date)).slice(-30);
+      const currentCost = Math.round(estimateCost(stats.byModel[State.endpoint.model] || emptyBucket(), State.endpoint.model) * 10000) / 10000;
+      const totalCost = Math.round(Object.entries(stats.byModel).reduce((a, [m, b]) => a + estimateCost(b, m), 0) * 10000) / 10000;
+      // 本对话统计（?chatId= 指定会话的完整桶；累计口径见 current/total）
+      const qcid = (url.searchParams.get('chatId') || '').trim();
+      const cb = qcid ? (stats.byChat[sanitizeId(qcid)] || null) : null;
+      const chat = cb ? summarize(cb) : null;
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      { res.end(JSON.stringify({ model: State.endpoint.model, current: cur, total: t, chat, daily, currentCost, totalCost })); return true; };
+    }
+  return false;
+}
+
+async function h_api_timeline_62(req, res, url, p) {
   const chatIdOf = () => sanitizeId(url.searchParams.get('chatId') || '');
   if (p === '/api/timeline' && req.method === 'GET') {
-    const limit = Math.min(Number(url.searchParams.get('limit') || 20), 100);
-    const allTurns = readTurns(chatIdOf());
-    const turns = allTurns.slice(-limit).reverse();
-    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ turns, total: allTurns.length }));
-  }
+      const limit = Math.min(Number(url.searchParams.get('limit') || 20), 100);
+      const allTurns = readTurns(chatIdOf());
+      const turns = allTurns.slice(-limit).reverse();
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      { res.end(JSON.stringify({ turns, total: allTurns.length })); return true; };
+    }
+  return false;
+}
+
+async function h_api_prompt_latest_63(req, res, url, p) {
   // 调试：查看最近提示词（最近一次 + 本会话历史记录）
-  if (p === '/api/prompt/latest' && req.method === 'GET') {
-    const cid = sanitizeId(url.searchParams.get('chatId') || '');
-    const history = [];
-    try {
-      const file = path.join(PROMPT_DIR, `${cid}.jsonl`);
-      if (fs.existsSync(file)) {
-        for (const l of fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).slice(-10)) {
-          try { history.push(JSON.parse(l)); } catch (e) { /* 忽略 */ }
-        }
-      }
-    } catch (e) { /* 忽略 */ }
-    const latest = State.lastPrompt.chatId === cid ? lastPrompt : (history[history.length - 1] || null);
-    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ latest, history: history.reverse() }));
-  }
-
-  // 手动补记一条回合（界面编辑）
-  if (p === '/api/timeline/manual' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { chatId, story_time, location, atmosphere, characters, costume, event } = JSON.parse(body);
-      const rec = await appendManualTurn(sanitizeId(chatId || ''), { story_time, location, atmosphere, characters, costume, event });
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify(rec ? { ok: true, rec } : { ok: false, error: '写入失败' }));
-    } catch (e) {
-      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ error: String(e) }));
-    }
-  }
-  // 修改单条回合记录（界面编辑，按 id 重写；保留物品/情绪等附属字段）
-  if (p === '/api/timeline/update' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { chatId, id, story_time, location, atmosphere, characters, costume, event } = JSON.parse(body);
-      if (!id) throw new Error('缺少记录 id');
-      const rec = await updateTurnRecord(sanitizeId(chatId || ''), String(id), { story_time, location, atmosphere, characters, costume, event });
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify(rec ? { ok: true, rec } : { ok: false, error: '未找到该记录' }));
-    } catch (e) {
-      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ error: String(e) }));
-    }
-  }
-  // 在指定条目之后插入一条回合记录（界面「＋ 插」补充；afterId 为空/未找到 → 追加末尾）
-  if (p === '/api/timeline/insert' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { chatId, afterId, story_time, location, atmosphere, characters, costume, event } = JSON.parse(body);
-      const rec = await insertTurnRecord(sanitizeId(chatId || ''), String(afterId || ''), { story_time, location, atmosphere, characters, costume, event });
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify(rec ? { ok: true, rec } : { ok: false, error: '写入失败' }));
-    } catch (e) {
-      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ error: String(e) }));
-    }
-  }
-  // 删除单条回合记录
-  if (p === '/api/timeline/delete' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { chatId, id } = JSON.parse(body);
-      const ok = await deleteTurnRecord(sanitizeId(chatId || ''), String(id || ''));
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify(ok ? { ok: true, note: '已删除该条记录' } : { ok: false, error: '未找到该记录' }));
-    } catch (e) {
-      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ error: String(e) }));
-    }
-  }
-  // AI 智能补记：把用户一句话（可选）结合最近对话整理成规范时间线字段（走辅助 API 串行队列）
-  if (p === '/api/timeline/ai-fill' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { chatId, hint } = JSON.parse(body);
-      const cid = sanitizeId(chatId || '');
-      // 参考最近对话（当前会话最后 6 条；清洗 base64 图片）
-      let recent = [];
+    if (p === '/api/prompt/latest' && req.method === 'GET') {
+      const cid = sanitizeId(url.searchParams.get('chatId') || '');
+      const history = [];
       try {
-        const c = JSON.parse(fs.readFileSync(path.join(CHATS_DIR, `${cid}.json`), 'utf8'));
-        recent = (c.messages || []).slice(-6).map((m) => `${m.role === 'user' ? '用户' : 'AI'}: ${String(m.content || '').replace(/!\[[^\]]*\]\((data:image\/[^)]+)\)/g, '[图片]').replace(/\s+/g, ' ').slice(0, 300)}`).filter((s) => s.length > 4);
-      } catch (e) { /* 无对话文件 */ }
-      const userText = [
-        hint ? `用户描述：${hint}` : '（用户未提供描述，请从最近对话中提取当前场景）',
-        recent.length ? `\n\n最近对话（参考）：\n${recent.join('\n')}` : '',
-      ].join('');
-      const sys = '你是多角色 RP 的回合记录整理助手。根据用户描述和最近对话，输出一条规范的时间线补记记录，只输出纯 JSON（禁止 markdown 代码块、禁止多余文字）：{"story_time":"时间","location":"地点","characters":["在场角色"],"costume":"角色：着装描述","atmosphere":"氛围","event":"事件一句话（≤100字）","items_gain":[{"name":"物品名","holder":"持有者"}],"items_loss":["物品名"],"emotion":{"角色名":"情绪"},"location_detail":"分组| 地点名：2-4句描写"}。字段没有就填空字符串/空数组/空对象；characters 不确定留空数组；items_gain/items_loss 仅当对话中出现物品获得/消耗时填；emotion 仅当角色情绪明确时填；costume 仅当对话明确描述着装时填（格式「角色名：着装」）；location_detail 仅当出现新地点时填（格式「分组名| 地点名：描写」）；时间有明确日期用对话日期，否则给大概时段。';
-      const text = await auxCall(sys, userText, 800, { thinking: { type: 'disabled' } });
-      const cleaned = String(text || '').replace(/```json/gi, '').replace(/```/g, '').trim();
-      const first = cleaned.indexOf('{');
-      const last = cleaned.lastIndexOf('}');
-      let fields = null;
-      try {
-        fields = first >= 0 && last > first ? JSON.parse(cleaned.slice(first, last + 1)) : null;
-      } catch (e2) {
-        console.error('[ai-fill] JSON 解析失败:', e2.message);
-        fields = null;
-      }
-      if (!fields) {
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ ok: false, error: 'AI 未返回有效 JSON，请重试或手动填写' }));
-      }
-      const nf = normalizeTurnFields({
-        story_time: fields.story_time,
-        location: fields.location,
-        atmosphere: fields.atmosphere,
-        characters: Array.isArray(fields.characters) ? fields.characters.join('、') : fields.characters,
-        costume: fields.costume,
-        event: fields.event,
-        items_gain: fields.items_gain,
-        items_loss: fields.items_loss,
-        emotion: fields.emotion,
-        location_detail: fields.location_detail,
-      });
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: true, fields: nf }));
-    } catch (e) {
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: false, error: 'AI 补全失败: ' + String(e.message || e).slice(0, 120) }));
-    }
-  }
-  // 按消息序号清理回合记录（重roll：mode=gte 删 seq>=n；删单条消息：mode=eq 删 seq==n）
-  if (p === '/api/timeline/truncate' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { chatId, seq, mode } = JSON.parse(body);
-      const n = Number(seq);
-      if (!Number.isFinite(n) || n <= 0) throw new Error('缺少有效 seq');
-      const removed = await truncateTurnsBySeq(sanitizeId(chatId || ''), n, mode === 'eq' ? 'eq' : 'gte');
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: true, removed, note: `已清理 ${removed} 条回合记录` }));
-    } catch (e) {
-      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ error: String(e) }));
-    }
-  }
-  if (p === '/api/inventory' && req.method === 'GET') {
-    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify(buildInventory(chatIdOf())));
-  }
-  // 手动添加 / 消耗物品（界面编辑，记账）
-  if (p === '/api/inventory/manual' && req.method === 'POST') {
-    let body = await readBody(req);
-    try {
-      const { chatId, action, name, holder } = JSON.parse(body);
-      const cid = sanitizeId(chatId || '');
-      const nm = String(name || '').trim().slice(0, 40);
-      const act = action === 'loss' ? 'loss' : 'gain';
-      if (!nm) throw new Error('缺少物品名');
-      appendItemRecord(cid, act, nm, String(holder || '').trim().slice(0, 20));
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: true, note: act === 'gain' ? `已添加物品：${nm}` : `已消耗/移除物品：${nm}` }));
-    } catch (e) {
-      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ error: String(e) }));
-    }
-  }
-  // 当前着装聚合（界面显示 + 可改：改动走 /api/op/wardrobe）
-  if (p === '/api/wardrobe/current' && req.method === 'GET') {
-    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ wardrobes: buildCurrentWardrobe(chatIdOf()) }));
-  }
-  if (p === '/api/timeline/export' && req.method === 'GET') {
-    const turns = readTurns(chatIdOf());
-    const lines = [];
-    lines.push(`# 回合记录导出（${new Date().toISOString().slice(0, 10)}）`);
-    lines.push('> 供自行归档 / 二次创作；本应用不写任何外部文件。');
-    lines.push('');
-    for (const t of turns) {
-      lines.push(`### 【${t.story_time || '时间未记'} · ${t.location || '地点未记'} · 已发生】`);
-      if (t.characters.length) lines.push(`- 在场：${t.characters.join('、')}`);
-      if (t.costume && t.costume !== '同上') lines.push(`- 着装：${t.costume}`);
-      if (t.atmosphere) lines.push(`- 氛围：${t.atmosphere}`);
-      if (t.event) lines.push(`- 事件：${t.event}`);
-      if (t.emotion) {
-        for (const [en, ev] of Object.entries(t.emotion)) lines.push(`- 情绪：${en} = ${ev}`);
-      }
-      for (const g of t.items_gain) lines.push(`- 物品获得：${g.name}${g.holder ? ` = ${g.holder}` : ''}`);
-      for (const n of t.items_loss) lines.push(`- 物品消耗/丢失：${n}`);
-      for (const u of t.updates) lines.push(`- 【更新】${u.entry}：${u.content}`);
-      lines.push('');
-    }
-    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
-    return res.end(lines.join('\n'));
-  }
-
-  if (p === '/api/chat' && req.method === 'POST') {
-    const OPENING_PIN_MIN_CHARS = 300;   // 首条消息保底注入 system 的最小长度（开局注入/长提示词；短问候不 pin）
-    let body = await readBody(req);
-    let payload;
-    try { payload = JSON.parse(body); } catch (e) {
-      res.writeHead(400); return res.end('bad json');
-    }
-    if (!State.endpoint.apiKey) {
-      res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
-      return res.end('未找到 API Key（请在 header「API」设置里配置）');
-    }
-    // 规范化历史：Anthropic 要求 user/assistant 交替、首条为 user
-    // 开局提示词保底（2026-08-20）：首条 user 消息若为长文本（≥300 字，如开局注入/长提示词），
-    // 移入 system 常驻、不参与历史截断——长对话后设定仍在；历史上限 300 条（v4 1M 窗口，预算由 maxContext 兜底）
-    const rawHistory = (payload.messages || []).filter((m) => m.role === 'user' || m.role === 'assistant');
-    const firstMsg = rawHistory[0] || null;
-    const pinFirst = !!(firstMsg && firstMsg.role === 'user' && String(firstMsg.content || '').trim().length >= OPENING_PIN_MIN_CHARS);
-    const history = rawHistory.slice(pinFirst ? 1 : 0).slice(-300);
-    let merged = [];
-    for (const m of history) {
-      const last = merged[merged.length - 1];
-      if (last && last.role === m.role) last.content += '\n' + m.content;
-      else merged.push({ role: m.role, content: m.content });
-    }
-    if (!merged.length || merged[0].role !== 'user') merged.unshift({ role: 'user', content: '（开场）' });
-
-    // system：世界设定（用户自填：世界/角色卡/规则 三段）+ 界面操作覆盖 + 当前情绪
-    let system = buildSystemPrompt({
-      world: payload.worldSetting || '',
-      chars: payload.charsSetting || '',
-      rules: payload.rulesSetting || '',
-      extra: payload.extra || '',
-    }, payload.chatId || '');
-    const op = opInject(payload.chatId || '');
-    if (op) system += '\n\n---\n\n' + op;
-    const emo = emotionInject(payload.chatId || '');
-    if (emo) system += '\n\n---\n\n' + emo;
-    // 剧情记忆注入（场景、角色、关系）
-    const storyMemory = buildStoryMemory(payload.chatId || '');
-    if (storyMemory) system += '\n\n---\n\n' + storyMemory;
-    // 开局提示词保底：首条长消息原文注入 system（每轮都在，不参与 maxContext 裁剪/自动压缩）
-    if (pinFirst) {
-      system += '\n\n---\n\n## 会话开局提示词（首条消息原文，每轮保底注入；与「会话常驻设定」冲突时以常驻设定为准）\n' + String(firstMsg.content).trim();
-    }
-    // 调试：记录本轮 system prompt（落盘 data/prompts/）
-    await recordPrompt(payload.chatId || '', system, merged.length);
-
-    // 上下文预算裁剪：system + 历史 ≤ maxContext（0 = 不裁剪）；从最旧消息开始丢弃，至少保留 1 条
-    if (State.endpoint.maxContext && State.endpoint.maxContext > 0) {
-      const est = (s) => Math.ceil((s || '').length * 0.67);   // 中文为主近似 token
-      const sysTok = est(system);
-      let kept = merged.slice();
-      while (kept.length > 1 && (sysTok + kept.reduce((a, m) => a + est(m.content), 0)) > State.endpoint.maxContext) {
-        kept.shift();
-      }
-      if (!kept.length || kept[0].role !== 'user') kept.unshift({ role: 'user', content: '（开场）' });
-      merged = kept;
-    }
-
-    // 自动压缩总结：历史过长 → 最旧部分压缩为摘要（缓存，不重复调用）
-    let summaryNote = null;
-    if (State.endpoint.autoSummary !== false && merged.length > 6) {
-      const histChars = merged.reduce((a, m) => a + (m.content || '').length, 0);
-      const threshold = State.endpoint.autoSummaryThreshold || 12000;
-      if (histChars > threshold) {
-        const compressCount = Math.max(2, Math.floor(merged.length / 2));   // 压缩最旧一半
-        const oldPart = merged.slice(0, compressCount);
-        const sumDir = path.join(DATA_DIR, 'summaries');
-        const sumFile = path.join(sumDir, `${sanitizeId(payload.chatId)}.json`);
-        let cached = null;
-        try { cached = JSON.parse(fs.readFileSync(sumFile, 'utf8')); } catch (e) { /* 无缓存 */ }
-        if (cached && cached.summary && cached.count >= compressCount) {
-          merged = [{ role: 'user', content: `【历史摘要（${cached.count} 条旧消息）】\n${cached.summary}` }, ...merged.slice(compressCount)];
-          summaryNote = `已自动压缩 ${compressCount} 条旧消息（缓存摘要）`;
-        } else {
-          try {
-            const summary = await summarizeOldMessages(oldPart);
-            merged = [{ role: 'user', content: `【历史摘要（${compressCount} 条旧消息）】\n${summary}` }, ...merged.slice(compressCount)];
-            fs.mkdirSync(sumDir, { recursive: true });
-            fs.writeFileSync(sumFile, JSON.stringify({ summary, count: compressCount, at: new Date().toISOString() }), 'utf8');
-            summaryNote = `已自动压缩 ${compressCount} 条旧消息`;
-          } catch (e) { /* 摘要失败则跳过，保持原样 */ }
-        }
-        // 摘要后保证 user/assistant 交替
-        const merged2 = [];
-        for (const m of merged) {
-          const last = merged2[merged2.length - 1];
-          if (last && last.role === m.role) last.content += '\n' + m.content;
-          else merged2.push({ ...m });
-        }
-        merged = merged2;
-        if (!merged.length || merged[0].role !== 'user') merged.unshift({ role: 'user', content: '（开场）' });
-      }
-    }
-
-    res.writeHead(200, {
-      'content-type': 'text/event-stream; charset=utf-8',
-      'cache-control': 'no-cache',
-      connection: 'keep-alive',
-    });
-    let finished = false;
-    let abortedByClient = false;
-    const llmAbort = new AbortController();
-    // 客户端断连（关页面/刷新/切会话）→ 立即中止 LLM 请求，不再烧 token
-    res.on('close', () => { finished = true; abortedByClient = true; llmAbort.abort(); });
-    // SSE 心跳（Task8）：15s 无事件时发 ping 保活连接，防代理/防火墙/浏览器超时掐断流
-    const pingInterval = setInterval(() => {
-      if (!finished) res.write('data: {"type":"ping"}\n\n');
-    }, 15000);
-    let acc = '';
-    let firstTokenAt = 0;
-    const t0 = Date.now();
-    const meta = {};
-    const send = (obj) => { if (!finished) res.write(`data: ${JSON.stringify(obj)}\n\n`); };
-    if (summaryNote) send({ type: 'summarized', note: summaryNote });
-    // 工具桥：联网搜索（独立开关，会话内持久）
-    let toolTrace = null;
-    const enabledNames = toolsEnabled(payload.chatId);
-    if (enabledNames.length) {
-      try {
-        const lastU = merged[merged.length - 1];
-        const direct = (lastU && lastU.role === 'user' ? await bridgeDirectTool(lastU.content) : []).filter((d) => enabledNames.includes(d.name));
-        if (direct.length) {
-          const parts2 = [];
-          for (const d of direct) {
-            const out = await executeBridgeTool(d.name, d.input);
-            parts2.push('[工具 ' + d.name + ']\n' + out);
-            toolTrace = [...(toolTrace || []), { name: d.name, input: d.input, resultHead: out.slice(0, 120) }];
+        const file = path.join(PROMPT_DIR, `${cid}.jsonl`);
+        if (fs.existsSync(file)) {
+          for (const l of fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).slice(-10)) {
+            try { history.push(JSON.parse(l)); } catch (e) { /* 忽略 */ }
           }
-          merged = merged.slice(0, -1).concat([{ role: 'user', content: lastU.content + '\n\n【工具结果】\n' + parts2.join('\n\n') }]);
-          send({ type: 'tools', trace: toolTrace.map((t) => t.name + '(' + JSON.stringify(t.input).slice(0, 60) + ')') });
-        } else {
-          const tr = await runBridgeToolLoop(merged, system, enabledNames);
-          merged = tr.messages;
-          toolTrace = tr.trace;
-          if (toolTrace && toolTrace.length) send({ type: 'tools', trace: toolTrace.map((t) => t.name + '(' + JSON.stringify(t.input).slice(0, 60) + ')') });
         }
-      } catch (e) { console.error('[bridge] 工具回合失败:', e.message); }
+      } catch (e) { /* 忽略 */ }
+      const latest = State.lastPrompt.chatId === cid ? lastPrompt : (history[history.length - 1] || null);
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      { res.end(JSON.stringify({ latest, history: history.reverse() })); return true; };
     }
-    // 图片处理（M7 升级：视觉模型 → 图片以多模态格式进 LLM；非视觉模型 → 降级占位符）
-    // 视觉模型判定：模型名含 vision（如 deepseek-v4-flash-vision-exp）
-    const isVision = /vision/i.test(State.endpoint.model || '');
-    const IMG_RE = /!\[[^\]]*\]\((data:image\/([a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=]+))\)/g;
-    merged = merged.map((m) => {
-      const text = String(m.content || '');
-      if (!isVision) return { ...m, content: text.replace(IMG_RE, '[图片]') };
-      // 视觉模型：单条消息内图文混合 → content 数组（openai 格式）；anthropic 走 messages 转换
-      if (!IMG_RE.test(text)) return m;
-      IMG_RE.lastIndex = 0;
-      const parts = [];
-      let last = 0, mm;
-      while ((mm = IMG_RE.exec(text)) !== null) {
-        if (mm.index > last) parts.push({ type: 'text', text: text.slice(last, mm.index) });
-        parts.push({ type: 'image_url', image_url: { url: mm[1] } });
-        last = mm.index + mm[0].length;
-      }
-      if (last < text.length) parts.push({ type: 'text', text: text.slice(last) });
-      // 仅当整条消息恰为单段文本时才折叠为字符串；含图一律保留数组（单图无文字时 parts=[image_url]，不能取 .text）
-      return parts.length === 1 && parts[0].type === 'text' ? parts[0].text : parts;
-    });
-    try {
-      await callLLM(merged, system, (text) => {
-        if (!firstTokenAt) firstTokenAt = Date.now();
-        acc += text;
-        send({ type: 'delta', text });
-      }, (m) => Object.assign(meta, m), (t) => send({ type: 'thinking', text: t }), llmAbort.signal);
-      // 会话统计（按当前模型分桶）
-      const b = bucket(State.endpoint.model);
-      b.turns += 1;
-      b.calls += 1;
-      b.llmMs += Date.now() - t0;
-      if (firstTokenAt) { b.firstTokenSum += firstTokenAt - t0; b.firstTokenN += 1; }
-      const uIn = meta.usageIn || {};
-      const uOut = meta.usageOut || {};
-      const inTok = uIn.input_tokens || uIn.prompt_tokens || 0;
-      const cacheRead = uIn.cache_read_input_tokens || uIn.prompt_cache_hit_tokens || 0;
-      // 注意：input_tokens/prompt_tokens 已包含缓存读写与缓存创建部分（DeepSeek/Anthropic 同），
-      // 不再叠加 cacheRead/cacheCreate，否则费用与命中率被系统性高估/压低
-      b.tokensIn += inTok;
-      b.tokensOut += uOut.output_tokens || uOut.completion_tokens || 0;
-      b.cacheRead += cacheRead;
-      b.cacheMiss += Math.max(0, inTok - cacheRead);
-      // 每日费用记账（Task6）：按调用完成日期分桶（含分模型明细），供 /api/stats 每日费用仪表盘
-      const nowD = new Date();
-      const dk = `${nowD.getFullYear()}-${String(nowD.getMonth() + 1).padStart(2, '0')}-${String(nowD.getDate()).padStart(2, '0')}`;   // 本地日期（避免 UTC 跨日错记）
-      if (!stats.daily) stats.daily = {};
-      const dd = stats.daily[dk] = stats.daily[dk] || { calls: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheMiss: 0, models: {} };
-      dd.calls += 1;
-      dd.tokensIn += inTok;
-      dd.tokensOut += uOut.output_tokens || uOut.completion_tokens || 0;
-      dd.cacheRead += cacheRead;
-      dd.cacheMiss += Math.max(0, inTok - cacheRead);
-      const dm = dd.models[State.endpoint.model] = dd.models[State.endpoint.model] || { calls: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheMiss: 0 };
-      dm.calls += 1;
-      dm.tokensIn += inTok;
-      dm.tokensOut += uOut.output_tokens || uOut.completion_tokens || 0;
-      dm.cacheRead += cacheRead;
-      dm.cacheMiss += Math.max(0, inTok - cacheRead);
-      // 本对话统计另计（完整桶；累计口径在 /api/stats 的 current/total 汇总）
-      const cid = payload.chatId ? sanitizeId(payload.chatId) : '';
-      if (cid) {
-        let cb = stats.byChat[cid];
-        if (!cb || cb.turns == null) cb = stats.byChat[cid] = Object.assign(emptyBucket(), cb || {});
-        cb.turns += 1;
-        cb.calls += 1;
-        cb.llmMs += Date.now() - t0;
-        if (firstTokenAt) { cb.firstTokenSum += firstTokenAt - t0; cb.firstTokenN += 1; }
-        cb.tokensIn += inTok;
-        cb.tokensOut += uOut.output_tokens || uOut.completion_tokens || 0;
-        cb.cacheRead += cacheRead;
-        cb.cacheMiss += Math.max(0, inTok - cacheRead);
-      }
-      await saveStats();
-      // seq 校验：仅接受正整数，防客户端伪造污染回合记录
-      const seqNum = Number(payload.seq);
-      await appendTurnRecord(acc, payload.chatId, Number.isFinite(seqNum) && seqNum > 0 ? seqNum : undefined);  // 剧情记忆：按会话自动记账（带消息序号）
-      if (toolTrace && toolTrace.length) appendOpRecord(payload.chatId, '工具调用', toolTrace.map((t) => t.name + ':' + String(t.input.query || '').slice(0, 40)).join('；'));
-      send({ type: 'done' });
-    } catch (e) {
-      if (abortedByClient || llmAbort.signal.aborted) {
-        // 客户端断连中止：静默收尾（不追加回合记录、不发 error）
-      } else {
-        // 详细错误只打日志；回传精简文案，防端点错误体回显敏感信息（L4）
-        console.error('[chat] LLM 调用失败:', e && e.message || e);
-        const brief = String((e && e.message) || e).slice(0, 120);
-        send({ type: 'error', error: brief.includes('401') || brief.includes('403') || brief.includes('429') || brief.includes('超时') || brief.includes('timeout') ? brief : 'LLM 调用失败，详见服务器日志' });
-      }
-    } finally {
-      clearInterval(pingInterval);   // 心跳随会话结束停止（Task8）
-      finished = true;
-      res.end();
-    }
-    return;
-  }
+  return false;
+}
 
+async function h_api_timeline_manual_64(req, res, url, p) {
+  // 手动补记一条回合（界面编辑）
+    if (p === '/api/timeline/manual' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { chatId, story_time, location, atmosphere, characters, costume, event } = JSON.parse(body);
+        const rec = await appendManualTurn(sanitizeId(chatId || ''), { story_time, location, atmosphere, characters, costume, event });
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify(rec ? { ok: true, rec } : { ok: false, error: '写入失败' })); return true; };
+      } catch (e) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ error: String(e) })); return true; };
+      }
+    }
+  return false;
+}
+
+async function h_api_timeline_update_65(req, res, url, p) {
+  // 修改单条回合记录（界面编辑，按 id 重写；保留物品/情绪等附属字段）
+    if (p === '/api/timeline/update' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { chatId, id, story_time, location, atmosphere, characters, costume, event } = JSON.parse(body);
+        if (!id) throw new Error('缺少记录 id');
+        const rec = await updateTurnRecord(sanitizeId(chatId || ''), String(id), { story_time, location, atmosphere, characters, costume, event });
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify(rec ? { ok: true, rec } : { ok: false, error: '未找到该记录' })); return true; };
+      } catch (e) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ error: String(e) })); return true; };
+      }
+    }
+  return false;
+}
+
+async function h_api_timeline_insert_66(req, res, url, p) {
+  // 在指定条目之后插入一条回合记录（界面「＋ 插」补充；afterId 为空/未找到 → 追加末尾）
+    if (p === '/api/timeline/insert' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { chatId, afterId, story_time, location, atmosphere, characters, costume, event } = JSON.parse(body);
+        const rec = await insertTurnRecord(sanitizeId(chatId || ''), String(afterId || ''), { story_time, location, atmosphere, characters, costume, event });
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify(rec ? { ok: true, rec } : { ok: false, error: '写入失败' })); return true; };
+      } catch (e) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ error: String(e) })); return true; };
+      }
+    }
+  return false;
+}
+
+async function h_api_timeline_delete_67(req, res, url, p) {
+  // 删除单条回合记录
+    if (p === '/api/timeline/delete' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { chatId, id } = JSON.parse(body);
+        const ok = await deleteTurnRecord(sanitizeId(chatId || ''), String(id || ''));
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify(ok ? { ok: true, note: '已删除该条记录' } : { ok: false, error: '未找到该记录' })); return true; };
+      } catch (e) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ error: String(e) })); return true; };
+      }
+    }
+  return false;
+}
+
+async function h_api_timeline_ai_fill_68(req, res, url, p) {
+  // AI 智能补记：把用户一句话（可选）结合最近对话整理成规范时间线字段（走辅助 API 串行队列）
+    if (p === '/api/timeline/ai-fill' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { chatId, hint } = JSON.parse(body);
+        const cid = sanitizeId(chatId || '');
+        // 参考最近对话（当前会话最后 6 条；清洗 base64 图片）
+        let recent = [];
+        try {
+          const c = JSON.parse(fs.readFileSync(path.join(CHATS_DIR, `${cid}.json`), 'utf8'));
+          recent = (c.messages || []).slice(-6).map((m) => `${m.role === 'user' ? '用户' : 'AI'}: ${String(m.content || '').replace(/!\[[^\]]*\]\((data:image\/[^)]+)\)/g, '[图片]').replace(/\s+/g, ' ').slice(0, 300)}`).filter((s) => s.length > 4);
+        } catch (e) { /* 无对话文件 */ }
+        const userText = [
+          hint ? `用户描述：${hint}` : '（用户未提供描述，请从最近对话中提取当前场景）',
+          recent.length ? `\n\n最近对话（参考）：\n${recent.join('\n')}` : '',
+        ].join('');
+        const sys = '你是多角色 RP 的回合记录整理助手。根据用户描述和最近对话，输出一条规范的时间线补记记录，只输出纯 JSON（禁止 markdown 代码块、禁止多余文字）：{"story_time":"时间","location":"地点","characters":["在场角色"],"costume":"角色：着装描述","atmosphere":"氛围","event":"事件一句话（≤100字）","items_gain":[{"name":"物品名","holder":"持有者"}],"items_loss":["物品名"],"emotion":{"角色名":"情绪"},"location_detail":"分组| 地点名：2-4句描写"}。字段没有就填空字符串/空数组/空对象；characters 不确定留空数组；items_gain/items_loss 仅当对话中出现物品获得/消耗时填；emotion 仅当角色情绪明确时填；costume 仅当对话明确描述着装时填（格式「角色名：着装」）；location_detail 仅当出现新地点时填（格式「分组名| 地点名：描写」）；时间有明确日期用对话日期，否则给大概时段。';
+        const text = await auxCall(sys, userText, 800, { thinking: { type: 'disabled' } });
+        const cleaned = String(text || '').replace(/```json/gi, '').replace(/```/g, '').trim();
+        const first = cleaned.indexOf('{');
+        const last = cleaned.lastIndexOf('}');
+        let fields = null;
+        try {
+          fields = first >= 0 && last > first ? JSON.parse(cleaned.slice(first, last + 1)) : null;
+        } catch (e2) {
+          console.error('[ai-fill] JSON 解析失败:', e2.message);
+          fields = null;
+        }
+        if (!fields) {
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+          { res.end(JSON.stringify({ ok: false, error: 'AI 未返回有效 JSON，请重试或手动填写' })); return true; };
+        }
+        const nf = normalizeTurnFields({
+          story_time: fields.story_time,
+          location: fields.location,
+          atmosphere: fields.atmosphere,
+          characters: Array.isArray(fields.characters) ? fields.characters.join('、') : fields.characters,
+          costume: fields.costume,
+          event: fields.event,
+          items_gain: fields.items_gain,
+          items_loss: fields.items_loss,
+          emotion: fields.emotion,
+          location_detail: fields.location_detail,
+        });
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ ok: true, fields: nf })); return true; };
+      } catch (e) {
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ ok: false, error: 'AI 补全失败: ' + String(e.message || e).slice(0, 120) })); return true; };
+      }
+    }
+  return false;
+}
+
+async function h_api_timeline_truncate_69(req, res, url, p) {
+  // 按消息序号清理回合记录（重roll：mode=gte 删 seq>=n；删单条消息：mode=eq 删 seq==n）
+    if (p === '/api/timeline/truncate' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { chatId, seq, mode } = JSON.parse(body);
+        const n = Number(seq);
+        if (!Number.isFinite(n) || n <= 0) throw new Error('缺少有效 seq');
+        const removed = await truncateTurnsBySeq(sanitizeId(chatId || ''), n, mode === 'eq' ? 'eq' : 'gte');
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ ok: true, removed, note: `已清理 ${removed} 条回合记录` })); return true; };
+      } catch (e) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ error: String(e) })); return true; };
+      }
+    }
+  return false;
+}
+
+async function h_api_inventory_70(req, res, url, p) {
+  const chatIdOf = () => sanitizeId(url.searchParams.get('chatId') || '');
+  if (p === '/api/inventory' && req.method === 'GET') {
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      { res.end(JSON.stringify(buildInventory(chatIdOf()))); return true; };
+    }
+  return false;
+}
+
+async function h_api_inventory_manual_71(req, res, url, p) {
+  // 手动添加 / 消耗物品（界面编辑，记账）
+    if (p === '/api/inventory/manual' && req.method === 'POST') {
+      let body = await readBody(req);
+      try {
+        const { chatId, action, name, holder } = JSON.parse(body);
+        const cid = sanitizeId(chatId || '');
+        const nm = String(name || '').trim().slice(0, 40);
+        const act = action === 'loss' ? 'loss' : 'gain';
+        if (!nm) throw new Error('缺少物品名');
+        appendItemRecord(cid, act, nm, String(holder || '').trim().slice(0, 20));
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ ok: true, note: act === 'gain' ? `已添加物品：${nm}` : `已消耗/移除物品：${nm}` })); return true; };
+      } catch (e) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+        { res.end(JSON.stringify({ error: String(e) })); return true; };
+      }
+    }
+  return false;
+}
+
+async function h_api_wardrobe_current_72(req, res, url, p) {
+  const chatIdOf = () => sanitizeId(url.searchParams.get('chatId') || '');
+  // 当前着装聚合（界面显示 + 可改：改动走 /api/op/wardrobe）
+    if (p === '/api/wardrobe/current' && req.method === 'GET') {
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      { res.end(JSON.stringify({ wardrobes: buildCurrentWardrobe(chatIdOf()) })); return true; };
+    }
+  return false;
+}
+
+async function h_api_timeline_export_73(req, res, url, p) {
+  const chatIdOf = () => sanitizeId(url.searchParams.get('chatId') || '');
+  if (p === '/api/timeline/export' && req.method === 'GET') {
+      const turns = readTurns(chatIdOf());
+      const lines = [];
+      lines.push(`# 回合记录导出（${new Date().toISOString().slice(0, 10)}）`);
+      lines.push('> 供自行归档 / 二次创作；本应用不写任何外部文件。');
+      lines.push('');
+      for (const t of turns) {
+        lines.push(`### 【${t.story_time || '时间未记'} · ${t.location || '地点未记'} · 已发生】`);
+        if (t.characters.length) lines.push(`- 在场：${t.characters.join('、')}`);
+        if (t.costume && t.costume !== '同上') lines.push(`- 着装：${t.costume}`);
+        if (t.atmosphere) lines.push(`- 氛围：${t.atmosphere}`);
+        if (t.event) lines.push(`- 事件：${t.event}`);
+        if (t.emotion) {
+          for (const [en, ev] of Object.entries(t.emotion)) lines.push(`- 情绪：${en} = ${ev}`);
+        }
+        for (const g of t.items_gain) lines.push(`- 物品获得：${g.name}${g.holder ? ` = ${g.holder}` : ''}`);
+        for (const n of t.items_loss) lines.push(`- 物品消耗/丢失：${n}`);
+        for (const u of t.updates) lines.push(`- 【更新】${u.entry}：${u.content}`);
+        lines.push('');
+      }
+      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+      { res.end(lines.join('\n')); return true; };
+    }
+  return false;
+}
+
+async function h_api_chat_74(req, res, url, p) {
+  if (p === '/api/chat' && req.method === 'POST') {
+      const OPENING_PIN_MIN_CHARS = 300;   // 首条消息保底注入 system 的最小长度（开局注入/长提示词；短问候不 pin）
+      let body = await readBody(req);
+      let payload;
+      try { payload = JSON.parse(body); } catch (e) {
+        res.writeHead(400); { res.end('bad json'); return true; };
+      }
+      if (!State.endpoint.apiKey) {
+        res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
+        { res.end('未找到 API Key（请在 header「API」设置里配置）'); return true; };
+      }
+      // 规范化历史：Anthropic 要求 user/assistant 交替、首条为 user
+      // 开局提示词保底（2026-08-20）：首条 user 消息若为长文本（≥300 字，如开局注入/长提示词），
+      // 移入 system 常驻、不参与历史截断——长对话后设定仍在；历史上限 300 条（v4 1M 窗口，预算由 maxContext 兜底）
+      const rawHistory = (payload.messages || []).filter((m) => m.role === 'user' || m.role === 'assistant');
+      const firstMsg = rawHistory[0] || null;
+      const pinFirst = !!(firstMsg && firstMsg.role === 'user' && String(firstMsg.content || '').trim().length >= OPENING_PIN_MIN_CHARS);
+      const history = rawHistory.slice(pinFirst ? 1 : 0).slice(-300);
+      let merged = [];
+      for (const m of history) {
+        const last = merged[merged.length - 1];
+        if (last && last.role === m.role) last.content += '\n' + m.content;
+        else merged.push({ role: m.role, content: m.content });
+      }
+      if (!merged.length || merged[0].role !== 'user') merged.unshift({ role: 'user', content: '（开场）' });
+
+      // system：世界设定（用户自填：世界/角色卡/规则 三段）+ 界面操作覆盖 + 当前情绪
+      let system = buildSystemPrompt({
+        world: payload.worldSetting || '',
+        chars: payload.charsSetting || '',
+        rules: payload.rulesSetting || '',
+        extra: payload.extra || '',
+      }, payload.chatId || '');
+      const op = opInject(payload.chatId || '');
+      if (op) system += '\n\n---\n\n' + op;
+      const emo = emotionInject(payload.chatId || '');
+      if (emo) system += '\n\n---\n\n' + emo;
+      // 剧情记忆注入（场景、角色、关系）
+      const storyMemory = buildStoryMemory(payload.chatId || '');
+      if (storyMemory) system += '\n\n---\n\n' + storyMemory;
+      // 开局提示词保底：首条长消息原文注入 system（每轮都在，不参与 maxContext 裁剪/自动压缩）
+      if (pinFirst) {
+        system += '\n\n---\n\n## 会话开局提示词（首条消息原文，每轮保底注入；与「会话常驻设定」冲突时以常驻设定为准）\n' + String(firstMsg.content).trim();
+      }
+      // 调试：记录本轮 system prompt（落盘 data/prompts/）
+      await recordPrompt(payload.chatId || '', system, merged.length);
+
+      // 上下文预算裁剪：system + 历史 ≤ maxContext（0 = 不裁剪）；从最旧消息开始丢弃，至少保留 1 条
+      if (State.endpoint.maxContext && State.endpoint.maxContext > 0) {
+        const est = (s) => Math.ceil((s || '').length * 0.67);   // 中文为主近似 token
+        const sysTok = est(system);
+        let kept = merged.slice();
+        while (kept.length > 1 && (sysTok + kept.reduce((a, m) => a + est(m.content), 0)) > State.endpoint.maxContext) {
+          kept.shift();
+        }
+        if (!kept.length || kept[0].role !== 'user') kept.unshift({ role: 'user', content: '（开场）' });
+        merged = kept;
+      }
+
+      // 自动压缩总结：历史过长 → 最旧部分压缩为摘要（缓存，不重复调用）
+      let summaryNote = null;
+      if (State.endpoint.autoSummary !== false && merged.length > 6) {
+        const histChars = merged.reduce((a, m) => a + (m.content || '').length, 0);
+        const threshold = State.endpoint.autoSummaryThreshold || 12000;
+        if (histChars > threshold) {
+          const compressCount = Math.max(2, Math.floor(merged.length / 2));   // 压缩最旧一半
+          const oldPart = merged.slice(0, compressCount);
+          const sumDir = path.join(DATA_DIR, 'summaries');
+          const sumFile = path.join(sumDir, `${sanitizeId(payload.chatId)}.json`);
+          let cached = null;
+          try { cached = JSON.parse(fs.readFileSync(sumFile, 'utf8')); } catch (e) { /* 无缓存 */ }
+          if (cached && cached.summary && cached.count >= compressCount) {
+            merged = [{ role: 'user', content: `【历史摘要（${cached.count} 条旧消息）】\n${cached.summary}` }, ...merged.slice(compressCount)];
+            summaryNote = `已自动压缩 ${compressCount} 条旧消息（缓存摘要）`;
+          } else {
+            try {
+              const summary = await summarizeOldMessages(oldPart);
+              merged = [{ role: 'user', content: `【历史摘要（${compressCount} 条旧消息）】\n${summary}` }, ...merged.slice(compressCount)];
+              fs.mkdirSync(sumDir, { recursive: true });
+              fs.writeFileSync(sumFile, JSON.stringify({ summary, count: compressCount, at: new Date().toISOString() }), 'utf8');
+              summaryNote = `已自动压缩 ${compressCount} 条旧消息`;
+            } catch (e) { /* 摘要失败则跳过，保持原样 */ }
+          }
+          // 摘要后保证 user/assistant 交替
+          const merged2 = [];
+          for (const m of merged) {
+            const last = merged2[merged2.length - 1];
+            if (last && last.role === m.role) last.content += '\n' + m.content;
+            else merged2.push({ ...m });
+          }
+          merged = merged2;
+          if (!merged.length || merged[0].role !== 'user') merged.unshift({ role: 'user', content: '（开场）' });
+        }
+      }
+
+      res.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive',
+      });
+      let finished = false;
+      let abortedByClient = false;
+      const llmAbort = new AbortController();
+      // 客户端断连（关页面/刷新/切会话）→ 立即中止 LLM 请求，不再烧 token
+      res.on('close', () => { finished = true; abortedByClient = true; llmAbort.abort(); });
+      // SSE 心跳（Task8）：15s 无事件时发 ping 保活连接，防代理/防火墙/浏览器超时掐断流
+      const pingInterval = setInterval(() => {
+        if (!finished) res.write('data: {"type":"ping"}\n\n');
+      }, 15000);
+      let acc = '';
+      let firstTokenAt = 0;
+      const t0 = Date.now();
+      const meta = {};
+      const send = (obj) => { if (!finished) res.write(`data: ${JSON.stringify(obj)}\n\n`); };
+      if (summaryNote) send({ type: 'summarized', note: summaryNote });
+      // 工具桥：联网搜索（独立开关，会话内持久）
+      let toolTrace = null;
+      const enabledNames = toolsEnabled(payload.chatId);
+      if (enabledNames.length) {
+        try {
+          const lastU = merged[merged.length - 1];
+          const direct = (lastU && lastU.role === 'user' ? await bridgeDirectTool(lastU.content) : []).filter((d) => enabledNames.includes(d.name));
+          if (direct.length) {
+            const parts2 = [];
+            for (const d of direct) {
+              const out = await executeBridgeTool(d.name, d.input);
+              parts2.push('[工具 ' + d.name + ']\n' + out);
+              toolTrace = [...(toolTrace || []), { name: d.name, input: d.input, resultHead: out.slice(0, 120) }];
+            }
+            merged = merged.slice(0, -1).concat([{ role: 'user', content: lastU.content + '\n\n【工具结果】\n' + parts2.join('\n\n') }]);
+            send({ type: 'tools', trace: toolTrace.map((t) => t.name + '(' + JSON.stringify(t.input).slice(0, 60) + ')') });
+          } else {
+            const tr = await runBridgeToolLoop(merged, system, enabledNames);
+            merged = tr.messages;
+            toolTrace = tr.trace;
+            if (toolTrace && toolTrace.length) send({ type: 'tools', trace: toolTrace.map((t) => t.name + '(' + JSON.stringify(t.input).slice(0, 60) + ')') });
+          }
+        } catch (e) { console.error('[bridge] 工具回合失败:', e.message); }
+      }
+      // 图片处理（M7 升级：视觉模型 → 图片以多模态格式进 LLM；非视觉模型 → 降级占位符）
+      // 视觉模型判定：模型名含 vision（如 deepseek-v4-flash-vision-exp）
+      const isVision = /vision/i.test(State.endpoint.model || '');
+      const IMG_RE = /!\[[^\]]*\]\((data:image\/([a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=]+))\)/g;
+      merged = merged.map((m) => {
+        const text = String(m.content || '');
+        if (!isVision) return { ...m, content: text.replace(IMG_RE, '[图片]') };
+        // 视觉模型：单条消息内图文混合 → content 数组（openai 格式）；anthropic 走 messages 转换
+        if (!IMG_RE.test(text)) return m;
+        IMG_RE.lastIndex = 0;
+        const parts = [];
+        let last = 0, mm;
+        while ((mm = IMG_RE.exec(text)) !== null) {
+          if (mm.index > last) parts.push({ type: 'text', text: text.slice(last, mm.index) });
+          parts.push({ type: 'image_url', image_url: { url: mm[1] } });
+          last = mm.index + mm[0].length;
+        }
+        if (last < text.length) parts.push({ type: 'text', text: text.slice(last) });
+        // 仅当整条消息恰为单段文本时才折叠为字符串；含图一律保留数组（单图无文字时 parts=[image_url]，不能取 .text）
+        return parts.length === 1 && parts[0].type === 'text' ? parts[0].text : parts;
+      });
+      try {
+        await callLLM(merged, system, (text) => {
+          if (!firstTokenAt) firstTokenAt = Date.now();
+          acc += text;
+          send({ type: 'delta', text });
+        }, (m) => Object.assign(meta, m), (t) => send({ type: 'thinking', text: t }), llmAbort.signal);
+        // 会话统计（按当前模型分桶）
+        const b = bucket(State.endpoint.model);
+        b.turns += 1;
+        b.calls += 1;
+        b.llmMs += Date.now() - t0;
+        if (firstTokenAt) { b.firstTokenSum += firstTokenAt - t0; b.firstTokenN += 1; }
+        const uIn = meta.usageIn || {};
+        const uOut = meta.usageOut || {};
+        const inTok = uIn.input_tokens || uIn.prompt_tokens || 0;
+        const cacheRead = uIn.cache_read_input_tokens || uIn.prompt_cache_hit_tokens || 0;
+        // 注意：input_tokens/prompt_tokens 已包含缓存读写与缓存创建部分（DeepSeek/Anthropic 同），
+        // 不再叠加 cacheRead/cacheCreate，否则费用与命中率被系统性高估/压低
+        b.tokensIn += inTok;
+        b.tokensOut += uOut.output_tokens || uOut.completion_tokens || 0;
+        b.cacheRead += cacheRead;
+        b.cacheMiss += Math.max(0, inTok - cacheRead);
+        // 每日费用记账（Task6）：按调用完成日期分桶（含分模型明细），供 /api/stats 每日费用仪表盘
+        const nowD = new Date();
+        const dk = `${nowD.getFullYear()}-${String(nowD.getMonth() + 1).padStart(2, '0')}-${String(nowD.getDate()).padStart(2, '0')}`;   // 本地日期（避免 UTC 跨日错记）
+        if (!stats.daily) stats.daily = {};
+        const dd = stats.daily[dk] = stats.daily[dk] || { calls: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheMiss: 0, models: {} };
+        dd.calls += 1;
+        dd.tokensIn += inTok;
+        dd.tokensOut += uOut.output_tokens || uOut.completion_tokens || 0;
+        dd.cacheRead += cacheRead;
+        dd.cacheMiss += Math.max(0, inTok - cacheRead);
+        const dm = dd.models[State.endpoint.model] = dd.models[State.endpoint.model] || { calls: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheMiss: 0 };
+        dm.calls += 1;
+        dm.tokensIn += inTok;
+        dm.tokensOut += uOut.output_tokens || uOut.completion_tokens || 0;
+        dm.cacheRead += cacheRead;
+        dm.cacheMiss += Math.max(0, inTok - cacheRead);
+        // 本对话统计另计（完整桶；累计口径在 /api/stats 的 current/total 汇总）
+        const cid = payload.chatId ? sanitizeId(payload.chatId) : '';
+        if (cid) {
+          let cb = stats.byChat[cid];
+          if (!cb || cb.turns == null) cb = stats.byChat[cid] = Object.assign(emptyBucket(), cb || {});
+          cb.turns += 1;
+          cb.calls += 1;
+          cb.llmMs += Date.now() - t0;
+          if (firstTokenAt) { cb.firstTokenSum += firstTokenAt - t0; cb.firstTokenN += 1; }
+          cb.tokensIn += inTok;
+          cb.tokensOut += uOut.output_tokens || uOut.completion_tokens || 0;
+          cb.cacheRead += cacheRead;
+          cb.cacheMiss += Math.max(0, inTok - cacheRead);
+        }
+        await saveStats();
+        // seq 校验：仅接受正整数，防客户端伪造污染回合记录
+        const seqNum = Number(payload.seq);
+        await appendTurnRecord(acc, payload.chatId, Number.isFinite(seqNum) && seqNum > 0 ? seqNum : undefined);  // 剧情记忆：按会话自动记账（带消息序号）
+        if (toolTrace && toolTrace.length) appendOpRecord(payload.chatId, '工具调用', toolTrace.map((t) => t.name + ':' + String(t.input.query || '').slice(0, 40)).join('；'));
+        send({ type: 'done' });
+      } catch (e) {
+        if (abortedByClient || llmAbort.signal.aborted) {
+          // 客户端断连中止：静默收尾（不追加回合记录、不发 error）
+        } else {
+          // 详细错误只打日志；回传精简文案，防端点错误体回显敏感信息（L4）
+          console.error('[chat] LLM 调用失败:', e && e.message || e);
+          const brief = String((e && e.message) || e).slice(0, 120);
+          send({ type: 'error', error: brief.includes('401') || brief.includes('403') || brief.includes('429') || brief.includes('超时') || brief.includes('timeout') ? brief : 'LLM 调用失败，详见服务器日志' });
+        }
+      } finally {
+        clearInterval(pingInterval);   // 心跳随会话结束停止（Task8）
+        finished = true;
+        res.end();
+      }
+      return true
+    }
+  return false;
+}
+
+// 声明式保序路由表：数组顺序 = 匹配优先级（与原 if 链顺序严格一致）
+const ROUTES = [
+  { test: (p, req) => (p === '/' || p === '/index.html'), handler: h_route_0 },
+  { test: (p, req) => (p === '/favicon.ico' || p === '/favicon.png'), handler: h_favicon_ico_1 },
+  { test: (p, req) => (p === '/logo.png'), handler: h_logo_png_2 },
+  { test: (p, req) => (p === '/share-card.png'), handler: h_share_card_png_3 },
+  { test: (p, req) => (p === '/style.css'), handler: h_style_css_4 },
+  { test: (p, req) => (p === '/app.js'), handler: h_app_js_5 },
+  { test: (p, req) => (p === '/api/model' && req.method === 'GET'), handler: h_api_model_6 },
+  { test: (p, req) => (p === '/api/model' && req.method === 'POST'), handler: h_api_model_7 },
+  { test: (p, req) => (/^\/api\/chats(?:\/([^/]+))?$/).test(p), handler: h_route_8 },
+  { test: (p, req) => (p === '/api/savepoints/save' && req.method === 'POST'), handler: h_api_savepoints_save_9 },
+  { test: (p, req) => (p === '/api/savepoints/list' && req.method === 'GET'), handler: h_api_savepoints_list_10 },
+  { test: (p, req) => (p === '/api/savepoints/load' && req.method === 'POST'), handler: h_api_savepoints_load_11 },
+  { test: (p, req) => (p === '/api/op/view' && req.method === 'POST'), handler: h_api_op_view_12 },
+  { test: (p, req) => (p === '/api/op/wardrobe' && req.method === 'POST'), handler: h_api_op_wardrobe_13 },
+  { test: (p, req) => (p === '/api/op/expand' && req.method === 'POST'), handler: h_api_op_expand_14 },
+  { test: (p, req) => (p === '/api/op/tools' && req.method === 'POST'), handler: h_api_op_tools_15 },
+  { test: (p, req) => (p === '/api/presets' && req.method === 'GET'), handler: h_api_presets_16 },
+  { test: (p, req) => (p === '/api/presets' && req.method === 'POST'), handler: h_api_presets_17 },
+  { test: (p, req) => (p === '/api/profiles' && req.method === 'GET'), handler: h_api_profiles_18 },
+  { test: (p, req) => (p === '/api/profiles' && req.method === 'POST'), handler: h_api_profiles_19 },
+  { test: (p, req) => (p === '/api/chat-profiles' && req.method === 'GET'), handler: h_api_chat_profiles_20 },
+  { test: (p, req) => (p === '/api/chat-profiles' && req.method === 'POST'), handler: h_api_chat_profiles_21 },
+  { test: (p, req) => (/^\/api\/npc-profiles(?:\/([^/]+))?$/).test(p), handler: h_route_22 },
+  { test: (p, req) => (/^\/api\/scenes(?:\/([^/]+))?$/).test(p), handler: h_route_23 },
+  { test: (p, req) => (p === '/api/expressions/config' && req.method === 'POST'), handler: h_api_expressions_config_24 },
+  { test: (p, req) => (/^\/api\/expressions(?:\/([^/]+))?$/).test(p), handler: h_route_25 },
+  { test: (p, req) => (/^\/api\/expressions\/static\/([^/]+)\/(.+)$/).test(p), handler: h_route_26 },
+  { test: (p, req) => (p === '/api/regex-rules' && req.method === 'GET'), handler: h_api_regex_rules_27 },
+  { test: (p, req) => (p === '/api/regex-rules' && req.method === 'POST'), handler: h_api_regex_rules_28 },
+  { test: (p, req) => (p === '/api/suggestions/generate' && req.method === 'POST'), handler: h_api_suggestions_generate_29 },
+  { test: (p, req) => (p === '/api/lorebook' && req.method === 'GET'), handler: h_api_lorebook_30 },
+  { test: (p, req) => (p === '/api/lorebook' && req.method === 'POST'), handler: h_api_lorebook_31 },
+  { test: (p, req) => (p === '/api/graph' && req.method === 'GET'), handler: h_api_graph_32 },
+  { test: (p, req) => (p === '/api/graph' && req.method === 'POST'), handler: h_api_graph_33 },
+  { test: (p, req) => (p === '/api/personas' && req.method === 'GET'), handler: h_api_personas_34 },
+  { test: (p, req) => (p === '/api/personas' && req.method === 'POST'), handler: h_api_personas_35 },
+  { test: (p, req) => (p === '/api/story-memory/config' && req.method === 'GET'), handler: h_api_story_memory_config_36 },
+  { test: (p, req) => (p === '/api/story-memory/config' && req.method === 'POST'), handler: h_api_story_memory_config_37 },
+  { test: (p, req) => (p === '/api/story-memory/data' && req.method === 'GET'), handler: h_api_story_memory_data_38 },
+  { test: (p, req) => (/^\/api\/agenda(?:\/([^/]+))?$/).test(p), handler: h_route_39 },
+  { test: (p, req) => (p === '/api/report/list' && req.method === 'GET'), handler: h_api_report_list_40 },
+  { test: (p, req) => (/^\/api\/report\/([^/]+)\/([^/]+)$/).test(p) && (req.method === 'GET'), handler: h_route_41 },
+  { test: (p, req) => (p === '/api/report/overview' && req.method === 'POST'), handler: h_api_report_overview_42 },
+  { test: (p, req) => (p === '/api/report/audit' && req.method === 'POST'), handler: h_api_report_audit_43 },
+  { test: (p, req) => (p === '/api/analyze/retro' && req.method === 'POST'), handler: h_api_analyze_retro_44 },
+  { test: (p, req) => (p === '/api/memory/search' && req.method === 'POST'), handler: h_api_memory_search_45 },
+  { test: (p, req) => (/^\/api\/cards\/export\/([^/]+)$/).test(p) && (req.method === 'GET'), handler: h_route_46 },
+  { test: (p, req) => (p === '/api/cards/import' && req.method === 'POST'), handler: h_api_cards_import_47 },
+  { test: (p, req) => (p === '/api/illustration/generate' && req.method === 'POST'), handler: h_api_illustration_generate_48 },
+  { test: (p, req) => (p === '/api/illustration/config' && req.method === 'POST'), handler: h_api_illustration_config_49 },
+  { test: (p, req) => (p === '/api/illustration/enhance' && req.method === 'POST'), handler: h_api_illustration_enhance_50 },
+  { test: (p, req) => (p === '/api/tts/config' && req.method === 'POST'), handler: h_api_tts_config_51 },
+  { test: (p, req) => (p === '/api/tts/config' && req.method === 'GET'), handler: h_api_tts_config_52 },
+  { test: (p, req) => (p === '/api/tts/synthesize' && req.method === 'POST'), handler: h_api_tts_synthesize_53 },
+  { test: (p, req) => (/^\/api\/annotations(?:\/([^/]+))?$/).test(p), handler: h_route_54 },
+  { test: (p, req) => (p === '/api/op/note' && req.method === 'POST'), handler: h_api_op_note_55 },
+  { test: (p, req) => (p === '/api/op/inject' && req.method === 'GET'), handler: h_api_op_inject_56 },
+  { test: (p, req) => (p === '/api/op/inject' && req.method === 'POST'), handler: h_api_op_inject_57 },
+  { test: (p, req) => (p === '/api/emotions' && req.method === 'GET'), handler: h_api_emotions_58 },
+  { test: (p, req) => (p === '/api/op/emotion' && req.method === 'POST'), handler: h_api_op_emotion_59 },
+  { test: (p, req) => (p === '/api/history/search' && req.method === 'GET'), handler: h_api_history_search_60 },
+  { test: (p, req) => (p === '/api/stats' && req.method === 'GET'), handler: h_api_stats_61 },
+  { test: (p, req) => (p === '/api/timeline' && req.method === 'GET'), handler: h_api_timeline_62 },
+  { test: (p, req) => (p === '/api/prompt/latest' && req.method === 'GET'), handler: h_api_prompt_latest_63 },
+  { test: (p, req) => (p === '/api/timeline/manual' && req.method === 'POST'), handler: h_api_timeline_manual_64 },
+  { test: (p, req) => (p === '/api/timeline/update' && req.method === 'POST'), handler: h_api_timeline_update_65 },
+  { test: (p, req) => (p === '/api/timeline/insert' && req.method === 'POST'), handler: h_api_timeline_insert_66 },
+  { test: (p, req) => (p === '/api/timeline/delete' && req.method === 'POST'), handler: h_api_timeline_delete_67 },
+  { test: (p, req) => (p === '/api/timeline/ai-fill' && req.method === 'POST'), handler: h_api_timeline_ai_fill_68 },
+  { test: (p, req) => (p === '/api/timeline/truncate' && req.method === 'POST'), handler: h_api_timeline_truncate_69 },
+  { test: (p, req) => (p === '/api/inventory' && req.method === 'GET'), handler: h_api_inventory_70 },
+  { test: (p, req) => (p === '/api/inventory/manual' && req.method === 'POST'), handler: h_api_inventory_manual_71 },
+  { test: (p, req) => (p === '/api/wardrobe/current' && req.method === 'GET'), handler: h_api_wardrobe_current_72 },
+  { test: (p, req) => (p === '/api/timeline/export' && req.method === 'GET'), handler: h_api_timeline_export_73 },
+  { test: (p, req) => (p === '/api/chat' && req.method === 'POST'), handler: h_api_chat_74 },
+];
+// ===== 路由处理分区结束 =====
+
+async function handleRequest(req, res) {
+  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  const p = url.pathname;
+  for (const r of ROUTES) {
+    if (r.test(p, req)) {
+      await r.handler(req, res, url, p);
+      return;
+    }
+  }
   res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
   res.end('404');
 }
