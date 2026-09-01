@@ -7,3 +7,6 @@ data/
 # 系统
 Thumbs.db
 .DS_Store
+
+# 桌面端编译产物（不入库）
+moonrabbit-tauri/src-tauri/target/
