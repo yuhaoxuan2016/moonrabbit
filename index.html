@@ -411,7 +411,10 @@
         </div>
         <div class="em-hint">AI 输出 <code>&lt;storyevent&gt;location_detail: 分组| 地点名：详细描写&lt;/storyevent&gt;</code> 自动建档（新地点首次造访时）；此面板为知识库格式预览，合入 <code>canonical/lore/地点.txt</code> 由总结时 AI 完成。</div>
       </div>
-      <button id="tm-export" class="attach">⬇ 导出回合记录（markdown）</button>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        <button id="tm-export" class="attach">⬇ 导出回合记录（markdown）</button>
+        <button id="tm-export-copy" class="attach hidden" title="一键复制导出内容（也可直接在框内选中复制）">📋 复制</button>
+      </div>
       <div id="tm-export-box" class="tm-export-box hidden"></div>
       <button id="prompt-btn" class="attach" title="查看最近一轮发给 AI 的完整提示词（system）">💬 查看最近提示词</button>
     </div>

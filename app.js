@@ -543,6 +543,7 @@ async function generate() {
   els.typing.classList.remove('hidden');
   const extra = App.pendingContext;
   App.pendingContext = '';
+  if (extra) saveAttachPending('').catch(() => {});   // 附加资料已随本轮消费 → 清除持久化（2026-08-30）
   els.manAttachNote.classList.add('hidden');
   const seq = ++App.msgSeq;
 
@@ -616,6 +617,10 @@ async function generate() {
       renderAssistant(acc.trim(), seq);
       // 思考记录一并存进 history（刷新/切会话后恢复显示）
       App.history.push({ role: 'assistant', content: acc.trim(), seq, thinking: thinkAcc.trim() || undefined });
+      // 记账标签自检（2026-08-30 修复「剧情记忆是摆设」）：AI 未输出 storyevent/items → 提醒
+      if (!/<(?:storyevent|horaeevent)>/i.test(acc) && !/<(?:items|horae)>/i.test(acc)) {
+        renderThinking('⚠️ 本轮 AI 未输出记账标签（storyevent/items）——剧情记忆未更新；后端已将标签指令重申置底，若持续出现请在「剧情记忆」手动补记或重发。');
+      }
     }
   } catch (e) {
     tempWrap.remove();
@@ -980,6 +985,7 @@ async function newChat() {
 async function openChat(id) {
   if (App.history.length) await saveChat();
   App.pendingContext = '';   // 清空上一会话的附加资料
+  loadAttachPending();       // 恢复本会话「已附加」状态（2026-08-30 修复重启丢失；本轮消费后清除）
   try {
     const c = await (await fetch('/api/chats/' + id)).json();
     if (c.error) return;
@@ -1547,6 +1553,24 @@ const tmAuto = document.getElementById('tm-auto');
 const tmLocations = document.getElementById('tm-locations');
 const tmExport = document.getElementById('tm-export');
 const tmExportBox = document.getElementById('tm-export-box');
+const tmCopyBtn = document.getElementById('tm-export-copy');
+if (tmCopyBtn) tmCopyBtn.addEventListener('click', async () => {
+  const text = tmCopyBtn.dataset.text || tmExportBox.textContent || '';
+  try {
+    await navigator.clipboard.writeText(text);
+    tmCopyBtn.textContent = '✅ 已复制';
+    setTimeout(() => { tmCopyBtn.textContent = '📋 复制'; }, 1500);
+  } catch (e) {
+    // 剪贴板 API 失败（非安全上下文/权限）：降级为选中文本提示手动复制
+    tmCopyBtn.textContent = '⚠️ 已选中，按 Ctrl+C';
+    const range = document.createRange();
+    range.selectNodeContents(tmExportBox);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    setTimeout(() => { tmCopyBtn.textContent = '📋 复制'; }, 2500);
+  }
+});
 
 async function loadEmotions() {
   const box = document.getElementById('em-list');
@@ -1884,6 +1908,13 @@ tmExport.addEventListener('click', async () => {
     const text = await (await fetch(`/api/timeline/export?chatId=${encodeURIComponent(App.chatId || '')}`)).text();
     tmExportBox.classList.remove('hidden');
     tmExportBox.textContent = text;
+    tmExportBox.scrollTop = 0;
+    // 一键复制（2026-08-30：拖拽手柄修复后文本也可直接选中，复制按钮双保险）
+    if (tmCopyBtn) {
+      tmCopyBtn.classList.remove('hidden');
+      tmCopyBtn.dataset.text = text;
+      tmCopyBtn.textContent = '📋 复制';
+    }
   } catch (e) {
     tmExportBox.classList.remove('hidden');
     tmExportBox.textContent = '导出失败：' + e.message;
@@ -2551,10 +2582,29 @@ els.manAttachOk.addEventListener('click', () => {
   const text = els.manAttachInput.value.trim();
   if (!text) return;
   App.pendingContext = text;
+  saveAttachPending(text).catch(() => {});   // 持久化（2026-08-30 修复重启/刷新丢失）
   els.manAttachBox.classList.add('hidden');
   els.manAttachInput.value = '';
   els.manAttachNote.classList.remove('hidden');
 });
+// ---------- 待注入附加资料持久化（2026-08-30 修复：重启/刷新后恢复，不再丢失） ----------
+async function saveAttachPending(text) {
+  await fetch('/api/op/attach-pending', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ chatId: App.chatId || '', text: String(text || '') }),
+  });
+}
+async function loadAttachPending() {
+  // 打开会话时恢复「已附加」状态（本轮消费后由 saveAttachPending('') 清除）
+  if (!App.chatId) { App.pendingContext = ''; return; }
+  try {
+    const r = await (await fetch('/api/op/attach-pending?chatId=' + encodeURIComponent(App.chatId))).json();
+    const t = (r && r.text || '').trim();
+    App.pendingContext = t;
+    if (t) els.manAttachNote.classList.remove('hidden');
+  } catch (e) { /* 忽略 */ }
+}
 
 // ---------- 会话常驻设定（📌 每轮注入 system，防遗忘；按会话隔离） ----------
 // Task15 多槽位：其他 / 背景 / 关系 / 规则（页签切换编辑，保存时整包提交）
@@ -3530,10 +3580,23 @@ applyFoldedState();
 
   let dragEl = null;
   let dragOverEl = null;
+  let dragArmed = false;   // mousedown 落在标题栏才武装（draggable 在拖拽中会被浏览器缓存，用标志兜底）
 
+  // 拖拽手柄（修复 2026-08-30）：整卡 draggable=true 会让 Chrome 拖拽手势抢占鼠标选择，
+  // 卡片内文本（导出框等）无法选中复制 → 改为「仅标题栏可拖」：
+  // 默认 draggable=false（文本可正常选择），mousedown 落在 .card-title 时才临时启用拖拽。
   cards.forEach(c => {
-    c.draggable = true;
+    // 标题栏（含 .card-title；.group-toggle 是折叠按钮不参与拖拽——已有 stopPropagation 保护）
+    const handle = c.querySelector('.card-title');
+    c.draggable = false;
+    if (handle) {
+      handle.style.cursor = 'grab';
+      handle.addEventListener('mousedown', () => { c.draggable = true; dragArmed = true; });
+      window.addEventListener('mouseup', () => { c.draggable = false; dragArmed = false; }, { once: true });
+    }
     c.addEventListener('dragstart', (e) => {
+      // 仅标题栏启动拖拽；文本区 mousedown 时 draggable 为 false，不会走到这里
+      if (!dragArmed) { e.preventDefault(); return; }
       dragEl = c;
       e.dataTransfer.effectAllowed = 'move';
       try { e.dataTransfer.setData('text/plain', c.id); } catch (err) { /* 忽略 */ }
@@ -3543,6 +3606,8 @@ applyFoldedState();
       if (dragEl) dragEl.classList.remove('drag-sorting');
       cards.forEach(x => x.classList.remove('drag-over'));
       dragEl = null; dragOverEl = null;
+      c.draggable = false;   // 拖拽结束复位（title 上的 mouseup 有时不触发）
+      dragArmed = false;
       const order = Array.from(sidebar.querySelectorAll(':scope > .card')).map(x => x.id);
       localStorage.setItem(SORT_KEY, JSON.stringify(order));
     });
@@ -3565,7 +3630,8 @@ applyFoldedState();
         localStorage.setItem(SORT_KEY, JSON.stringify(order));
       }
     });
-    c.querySelector('.group-toggle, .card-title')?.addEventListener('dragstart', (e) => e.stopPropagation());
+    // group-toggle（分组头）不参与拖拽排序；card-title 现在是拖拽手柄，不放 stopPropagation（否则 dragstart 不冒泡到卡片）
+    c.querySelector('.group-toggle')?.addEventListener('dragstart', (e) => e.stopPropagation());
   });
 })();
 

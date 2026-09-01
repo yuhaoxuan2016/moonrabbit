@@ -225,22 +225,6 @@ function buildSystemPrompt(setting, chatId) {
     parts.push('【工具（已开启：' + enabledNames.map((n) => BRIDGE_TOOL_LABELS[n] || n).join('、') + '）】当用户明确要求「联网/搜索/查一下」时，必须先调用 web_search 工具，得到结果后再回答；禁止跳过或编造；工具结果需标注来源。');
   }
   if (inj.suffix) parts.push(`## ⚙️ 自定义注入（后缀 · 用户设置，置于最末）\n${inj.suffix}`);
-  // 【标签生成强化】（近因效应，提升 Flash 等小模型遵从率）
-  parts.push(`【⚠️ 标签生成（每次回复必须，不可省略）】
-每次回复的最后一行必须输出以下标签（即使无变化也要输出，用"同上"代替）：
-\`\`\`
-<storyevent>time: 剧情时间; location: 地点; atmosphere: 氛围; characters: 角色A、角色B; costume: 角色：着装; event: 事件一句话; emotion: 角色A=情绪</storyevent>
-<items>item: 物品名=持有者
-item-: 物品名</items>
-\`\`\`
-示例（照此格式输出）：
-\`\`\`
-<storyevent>time: 第3天 中午; location: 酒馆; atmosphere: 温馨; characters: 艾琳、卫队长; costume: 艾琳：米白针织衫+百褶裙; event: 在酒馆吃午饭，聊起旅途计划; emotion: 艾琳=平静</storyevent>
-<items>无</items>
-\`\`\`
-- costume：仅当着装变化时写具体，否则写"同上"
-- emotion：写出角色当前情绪
-- items：无物品变化写"无"`);
   let raw = parts.join('\n\n---\n\n');
   // 变量模板替换
   const safeChatId = chatId ? sanitizeId(chatId) : '';
@@ -272,8 +256,27 @@ item-: 物品名</items>
     raw += '\n\n---\n\n## 旁注（位置感知引导）\n' + annText;
   }
   const user = State.personas[State.activePersona]?.name || '';
+  // 【标签生成强化】——置于 buildSystemPrompt 末尾（近因效应；2026-08-30 修复：此前 push 在 parts 中段，
+  // 之后还会追加设定触发器/旁注/pinFirst 开局提示词 → 标签指令被挤到中段，AI 不输出标签 → 剧情记忆不更新）
+  raw += '\n\n---\n\n' + turnTagPrompt;
   return applyVariables(raw, { user, char: '', chatId: chatId || '', turnCount, lastMessage });
 }
+// 回合记账标签生成指令（独立常量：buildSystemPrompt 末尾 + pinFirst 之后重申共用）
+const turnTagPrompt = `【⚠️ 标签生成（每次回复必须，不可省略）】
+每次回复的最后一行必须输出以下标签（即使无变化也要输出，用"同上"代替）：
+\`\`\`
+<storyevent>time: 剧情时间; location: 地点; atmosphere: 氛围; characters: 角色A、角色B; costume: 角色：着装; event: 事件一句话; emotion: 角色A=情绪</storyevent>
+<items>item: 物品名=持有者
+item-: 物品名</items>
+\`\`\`
+示例（照此格式输出）：
+\`\`\`
+<storyevent>time: 第3天 中午; location: 酒馆; atmosphere: 温馨; characters: 艾琳、卫队长; costume: 艾琳：米白针织衫+百褶裙; event: 在酒馆吃午饭，聊起旅途计划; emotion: 艾琳=平静</storyevent>
+<items>无</items>
+\`\`\`
+- costume：仅当着装变化时写具体，否则写"同上"
+- emotion：写出角色当前情绪
+- items：无物品变化写"无"`;
 
 // ---------- 回合记账数据层（按会话隔离） ----------
 const DATA_DIR = path.join(WWW, 'data');
@@ -703,64 +706,83 @@ function parseTurnTags(content) {
   const rec = { story_time: '', location: '', atmosphere: '', characters: [], costume: '', event: '', items_gain: [], items_loss: [], updates: [], emotion: {}, character_intro: {}, relationships: [], location_detail: [] };
   const evRe = /<(?:storyevent|horaeevent)>([\s\S]*?)<\/(?:storyevent|horaeevent)>/gi;
   let m;
+  const applyStoryKv = (k, v) => {
+    if (k.includes('time')) rec.story_time = v;
+    else if (k === 'location' || k === '场景' || k === '地点') rec.location = v;
+    else if (k.includes('atmosphere')) rec.atmosphere = v;
+    else if (k.includes('characters')) rec.characters = v.split(/[、,，/]+/).map((s) => s.trim()).filter(Boolean);
+    else if (k.includes('costume')) rec.costume = v;
+    else if (k.includes('event')) rec.event = v;
+    else if (k.includes('emotion') || k.includes('mood')) {
+      // emotion: 角色=情绪 / emotion: 角色：情绪（多角色用分号或换行分隔）
+      for (const pair of v.split(/[;；\n]/)) {
+        const pm = pair.match(/^\s*([^=：:]+)[=：:]\s*(.+)$/);
+        if (pm && pm[2].trim()) rec.emotion[pm[1].trim()] = pm[2].trim();
+      }
+    }
+    // 新增：角色简介（character_intro: 角色名=简介；多角色用分号分隔）
+    else if (k.includes('character_intro') || k.includes('characterintro') || k.includes('角色简介')) {
+      for (const pair of v.split(/[;；\n]/)) {
+        const pm = pair.match(/^\s*([^=：:]+)[=：:]\s*(.+)$/);
+        if (pm && pm[2].trim()) rec.character_intro[pm[1].trim()] = pm[2].trim();
+      }
+    }
+    // 新增：关系信息（relationships: 角色A-角色B=关系类型（简短描述）；多条用分号分隔）
+    else if (k.includes('relationships') || k.includes('关系')) {
+      for (const pair of v.split(/[;；\n]/)) {
+        const pm = pair.match(/^\s*([^=：:]+)[=：:]\s*(.+)$/);
+        if (pm && pm[2].trim()) {
+          const relParts = pm[1].trim().split(/[-—→]+/);
+          if (relParts.length >= 2) {
+            rec.relationships.push({
+              from: relParts[0].trim(),
+              to: relParts[1].trim(),
+              type: pm[2].trim(),
+              description: ''
+            });
+          }
+        }
+      }
+    }
+    // 新增：地点详细档案（location_detail: 分组| 地点名：详细描写；多条用换行分隔）
+    else if (k.includes('location_detail') || k.includes('locationdetail') || k.includes('地点档案')) {
+      for (const entry of v.split(/\n+/)) {
+        const e = entry.trim();
+        if (!e) continue;
+        // 格式：分组| 地点名：描写
+        const barIdx = e.indexOf('|');
+        const group = barIdx >= 0 ? e.slice(0, barIdx).trim() : '';
+        const rest = barIdx >= 0 ? e.slice(barIdx + 1).trim() : e;
+        const pm = rest.match(/^\s*([^：:]+)[：:]\s*(.+)$/);
+        if (pm && pm[2].trim()) {
+          rec.location_detail.push({ group: group || '未分组', name: pm[1].trim(), detail: pm[2].trim() });
+        }
+      }
+    }
+  };
   while ((m = evRe.exec(content))) {
-    for (const line of m[1].split('\n')) {
-      // 键字符类含下划线，兼容英文蛇形标签（story_time/location 等）
-      const kv = line.match(/^\s*([a-zA-Z_\u4e00-\u9fa5]+)\s*[:：]\s*(.+)$/);
-      if (!kv) continue;
-      const k = kv[1].toLowerCase();
-      const v = kv[2].trim();
-      if (k.includes('time')) rec.story_time = v;
-      else if (k === 'location' || k === '场景' || k === '地点') rec.location = v;
-      else if (k.includes('atmosphere')) rec.atmosphere = v;
-      else if (k.includes('characters')) rec.characters = v.split(/[、,，/]+/).map((s) => s.trim()).filter(Boolean);
-      else if (k.includes('costume')) rec.costume = v;
-      else if (k.includes('event')) rec.event = v;
-      else if (k.includes('emotion') || k.includes('mood')) {
-        // emotion: 角色=情绪 / emotion: 角色：情绪（多角色用分号或换行分隔）
-        for (const pair of v.split(/[;；\n]/)) {
-          const pm = pair.match(/^\s*([^=：:]+)[=：:]\s*(.+)$/);
-          if (pm && pm[2].trim()) rec.emotion[pm[1].trim()] = pm[2].trim();
-        }
-      }
-      // 角色简介（character_intro: 角色名=简介；多角色用分号分隔）
-      else if (k.includes('character_intro') || k.includes('characterintro') || k.includes('角色简介')) {
-        for (const pair of v.split(/[;；\n]/)) {
-          const pm = pair.match(/^\s*([^=：:]+)[=：:]\s*(.+)$/);
-          if (pm && pm[2].trim()) rec.character_intro[pm[1].trim()] = pm[2].trim();
-        }
-      }
-      // 关系信息（relationships: 角色A-角色B=关系类型；多条用分号分隔）
-      else if (k.includes('relationships') || k.includes('关系')) {
-        for (const pair of v.split(/[;；\n]/)) {
-          const pm = pair.match(/^\s*([^=：:]+)[=：:]\s*(.+)$/);
-          if (pm && pm[2].trim()) {
-            const relParts = pm[1].trim().split(/[-—→]+/);
-            if (relParts.length >= 2) {
-              rec.relationships.push({ from: relParts[0].trim(), to: relParts[1].trim(), type: pm[2].trim(), description: '' });
-            }
-          }
-        }
-      }
-      // 地点详细档案（location_detail: 分组| 地点名：详细描写；多条用换行分隔）
-      else if (k.includes('location_detail') || k.includes('locationdetail') || k.includes('地点档案')) {
-        for (const entry of v.split(/\n+/)) {
-          const e = entry.trim();
-          if (!e) continue;
-          const barIdx = e.indexOf('|');
-          const group = barIdx >= 0 ? e.slice(0, barIdx).trim() : '';
-          const rest = barIdx >= 0 ? e.slice(barIdx + 1).trim() : e;
-          const pm = rest.match(/^\s*([^：:]+)[：:]\s*(.+)$/);
-          if (pm && pm[2].trim()) {
-            rec.location_detail.push({ group: group || '未分组', name: pm[1].trim(), detail: pm[2].trim() });
-          }
-        }
+    // 兼容两种输出格式（2026-08-30 修复单行解析失败）：
+    // ① 多行：time: X\nlocation: Y\n...（旧格式）
+    // ② 单行分号：time: X; location: Y; ...（当前 prompt 模板示例——此前按行解析会把整行
+    //    贪婪吞进 story_time，location/event/emotion 全空 → 剧情记忆不更新）
+    // 统一切段：先按行、再按分号（; ；）切；无键续段（如多角色 emotion 的第二段）拼回上一字段值。
+    const segs = m[1].split(/\r?\n/).flatMap((l) => l.split(/[;；]/));
+    let lastK = '';
+    for (const seg of segs) {
+      const kv = seg.match(/^\s*([a-zA-Z_\u4e00-\u9fa5]+)\s*[:：]\s*(.+)$/);
+      if (kv) {
+        lastK = kv[1].toLowerCase();
+        applyStoryKv(lastK, kv[2].trim());
+      } else if (lastK && seg.trim()) {
+        // 无键续段（如「角色B=开心」承接 emotion）——保持原分号语义拼回上一字段
+        applyStoryKv(lastK, '；' + seg.trim());
       }
     }
   }
   const hRe = /<(?:items|horae)>([\s\S]*?)<\/(?:items|horae)>/gi;
   while ((m = hRe.exec(content))) {
-    for (const line of m[1].split('\n')) {
+    // 同样兼容单行分号：item: A=犬; item-: B
+    for (const line of m[1].split(/\r?\n/).flatMap((l) => l.split(/[;；]/))) {
       let im = line.match(/^\s*item-\s*[:：]\s*(.+?)\s*$/i);
       if (im) { rec.items_loss.push(im[1].trim()); continue; }
       im = line.match(/^\s*item\s*[:：]\s*([^=]+?)(?:\s*=\s*([^\s]+))?\s*$/i);
@@ -1307,10 +1329,45 @@ fs.mkdirSync(CHATS_DIR, { recursive: true });
 // ---------- 界面操作状态（视角 / 当日着装覆盖，会话内持久，注入 system + 记账） ----------
 const OP_FILE = path.join(DATA_DIR, 'op.json');
 State.opState = { views: {}, wardrobes: {}, expands: {}, tools: {}, notes: {}, customInjections: {} };   // views/wardrobes/expands/tools/notes/customInjections: {chatId: ...}
-try { State.opState = Object.assign(State.opState, JSON.parse(fs.readFileSync(OP_FILE, 'utf8'))); } catch (e) { /* 首次 */ }
+// 2026-08-30 事故教训：此前 catch 统一静默（注释「首次」），JSON.parse 失败时 State.opState 保持空默认值，
+// 随后任意 saveOpState() 会把空状态写盘 → 覆盖真实数据。现在区分：文件不存在=首次；存在但解析失败=异常（备份留档）。
+try {
+  const opRaw = fs.readFileSync(OP_FILE, 'utf8').replace(/^\uFEFF/, '').replace(/[\u200B\u200C\u2060]/g, '');   // 剥 BOM/零宽
+  if (opRaw.trim()) {
+    const parsed = JSON.parse(opRaw);
+    if (parsed && typeof parsed === 'object') State.opState = Object.assign(State.opState, parsed);
+    else throw new Error('op.json 顶层非对象');
+  }
+} catch (e) {
+  if (fs.existsSync(OP_FILE)) {
+    try { fs.copyFileSync(OP_FILE, OP_FILE + '.corrupt_' + Date.now()); } catch (e2) { /* 忽略 */ }
+    console.error('[op.json] 读取/解析失败（已备份损坏文件，空状态启动；数据待人工核对）:', e.message);
+  }
+  /* 首次启动：文件不存在 → 空状态 */
+}
 function saveOpState() {
-  if (RW_ASYNC_IO) { return writeQueued(OP_FILE, () => writeJson(OP_FILE, State.opState)); }
-  try { fs.writeFileSync(OP_FILE, JSON.stringify(State.opState), 'utf8'); } catch (e) { console.error('保存操作状态失败:', e.message); }
+  // 二次保险（2026-08-30 事故教训）：内存态为空但盘上已有真实数据 → 写盘前留档现场并告警
+  try {
+    const snapshot = JSON.stringify(State.opState);
+    const diskRaw = fs.existsSync(OP_FILE) ? fs.readFileSync(OP_FILE, 'utf8') : '';
+    if (diskRaw.trim()) {
+      let diskNotes = 0, memNotes = 0;
+      try {
+        const d = JSON.parse(diskRaw);
+        diskNotes = d && d.notes ? Object.keys(d.notes).length : 0;
+      } catch (e) { /* 盘上损坏 → 不比对 */ }
+      try {
+        const m = State.opState && State.opState.notes ? State.opState.notes : {};
+        memNotes = Object.keys(m).length;
+      } catch (e) { /* 忽略 */ }
+      if (diskNotes > 0 && memNotes === 0 && diskRaw.length > snapshot.length) {
+        fs.copyFileSync(OP_FILE, OP_FILE + '.preoverwrite_' + Date.now());
+        console.error('[op.json] 警告：盘上有 ' + diskNotes + ' 个会话速记但内存为空——已留档 .preoverwrite_*，本次仍按内存写盘');
+      }
+    }
+    if (RW_ASYNC_IO) { return writeQueued(OP_FILE, () => writeJson(OP_FILE, State.opState)); }
+    fs.writeFileSync(OP_FILE, snapshot, 'utf8');
+  } catch (e) { console.error('保存操作状态失败:', e.message); }
 }
 
 // ---------- 会话常驻设定多槽位（Task15：背景 / 关系 / 规则 / 其他） ----------
@@ -3378,7 +3435,7 @@ async function h_api_prompt_latest_63(req, res, url, p) {
           }
         }
       } catch (e) { /* 忽略 */ }
-      const latest = State.lastPrompt.chatId === cid ? lastPrompt : (history[history.length - 1] || null);
+      const latest = State.lastPrompt.chatId === cid ? State.lastPrompt : (history[history.length - 1] || null);
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
       { res.end(JSON.stringify({ latest, history: history.reverse() })); return true; };
     }
@@ -3568,6 +3625,40 @@ async function h_api_wardrobe_current_72(req, res, url, p) {
   return false;
 }
 
+async function h_api_op_attach_pending_75(req, res, url, p) {
+  // 当前会话「待注入附加资料」持久化（2026-08-30 修复：此前只存前端内存，刷新/重启后丢失）
+  // GET /api/op/attach-pending?chatId=x → { ok, text, ts }
+  // POST /api/op/attach-pending → body {chatId, text}（text 空串 = 清除）
+  const sendJson = (obj, code = 200) => { res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
+  const cid = sanitizeId(url.searchParams?.get('chatId') || '');
+  if (p === '/api/op/attach-pending' && req.method === 'GET') {
+    const pend = (State.opState.attachPending && State.opState.attachPending[cid]) || null;
+    sendJson({ ok: true, text: pend ? pend.text : '', ts: pend ? pend.ts : 0 });
+    return true;
+  }
+  if (p === '/api/op/attach-pending' && req.method === 'POST') {
+    let body = await readBody(req);
+    try {
+      const { chatId, text } = JSON.parse(body);
+      const c = sanitizeId(chatId || '');
+      if (!State.opState.attachPending) State.opState.attachPending = {};
+      const t = String(text || '').trim();
+      if (!t) {
+        delete State.opState.attachPending[c];
+      } else {
+        State.opState.attachPending[c] = { text: t, ts: Date.now() };
+      }
+      saveOpState();
+      sendJson({ ok: true, note: t ? '已持久化待注入资料' : '已清除' });
+      return true;
+    } catch (e) {
+      sendJson({ error: String(e) }, 400);
+      return true;
+    }
+  }
+  return false;
+}
+
 async function h_api_timeline_export_73(req, res, url, p) {
   const chatIdOf = () => sanitizeId(url.searchParams.get('chatId') || '');
   if (p === '/api/timeline/export' && req.method === 'GET') {
@@ -3641,6 +3732,8 @@ async function h_api_chat_74(req, res, url, p) {
       if (pinFirst) {
         system += '\n\n---\n\n## 会话开局提示词（首条消息原文，每轮保底注入；与「会话常驻设定」冲突时以常驻设定为准）\n' + String(firstMsg.content).trim();
       }
+      // 标签生成最后重申：pinFirst 之后再次落底（近因效应），防止开局提示词挤掉记账指令（2026-08-30 修复）
+      system += '\n\n---\n\n' + turnTagPrompt;
       // 调试：记录本轮 system prompt（落盘 data/prompts/）
       await recordPrompt(payload.chatId || '', system, merged.length);
 
@@ -3911,6 +4004,8 @@ const ROUTES = [
   { test: (p, req) => (p === '/api/wardrobe/current' && req.method === 'GET'), handler: h_api_wardrobe_current_72 },
   { test: (p, req) => (p === '/api/timeline/export' && req.method === 'GET'), handler: h_api_timeline_export_73 },
   { test: (p, req) => (p === '/api/chat' && req.method === 'POST'), handler: h_api_chat_74 },
+  { test: (p, req) => (p === '/api/op/attach-pending' && req.method === 'GET'), handler: h_api_op_attach_pending_75 },
+  { test: (p, req) => (p === '/api/op/attach-pending' && req.method === 'POST'), handler: h_api_op_attach_pending_75 },
 ];
 // ===== 路由处理分区结束 =====
 
