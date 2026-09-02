@@ -10,3 +10,7 @@ Thumbs.db
 
 # 桌面端编译产物（不入库）
 moonrabbit-tauri/src-tauri/target/
+
+# 本地备份（不入库）
+*.bak_*
+*.syncbak_*

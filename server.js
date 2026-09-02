@@ -284,6 +284,18 @@ const TURNS_DIR = path.join(DATA_DIR, 'turns');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(TURNS_DIR, { recursive: true });
 
+// ---------- 消息书签（2026-09-02 同步自正式版 NEW-2）----------
+const BOOKMARKS_DIR = path.join(DATA_DIR, 'bookmarks');
+fs.mkdirSync(BOOKMARKS_DIR, { recursive: true });
+function loadBookmarks(chatId) {
+  chatId = sanitizeId(chatId);
+  try { const f = path.join(BOOKMARKS_DIR, `${chatId}.json`); return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : { marks: [] }; } catch (e) { return { marks: [] }; }
+}
+function saveBookmarks(chatId, data) {
+  chatId = sanitizeId(chatId);
+  try { fs.writeFileSync(path.join(BOOKMARKS_DIR, `${chatId}.json`), JSON.stringify(data, null, 2), 'utf8'); } catch (e) { console.error('保存书签失败:', chatId, e.message); }
+}
+
 // ---------- 对话配置档系统（简化版：prefix + firstMsg，无 flags） ----------
 const CHAT_PROFILES_FILE = path.join(DATA_DIR, 'chat-profiles.json');
 const BUILTIN_CHAT_PROFILES = {
@@ -2363,7 +2375,7 @@ async function h_route_8(req, res, url, p) {
       if (req.method === 'PUT') {
         let body = await readBody(req);
         try {
-          const { title, messages, pinned, hidden } = JSON.parse(body);
+          const { title, messages, pinned, hidden, versions } = JSON.parse(body);
           // 读-改-写整体进写队列：与并发保存（前端自动保存/其他页签）串行，消除交错写
           if (RW_ASYNC_IO) {
             await writeQueued(file, async () => {
@@ -2375,6 +2387,8 @@ async function h_route_8(req, res, url, p) {
               chat.title = (title || chat.title || '未命名').slice(0, 40);
               // 写盘前清理「方块」乱码：即使浏览器/历史里带 U+FFFD，落盘也始终干净
               chat.messages = Array.isArray(messages) ? cleanMsgs(messages) : (chat.messages || []);
+          if (versions && typeof versions === 'object') chat.versions = versions;
+              if (versions && typeof versions === 'object') chat.versions = versions;
               chat.updatedAt = new Date().toISOString();
               await writeJson(file, chat);
             });
@@ -3687,6 +3701,52 @@ async function h_api_timeline_export_73(req, res, url, p) {
   return false;
 }
 
+// 消息书签 API（2026-09-02 同步自正式版 NEW-2）
+async function h_api_bookmarks(req, res, url, p) {
+  const m = p.match(/^\/api\/bookmarks(?:\/([^/]+))?$/);
+  if (!m) return false;
+  const chatId = m[1] ? sanitizeId(decodeURIComponent(m[1])) : null;
+  const sendJson = (o, c = 200) => { res.writeHead(c, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(o)); };
+  if (!chatId) { sendJson({ error: '缺少 chatId' }, 400); return true; }
+  if (req.method === 'GET') { sendJson({ ok: true, ...loadBookmarks(chatId) }); return true; }
+  if (req.method === 'POST') {
+    let body = await readBody(req);
+    try {
+      const { action, mark } = JSON.parse(body || '{}');
+      const bm = loadBookmarks(chatId);
+      if (action === 'toggle') {
+        const seq = Number(mark?.seq);
+        if (!Number.isFinite(seq)) { sendJson({ error: '缺少 seq' }, 400); return true; }
+        const idx = bm.marks.findIndex(x => Number(x.seq) === seq);
+        if (idx >= 0) {
+          bm.marks.splice(idx, 1);
+          saveBookmarks(chatId, bm);
+          sendJson({ ok: true, marked: false, total: bm.marks.length });
+        } else {
+          bm.marks.push({
+            id: 'bm_' + Date.now(),
+            seq,
+            label: String(mark?.label || '').slice(0, 60),
+            role: mark?.role === 'user' ? 'user' : 'assistant',
+            createdAt: new Date().toISOString(),
+          });
+          bm.marks.sort((a, b) => Number(a.seq) - Number(b.seq));
+          saveBookmarks(chatId, bm);
+          sendJson({ ok: true, marked: true, total: bm.marks.length });
+        }
+        return true;
+      }
+      if (action === 'delete') {
+        bm.marks = bm.marks.filter(x => x.id !== mark?.id);
+        saveBookmarks(chatId, bm);
+        sendJson({ ok: true }); return true;
+      }
+      sendJson({ error: '未知操作（支持 toggle/delete）' }, 400); return true;
+    } catch (e) { sendJson({ error: String(e && e.message || e) }, 400); return true; }
+  }
+  return false;
+}
+
 async function h_api_chat_74(req, res, url, p) {
   if (p === '/api/chat' && req.method === 'POST') {
       const OPENING_PIN_MIN_CHARS = 300;   // 首条消息保底注入 system 的最小长度（开局注入/长提示词；短问候不 pin）
@@ -3930,6 +3990,7 @@ async function h_api_chat_74(req, res, url, p) {
 // 声明式保序路由表：数组顺序 = 匹配优先级（与原 if 链顺序严格一致）
 const ROUTES = [
   { test: (p, req) => (p === '/' || p === '/index.html'), handler: h_route_0 },
+  { test: (p, req) => (/^\/api\/bookmarks(?:\/([^/]+))?$/).test(p), handler: h_api_bookmarks },
   { test: (p, req) => (p === '/favicon.ico' || p === '/favicon.png'), handler: h_favicon_ico_1 },
   { test: (p, req) => (p === '/logo.png'), handler: h_logo_png_2 },
   { test: (p, req) => (p === '/share-card.png'), handler: h_share_card_png_3 },

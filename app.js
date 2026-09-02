@@ -1,6 +1,164 @@
 // app.js —— Moonrabbit 前端逻辑（多角色 RP / 互动小说界面）
 'use strict';
 
+// ===== Toast 轻量提示（2026-09-01）=====
+// 替代阻塞式 window.alert()：不打断沉浸感，也不会在 headless 截图时卡住页面。
+// 用法：toast('已保存') / toast('保存失败：xxx', 'err') / toast(msg, 'warn', 6000)
+// 类型自动推断：以 ✅ 开头→ok；含「失败/错误/无效/不存在」→err；含「请先/暂无」→warn。
+// 点击可立即关闭；多条纵向堆叠；超过 4 条时自动移除最旧的一条。
+function toast(msg, type, ms) {
+  const text = String(msg ?? '').trim();
+  if (!text) return;
+  let host = document.getElementById('toast-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'toast-host';
+    document.body.appendChild(host);
+  }
+  if (!type) {
+    if (/^[✅✓]/.test(text)) type = 'ok';
+    else if (/失败|错误|无效|不存在|出错|异常/.test(text)) type = 'err';
+    else if (/^请先|^请输入|^请选择|暂无|还没有|为空/.test(text)) type = 'warn';
+    else type = '';
+  }
+  const el = document.createElement('div');
+  el.className = 'toast' + (type ? ' ' + type : '');
+  el.textContent = text;
+  const close = () => {
+    if (el.dataset.leaving) return;
+    el.dataset.leaving = '1';
+    el.classList.add('leaving');
+    setTimeout(() => el.remove(), 200);
+  };
+  el.addEventListener('click', close);
+  host.appendChild(el);
+  while (host.children.length > 4) host.firstChild.remove();
+  setTimeout(close, ms || (type === 'err' ? 5000 : 3200));
+}
+window.toast = toast;
+
+// ===== UI-4 无障碍：title → aria-label 自动同步（2026-09-02）=====
+// 原问题：气泡操作栏等处 37 个纯图标按钮（📋❝📌✏️✂️✕🔊🎨）只有 title，
+// 屏幕阅读器读不出用途、键盘 Tab 导航也没有语义。
+// 做法：用 MutationObserver 全局兜底——凡有 title 无 aria-label 的按钮自动补上，
+// 无需逐个改 25+ 处创建代码（也覆盖将来新增的按钮）。
+(function initAriaSync() {
+  const sync = (root) => {
+    const scope = root && root.querySelectorAll ? root : document;
+    for (const el of scope.querySelectorAll('button[title]:not([aria-label]), [role="button"][title]:not([aria-label])')) {
+      const t = el.getAttribute('title');
+      if (t) el.setAttribute('aria-label', t);
+    }
+  };
+  sync(document);
+  // 动态创建的按钮（气泡操作栏/弹窗等）也自动补
+  try {
+    if (document.body) {
+      new MutationObserver((muts) => {
+        for (const m of muts) {
+          for (const n of m.addedNodes) if (n.nodeType === 1) sync(n.matches?.('button[title]') ? n.parentNode : n);
+        }
+      }).observe(document.body, { childList: true, subtree: true });
+    }
+  } catch (e) { /* 老浏览器降级：仅首次同步 */ }
+})();
+
+// ===== 自定义确认弹窗（2026-09-02 FN-2）=====
+// 替代原生 await confirmDialog()：①不阻塞页面（流式回复进行中也能弹）②视觉与主题统一
+// ③危险操作可用红色强调。复用 .modal-overlay/.modal-box（已有全局 ESC/遮罩关闭委托）。
+// 用法：if (!await confirmDialog('要删除吗？', { danger: true })) return;
+//      if (!await confirmDialog('⚠️ 危险操作', { danger: true, okText: '确认删除' })) return;
+function confirmDialog(message, opts) {
+  const o = opts || {};
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    const danger = !!o.danger;
+    // 消息里的换行转 <br>，保留原 confirm 的多行表达力
+    const body = safeHtml(String(message || '')).replace(/\n/g, '<br>');
+    overlay.innerHTML = `<div class="modal-box u-modal-sm">
+      <div class="cfm-body">${body}</div>
+      <div class="cfm-actions">
+        <button class="btn-sm u-btn-lg cfm-cancel">${safeHtml(o.cancelText || '取消')}</button>
+        <button class="btn-sm u-btn-lg cfm-ok${danger ? ' danger' : ''}">${safeHtml(o.okText || '确定')}</button>
+      </div>
+    </div>`;
+    document.body.appendChild(overlay);
+    let settled = false;
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      overlay.remove();
+      document.removeEventListener('keydown', onKey, true);
+      resolve(v);
+    };
+    function onKey(e) {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(false); }
+      else if (e.key === 'Enter') { e.preventDefault(); done(true); }
+    }
+    overlay.querySelector('.cfm-ok').addEventListener('click', () => done(true));
+    overlay.querySelector('.cfm-cancel').addEventListener('click', () => done(false));
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) done(false); });
+    document.addEventListener('keydown', onKey, true);   // 捕获阶段，优先于全局 ESC 委托
+    overlay.querySelector('.cfm-ok').focus();
+  });
+}
+window.confirmDialog = confirmDialog;
+
+// ===== 加载态 + 错误详情统一封装（2026-09-02 UI-2/FN-3）=====
+// 原问题：37 个 load* 函数里 35 个 fetch 期间无任何反馈（点了像卡住），
+// 且失败只显示"加载失败"三字无原因（排障没线索）。
+// 用法：await withLoading(box, async () => { ...原加载逻辑... }, { rows: 3 });
+async function withLoading(el, fn, opts) {
+  if (!el) { try { return await fn(); } catch (e) { console.error('[withLoading] 无容器', e); return; } }
+  const rows = (opts && opts.rows) || 3;
+  const prev = el.innerHTML;
+  el.innerHTML = `<div class="skeleton-wrap">${'<div class="skeleton-line"></div>'.repeat(rows)}</div>`;
+  try {
+    return await fn();
+  } catch (e) {
+    // 错误详情：区分 HTTP 状态 / 网络异常 / 解析失败，给出可排障的信息
+    const msg = e && e.message ? e.message : String(e);
+    el.innerHTML = `<div class="load-error">加载失败<div class="load-error-detail">${safeHtml(msg)}</div>
+      <button class="load-retry">↻ 重试</button></div>`;
+    el.querySelector('.load-retry')?.addEventListener('click', () => withLoading(el, fn, opts));
+    console.error('[加载失败]', msg, e);
+  }
+}
+// fetch 包装：非 2xx 抛出带状态码的错误（否则 .json() 会静默失败或抛无意义的解析错）
+async function fetchJson(url, init) {
+  const r = await fetch(url, init);
+  if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText || ''}`.trim() + ` · ${url.split('?')[0]}`);
+  try {
+    return await r.json();
+  } catch (e) {
+    throw new Error('响应不是合法 JSON（后端可能返回了错误页）');
+  }
+}
+
+// ===== 弹窗全局 ESC 关闭（2026-09-02 外观阶段B 收尾）=====
+// 此前 33 个弹窗只有点遮罩能关、按 ESC 关不掉（体验缺口）。
+// 用一处全局监听覆盖所有弹窗：关闭最上层的 .modal-overlay（后插入的在 DOM 后面 = 视觉最上层），
+// 不改动 33 处弹窗结构（避免逐个重构的风险）。
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const overlays = document.querySelectorAll('.modal-overlay');
+  if (!overlays.length) return;
+  const top = overlays[overlays.length - 1];
+  // 输入中（textarea/input 内）按 ESC 也应能关弹窗，故不排除输入焦点
+  top.remove();
+  e.stopPropagation();
+});
+
+// 弹窗遮罩点击关闭（兜底）：33 个弹窗里 5 个漏写了 overlay.onclick，用全局委托统一补齐。
+// 只在点击目标 === overlay 本身（即遮罩空白区，非弹窗内容）时关闭，与各弹窗自带逻辑一致、不冲突。
+document.addEventListener('click', (e) => {
+  if (e.target instanceof Element && e.target.classList.contains('modal-overlay')) {
+    e.target.remove();
+  }
+});
+
+
 // 移除 U+FFFD（乱码替换符）与孤立代理项：防止流式拼接时把偶发乱码字节存成「方块」
 function sanitizeText(s) {
   return String(s ?? '')
@@ -83,7 +241,7 @@ function collectSettings() {
 }
 
 // 角色配色：任意角色名按哈希取色（稳定、无需名单）
-const CHAR_PALETTE = ['#a78bfa', '#f87171', '#60a5fa', '#f5c97b', '#f9a8d4', '#7fe0a9', '#fb923c', '#c084fc', '#67e8f9', '#5eead4', '#f0abfc', '#fda4af', '#fde68a', '#818cf8', '#d1d5db', '#fbbf24'];
+const CHAR_PALETTE = ['#a78bfa', '#f87171', 'var(--info)', '#f5c97b', '#f9a8d4', 'var(--success)', '#fb923c', '#c084fc', '#67e8f9', '#5eead4', '#f0abfc', '#fda4af', '#fde68a', '#818cf8', '#d1d5db', '#fbbf24'];
 function nameColor(name) {
   let h = 0;
   for (const ch of String(name || '')) h = (h * 31 + ch.codePointAt(0)) >>> 0;
@@ -193,7 +351,7 @@ function makeWrap(role, seq) {
       ttsBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         const t = (wrap.querySelector('.bubble')?.textContent || '').trim();
-        if (!t) { alert('该消息无文本可朗读'); return; }
+        if (!t) { toast('该消息无文本可朗读'); return; }
         openTts(t);
       });
       bar.appendChild(ttsBtn);
@@ -205,11 +363,77 @@ function makeWrap(role, seq) {
       illBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         const t = (wrap.querySelector('.bubble')?.textContent || '').trim();
-        if (!t) { alert('该消息无文本可配图'); return; }
+        if (!t) { toast('该消息无文本可配图'); return; }
         openIllustration(t.slice(0, 300));
       });
       bar.appendChild(illBtn);
     }
+    // ===== F6 气泡内一键复制 / 引用（2026-09-02）=====
+    const cpBtn = document.createElement('button');
+    cpBtn.className = 'ma-btn';
+    cpBtn.textContent = '📋';
+    cpBtn.title = '复制该条文本';
+    cpBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const t = (wrap.querySelector('.bubble')?.textContent || '').trim();
+      if (!t) { toast('该消息无文本可复制'); return; }
+      try {
+        await navigator.clipboard.writeText(t);
+        cpBtn.textContent = '✅';
+        setTimeout(() => { cpBtn.textContent = '📋'; }, 1200);
+      } catch (err) { toast('复制失败（浏览器未授权剪贴板）', 'err'); }
+    });
+    bar.appendChild(cpBtn);
+    const qtBtn = document.createElement('button');
+    qtBtn.className = 'ma-btn';
+    qtBtn.textContent = '❝';
+    qtBtn.title = '引用该条内容到输入框（继续往下写）';
+    qtBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const t = (wrap.querySelector('.bubble')?.textContent || '').trim();
+      if (!t) { toast('该消息无文本可引用'); return; }
+      const quoted = t.split('\n').map(l => '> ' + l).join('\n');
+      const cur = els.input.value;
+      els.input.value = quoted + '\n\n' + (cur ? cur : '');
+      els.input.focus();
+      els.input.setSelectionRange(els.input.value.length, els.input.value.length);
+      toast('已引用到输入框');
+    });
+    bar.appendChild(qtBtn);
+    // ===== 消息书签（2026-09-02 同步自正式版 NEW-2）=====
+    const bmBtn = document.createElement('button');
+    bmBtn.className = 'ma-btn bm-btn';
+    bmBtn.dataset.seq = seq;
+    bmBtn.textContent = '🔖';
+    bmBtn.title = '加书签 / 取消书签';
+    if (App.bookmarksCache?.some?.(b => Number(b.seq) === Number(seq))) bmBtn.classList.add('on');
+    bmBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!App.chatId) { toast('请先打开对话'); return; }
+      const label = (wrap.querySelector('.bubble')?.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+      try {
+        const d = await (await fetch('/api/bookmarks/' + encodeURIComponent(App.chatId), {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ action: 'toggle', mark: { seq, label, role: wrap.classList.contains('user') ? 'user' : 'assistant' } }),
+        })).json();
+        if (d.ok) {
+          bmBtn.classList.toggle('on', !!d.marked);
+          toast(d.marked ? '🔖 已加书签' : '已取消书签');
+          loadBookmarksUI();
+        } else { toast(d.error || '操作失败', 'err'); }
+      } catch (err) { toast('书签操作异常：' + err.message, 'err'); }
+    });
+    bar.appendChild(bmBtn);
+    // ===== 从此分叉（2026-09-02 同步自正式版）：复制该条及之前的消息到新会话 =====
+    const forkBtn = document.createElement('button');
+    forkBtn.className = 'ma-btn';
+    forkBtn.textContent = '⤵';
+    forkBtn.title = '从此分叉：把该条及之前的消息复制为新会话（原会话不变）';
+    forkBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await forkFromSeq(seq);
+    });
+    bar.appendChild(forkBtn);
     const eb = document.createElement('button');
     eb.className = 'ma-btn';
     eb.textContent = '✏️';
@@ -425,7 +649,7 @@ function rebuildMsgWrap(wrap, role, content, seq) {
     row.className = 'msg user';
     const av = document.createElement('div');
     av.className = 'avatar';
-    av.style.borderColor = '#60a5fa';
+    av.style.borderColor = 'var(--info)';
     av.innerHTML = avatarHtml('你');
     const nm = document.createElement('div');
     nm.className = 'char-name';
@@ -489,8 +713,102 @@ function renderAssistant(content, seq) {
     wrap.appendChild(row);
   }
   els.messages.scrollTop = els.messages.scrollHeight;
+  // F1 Swipe 版本切换器（2026-09-02 同步自正式版）
+  attachVersionSwiper(wrap, seq);
   return wrap;
 }
+
+// 给 assistant 气泡挂版本切换器：‹ 当前/总数 ›（同步自正式版 F1）
+function attachVersionSwiper(wrap, seq) {
+  if (!wrap || seq == null) return;
+  const idx = App.history.findIndex((m) => m.seq === seq);
+  if (idx < 0) return;
+  let anchorSeq = null;
+  for (let i = idx - 1; i >= 0; i--) { if (App.history[i].role === 'user') { anchorSeq = App.history[i].seq; break; } }
+  if (anchorSeq == null) return;
+  const versions = rerollVersions[anchorSeq];
+  if (!Array.isArray(versions) || !versions.length) return;
+  const total = versions.length + 1;
+  wrap.querySelector('.ver-swiper')?.remove();
+  const sw = document.createElement('div');
+  sw.className = 'ver-swiper';
+  const prev = document.createElement('button');
+  prev.className = 'ma-btn';
+  prev.textContent = '‹';
+  prev.title = '上一个版本（切到重 roll 之前的回复）';
+  prev.addEventListener('click', (e) => { e.stopPropagation(); restoreVersion(anchorSeq, versions.length - 1, seq); });
+  const label = document.createElement('span');
+  label.className = 'ver-label';
+  label.textContent = `${total}/${total}`;
+  label.title = `共 ${total} 个版本（含当前）`;
+  const next = document.createElement('button');
+  next.className = 'ma-btn';
+  next.textContent = '›';
+  next.title = '已是最新版本';
+  next.disabled = true;
+  sw.appendChild(prev); sw.appendChild(label); sw.appendChild(next);
+  const bub = wrap.querySelector('.bubble');
+  if (bub) bub.appendChild(sw);
+}
+
+// ===== 分段渲染（2026-09-02 同步自正式版 FN-1：长对话不再全量渲染）=====
+// 通用版适配：无摘要压缩/旁注/书签/时间轴机制，故移除相应调用（只保留本函数核心）。
+const RENDER_BATCH = 80;
+
+function renderHistorySlice(count) {
+  const hiddenSet = App.renderHidden || new Set();
+  const summaryText = App.renderSummaryText || '';
+  const end = App.renderCursor;                    // 本次渲染区间的右端（不含）
+  const start = Math.max(0, end - count);          // 左端
+  if (end <= 0) return;
+
+  // 记录渲染前的滚动锚点（追加到顶部后保持视觉位置不跳）
+  const box = els.messages;
+  const prevH = box.scrollHeight, prevTop = box.scrollTop;
+
+  // 先移除旧的「加载更早」按钮（稍后按需重建）
+  document.getElementById('load-earlier-bar')?.remove();
+
+  // 渲染 [start, end) —— 用文档片段暂存，保证插入顺序正确（要插到最前面）
+  const frag = document.createDocumentFragment();
+  const origMessages = els.messages;
+  els.messages = frag;                             // 临时接管渲染目标
+  let skippedCount = 0;
+  try {
+    for (let i = start; i < end; i++) {
+      const m = App.history[i];
+      if (!m) continue;
+      if (hiddenSet.has(m.seq)) { skippedCount++; continue; }
+      if (skippedCount > 0) { skippedCount = 0; }   // 通用版无摘要折叠，仅重置计数
+      if (m.role === 'user') renderUser(m.content, m.seq);
+      else if (m.role === 'assistant') {
+        if (m.thinking && App.prefs.showThinking !== false) renderThinking(m.thinking);
+        renderAssistant(m.content, m.seq);
+      }
+    }
+  } finally {
+    els.messages = origMessages;                   // 无论如何都要还原，否则后续渲染全错
+  }
+  box.insertBefore(frag, box.firstChild);
+  App.renderCursor = start;
+
+  // 仍有更早的消息 → 顶部放加载按钮
+  if (start > 0) {
+    const bar = document.createElement('div');
+    bar.id = 'load-earlier-bar';
+    bar.className = 'load-earlier-bar';
+    const n = Math.min(RENDER_BATCH, start);
+    bar.innerHTML = `<button class="load-earlier-btn">⬆ 加载更早的 ${n} 条<span class="le-rest">（还有 ${start} 条）</span></button>`;
+    bar.querySelector('.load-earlier-btn').addEventListener('click', () => renderHistorySlice(RENDER_BATCH));
+    box.insertBefore(bar, box.firstChild);
+  }
+
+  // 首次渲染滚到底；追加更早内容时保持原视觉位置
+  if (end === App.history.length) box.scrollTop = box.scrollHeight;
+  else box.scrollTop = prevTop + (box.scrollHeight - prevH);
+  renderTimelineNav();       // 时间轴：消息集合变了重建刻度
+}
+
 
 function renderUser(content, seq) {
   const wrap = makeWrap('user', seq);
@@ -498,7 +816,7 @@ function renderUser(content, seq) {
   row.className = 'msg user';
   const av = document.createElement('div');
   av.className = 'avatar';
-  av.style.borderColor = '#60a5fa';
+  av.style.borderColor = 'var(--info)';
   av.innerHTML = avatarHtml('你');
   const body = document.createElement('div');
   body.style.flex = '1';
@@ -683,7 +1001,7 @@ async function saveChat() {
       const r = await fetch('/api/chats/' + App.chatId, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ title, messages: App.history }),
+        body: JSON.stringify({ title, messages: App.history, versions: rerollVersions }),
       });
       if (r.ok) { App.chatTitle = title; return; }
     } catch (e) { /* 网络异常 → 重试 */ }
@@ -717,7 +1035,7 @@ function downloadBlob(filename, content, type) {
   setTimeout(() => URL.revokeObjectURL(a.href), 3000);
 }
 function exportChat(md) {
-  if (!App.chatId || !App.history.length) { alert('当前会话为空，无内容可导出'); return; }
+  if (!App.chatId || !App.history.length) { toast('当前会话为空，无内容可导出'); return; }
   const firstUser = App.history.find((m) => m.role === 'user');
   const title = App.chatTitle || (firstUser ? firstUser.content.slice(0, 24) : '新对话');
   const safeTitle = title.replace(/[\\/:*?"<>|]/g, '_').slice(0, 40);
@@ -766,14 +1084,14 @@ importFileInput.addEventListener('change', async () => {
     if (!r.ok) throw new Error('写入失败（HTTP ' + r.status + '）');
     await openChat(id);
   } catch (e) {
-    alert('导入失败：' + e.message);
+    toast('导入失败：' + e.message);
   }
 });
 
 // ---------- 存档点（💾 存档 / ↩ 读档，按会话；服务端存 data/savepoints/{chatId}/{ts}.json 完整副本） ----------
 document.getElementById('savepoint-btn').addEventListener('click', async () => {
-  if (!App.chatId) { alert('还没有会话，无法存档'); return; }
-  if (!App.history.length) { alert('当前会话为空，无需存档'); return; }
+  if (!App.chatId) { toast('还没有会话，无法存档'); return; }
+  if (!App.history.length) { toast('当前会话为空，无需存档'); return; }
   await saveChat();   // 先把最新对话落盘，再存副本
   const label = (prompt('存档备注（可留空）：', '') || '').trim().slice(0, 40);
   try {
@@ -783,14 +1101,14 @@ document.getElementById('savepoint-btn').addEventListener('click', async () => {
       body: JSON.stringify({ chatId: App.chatId, label }),
     })).json();
     if (!r.ok) throw new Error(r.error || '存档失败');
-    alert('✅ ' + r.note);
-  } catch (e) { alert('存档失败：' + e.message); }
+    toast('✅ ' + r.note);
+  } catch (e) { toast('存档失败：' + e.message); }
 });
 document.getElementById('loadpoint-btn').addEventListener('click', async () => {
-  if (!App.chatId) { alert('还没有会话，无法读档'); return; }
+  if (!App.chatId) { toast('还没有会话，无法读档'); return; }
   try {
     const { ok, savepoints } = await (await fetch(`/api/savepoints/list?chatId=${encodeURIComponent(App.chatId)}`)).json();
-    if (!ok || !savepoints || !savepoints.length) { alert('本会话还没有存档点'); return; }
+    if (!ok || !savepoints || !savepoints.length) { toast('本会话还没有存档点'); return; }
     const choice = prompt(
       '选择要读取的存档点（输入序号，Enter 取消）：\n\n' +
       savepoints.map((s, i) => `${i + 1}. ${s.label || '（无备注）'} · ${new Date(s.ts).toLocaleString()} · ${s.count} 条消息`).join('\n'),
@@ -799,7 +1117,7 @@ document.getElementById('loadpoint-btn').addEventListener('click', async () => {
     const idx = Number(choice);
     if (!choice || !Number.isFinite(idx)) return;
     const sp = savepoints[idx - 1];
-    if (!sp) { alert('序号无效'); return; }
+    if (!sp) { toast('序号无效'); return; }
     if (!confirm(`读取存档点「${sp.label || '（无备注）'}」（${new Date(sp.ts).toLocaleString()}，${sp.count} 条消息）？\n当前会话内容将被存档副本覆盖（可先导出备份）。`)) return;
     const r = await (await fetch('/api/savepoints/load', {
       method: 'POST',
@@ -814,7 +1132,7 @@ document.getElementById('loadpoint-btn').addEventListener('click', async () => {
     App.msgSeq = 0;
     await openChat(App.chatId);
     if (!App.history.length && prevHistory.length) App.history = prevHistory;   // GET 失败 → 恢复旧状态
-  } catch (e) { alert('读档失败：' + e.message); }
+  } catch (e) { toast('读档失败：' + e.message); }
 });
 
 async function loadChatList() {
@@ -854,7 +1172,7 @@ async function loadChatList() {
           });
           if (!r.ok) throw new Error('HTTP ' + r.status);
           if (c.id === App.chatId) App.chatTitle = name;   // 当前会话标题同步，后续 saveChat 沿用
-        } catch (err) { alert('重命名失败：' + err.message); }
+        } catch (err) { toast('重命名失败：' + err.message); }
         loadChatList();
       });
       d.querySelector('.ci-archive').addEventListener('click', async (e) => {
@@ -942,8 +1260,8 @@ function showChatProfilePicker() {
       const isCurrent = id === App.currentChatProfileId;
       const btn = document.createElement('button');
       btn.className = 'btn-sm';
-      btn.style.cssText = `padding:10px 16px;text-align:left;border-left:4px solid ${p.color||'#639922'};background:var(--bg2,#f5f5f5);border-radius:6px;cursor:pointer;${isCurrent?'border:1px solid var(--accent,#a78bfa);background:var(--bg3,#2a2f45)':''}`;
-      btn.innerHTML = `<div style="font-weight:500">${p.label||id}${isCurrent?' <span style="color:var(--accent,#a78bfa);font-size:11px">← 当前会话使用</span>':''}</div>${p.prefix?'<div style="font-size:12px;color:var(--text-secondary,#888);margin-top:2px">'+p.prefix.slice(0,50)+'...</div>':''}`;
+      btn.style.cssText = `padding:10px 16px;text-align:left;border-left:4px solid ${p.color||'#639922'};background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:6px;cursor:pointer;${isCurrent?'border-color:var(--accent);background:var(--bg2)':''}`;
+      btn.innerHTML = `<div style="font-weight:500">${p.label||id}${isCurrent?' <span style="color:var(--accent);font-size:11px">← 当前会话使用</span>':''}</div>${p.prefix?'<div style="font-size:12px;color:var(--muted);margin-top:2px">'+p.prefix.slice(0,50)+'...</div>':''}`;
       btn.onclick = () => { overlay.remove(); resolve(id); };
       list.appendChild(btn);
     }
@@ -973,6 +1291,7 @@ async function newChat() {
     loadChatList();
     loadChatProfileManage();   // 配置档按会话刷新（新会话标记跟随）
     loadTimeline();   // 剧情记忆按会话隔离，切会话后刷新
+    loadBookmarksUI();   // 书签按会话加载（同步自正式版 NEW-2）
     loadInventory();
     loadSessionNote();   // 会话常驻设定按会话加载（新会话为空）
     loadAgendaUI();      // 剧情备忘按会话加载（M8/M10）
@@ -995,20 +1314,19 @@ async function openChat(id) {
     localStorage.setItem(CUR_CHAT_KEY, id);
     els.messages.innerHTML = '';
     App.history = Array.isArray(c.messages) ? c.messages : [];
-    // 恢复旧会话：无 seq 的补发（兼容历史数据）
-    for (const m of App.history) {
+    // ⭐ 分段加载（2026-09-02 同步自正式版 FN-1）：长对话全量渲染会卡，改为只渲染最近 RENDER_BATCH 条。
+    for (const m of App.history) {   // 先统一补 seq（分段渲染也要保证 seq 完整）
       if (!m.seq) m.seq = ++App.msgSeq;
       else App.msgSeq = Math.max(App.msgSeq, m.seq);
-      if (m.role === 'user') renderUser(m.content, m.seq);
-      else if (m.role === 'assistant') {
-        // 先渲染思考块（与实时生成顺序一致：思考在回复内容上方）
-        if (m.thinking && App.prefs.showThinking !== false) renderThinking(m.thinking);
-        renderAssistant(m.content, m.seq);
-      }
     }
+    App.renderCursor = App.history.length;
+    App.renderHidden = new Set();
+    App.renderSummaryText = '';
+    renderHistorySlice(RENDER_BATCH);
     loadChatList();
     loadChatProfileManage();   // 配置档按会话刷新（切换对话后「← 当前会话」标记跟随）
     loadTimeline();   // 剧情记忆按会话隔离，切会话后刷新
+    loadBookmarksUI();   // 书签按会话加载（同步自正式版 NEW-2）
     loadInventory();
     loadCurrentWardrobe();
     loadSessionNote();   // 会话常驻设定按会话加载
@@ -1144,9 +1462,9 @@ document.getElementById('inject-save').addEventListener('click', async () => {
       note.classList.remove('hidden');
       setTimeout(() => note.classList.add('hidden'), 3000);
     } else {
-      alert('保存失败：' + (r.error || '未知错误'));
+      toast('保存失败：' + (r.error || '未知错误'));
     }
-  } catch (e) { alert('保存失败：' + e.message); }
+  } catch (e) { toast('保存失败：' + e.message); }
 });
 
 // ---------- API 采样预设（命名预设） ----------
@@ -1264,10 +1582,10 @@ profileInput.addEventListener('change', async () => {
       loadStats();
       if (r.preset) { await loadPresets(); }
     } else {
-      alert('档案切换失败：' + (r.error || '未知错误'));
+      toast('档案切换失败：' + (r.error || '未知错误'));
       loadProfiles();
     }
-  } catch (e) { alert('档案切换失败：' + e.message); loadProfiles(); }
+  } catch (e) { toast('档案切换失败：' + e.message); loadProfiles(); }
 });
 document.getElementById('profile-apply').addEventListener('click', async () => {
   const name = profileSelect.value;
@@ -1389,10 +1707,10 @@ modelInput.addEventListener('change', async () => {
       updatePeakBanner();
       loadStats();   // 切换模型后统计栏立即跟随新模型
     } else {
-      alert('模型切换失败：' + (r.error || '未知错误'));
+      toast('模型切换失败：' + (r.error || '未知错误'));
       loadModel();
     }
-  } catch (e) { alert('模型切换失败：' + e.message); loadModel(); }
+  } catch (e) { toast('模型切换失败：' + e.message); loadModel(); }
 });
 
 // ---------- 皮肤 & 背景（主题 + 自定义调色板 + 背景 URL） ----------
@@ -2178,7 +2496,7 @@ function updateTokenEstimate() {
   const maxCtx = App.currentMaxContext || 1048576;
   const remaining = maxCtx - contextTokens;
   const pct = maxCtx > 0 ? (contextTokens / maxCtx * 100) : 0;
-  el.innerHTML = `<span>约 ${inputTokens.toLocaleString()} tok</span> · <span>上下文 ${(contextTokens/1000).toFixed(1)}K/${(maxCtx/1000).toFixed(0)}K</span> · <span style="color:${pct>80?'#f0a3a3':pct>60?'#f0d080':'var(--muted,#888)'}">余量 ${(remaining/1000).toFixed(1)}K</span>`;
+  el.innerHTML = `<span>约 ${inputTokens.toLocaleString()} tok</span> · <span>上下文 ${(contextTokens/1000).toFixed(1)}K/${(maxCtx/1000).toFixed(0)}K</span> · <span style="color:${pct>80?'var(--danger)':pct>60?'#f0d080':'var(--muted,#888)'}">余量 ${(remaining/1000).toFixed(1)}K</span>`;
 }
 App.lastSystemPrompt = '';
 App.currentMaxContext = 1048576;
@@ -2187,14 +2505,14 @@ els.input.addEventListener('input', updateTokenEstimate);
 document.getElementById('var-hint-btn')?.addEventListener('click', () => {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
-  overlay.innerHTML = `<div class="modal-box" style="max-width:420px"><div style="font-size:15px;font-weight:500;margin-bottom:12px">变量模板</div><table style="width:100%;font-size:13px;border-collapse:collapse"><tr style="border-bottom:1px solid var(--border,#3a4163)"><td style="padding:6px;font-weight:500">变量</td><td style="padding:6px;font-weight:500">替换为</td></tr><tr><td style="padding:6px;font-family:monospace">{{user}}</td><td style="padding:6px">用户名</td></tr><tr><td style="padding:6px;font-family:monospace">{{char}}</td><td style="padding:6px">当前角色名</td></tr><tr><td style="padding:6px;font-family:monospace">{{time}}</td><td style="padding:6px">当前时间</td></tr><tr><td style="padding:6px;font-family:monospace">{{date}}</td><td style="padding:6px">当前日期</td></tr><tr><td style="padding:6px;font-family:monospace">{{chatId}}</td><td style="padding:6px">会话 ID</td></tr><tr><td style="padding:6px;font-family:monospace">{{turnCount}}</td><td style="padding:6px">消息数</td></tr><tr><td style="padding:6px;font-family:monospace">{{lastMessage}}</td><td style="padding:6px">最后用户消息</td></tr></table><div style="margin-top:16px;display:flex;justify-content:flex-end"><button id="var-close" class="btn-sm" style="padding:6px 16px">关闭</button></div></div>`;
+  overlay.innerHTML = `<div class="modal-box" style="max-width:420px"><div style="font-size:15px;font-weight:500;margin-bottom:12px">变量模板</div><table style="width:100%;font-size:13px;border-collapse:collapse"><tr style="border-bottom:1px solid var(--border)"><td style="padding:6px;font-weight:500">变量</td><td style="padding:6px;font-weight:500">替换为</td></tr><tr><td style="padding:6px;font-family:monospace">{{user}}</td><td style="padding:6px">用户名</td></tr><tr><td style="padding:6px;font-family:monospace">{{char}}</td><td style="padding:6px">当前角色名</td></tr><tr><td style="padding:6px;font-family:monospace">{{time}}</td><td style="padding:6px">当前时间</td></tr><tr><td style="padding:6px;font-family:monospace">{{date}}</td><td style="padding:6px">当前日期</td></tr><tr><td style="padding:6px;font-family:monospace">{{chatId}}</td><td style="padding:6px">会话 ID</td></tr><tr><td style="padding:6px;font-family:monospace">{{turnCount}}</td><td style="padding:6px">消息数</td></tr><tr><td style="padding:6px;font-family:monospace">{{lastMessage}}</td><td style="padding:6px">最后用户消息</td></tr></table><div style="margin-top:16px;display:flex;justify-content:flex-end"><button id="var-close" class="btn-sm" style="padding:6px 16px">关闭</button></div></div>`;
   document.body.appendChild(overlay);
   overlay.querySelector('#var-close').onclick = () => overlay.remove();
   overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
 });
 // 剧情建议
 document.getElementById('suggestions-btn')?.addEventListener('click', async () => {
-  if (!App.chatId) { alert('请先创建或打开一个对话'); return; }
+  if (!App.chatId) { toast('请先创建或打开一个对话'); return; }
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `<div class="modal-box" style="max-width:500px;max-height:80vh;overflow-y:auto"><div style="font-size:15px;font-weight:500;margin-bottom:12px">✨ 剧情走向建议</div><div id="suggestions-loading" style="text-align:center;padding:20px;color:var(--muted,#888)">正在构思剧情走向...</div><div id="suggestions-list" style="display:flex;flex-direction:column;gap:10px"></div><div style="margin-top:16px;display:flex;justify-content:flex-end"><button id="sg-close" class="btn-sm" style="padding:6px 16px">关闭</button></div></div>`;
@@ -2211,11 +2529,11 @@ document.getElementById('suggestions-btn')?.addEventListener('click', async () =
     if (!d.suggestions?.length) { list.textContent = '暂无建议'; return; }
     for (const sg of d.suggestions) {
       const card = document.createElement('div');
-      card.style.cssText = 'padding:12px;border-radius:8px;background:var(--bg2,#f5f5f5);border:1px solid var(--border,#3a4163)';
+      card.style.cssText = 'padding:12px;border-radius:8px;background:var(--bg2);border:1px solid var(--border)';
       const safeTitle = escapeHtml(sg.title || '未命名');
       const safeMood = sg.mood ? '氛围：' + escapeHtml(sg.mood) : '';
       const safeDetail = escapeHtml(sg.detail || '');
-      card.innerHTML = `<div style="font-weight:500;font-size:13px;margin-bottom:4px">${safeTitle}</div><div style="font-size:12px;color:var(--muted,#888);margin-bottom:6px">${safeMood}</div><div style="font-size:13px;display:none" class="sg-detail">${safeDetail}</div><div style="display:flex;gap:6px;margin-top:8px"><button class="btn-sm sg-expand" style="padding:4px 10px;font-size:11px">展开</button><button class="btn-sm sg-use" style="padding:4px 10px;font-size:11px;background:var(--accent,#a78bfa);color:#fff;border:none;border-radius:4px">采用</button></div>`;
+      card.innerHTML = `<div style="font-weight:500;font-size:13px;margin-bottom:4px">${safeTitle}</div><div style="font-size:12px;color:var(--muted,#888);margin-bottom:6px">${safeMood}</div><div style="font-size:13px;display:none" class="sg-detail">${safeDetail}</div><div style="display:flex;gap:6px;margin-top:8px"><button class="btn-sm sg-expand" style="padding:4px 10px;font-size:11px">展开</button><button class="btn-sm sg-use" style="padding:4px 10px;font-size:11px;background:var(--accent);color:#fff;border:none;border-radius:4px">采用</button></div>`;
       card.querySelector('.sg-expand').onclick = () => { const det = card.querySelector('.sg-detail'); det.style.display = det.style.display === 'none' ? 'block' : 'none'; };
       card.querySelector('.sg-use').onclick = () => { els.input.value = (sg.detail || sg.title || ''); overlay.remove(); els.input.focus(); };
       list.appendChild(card);
@@ -2229,8 +2547,8 @@ document.getElementById('recall-btn')?.addEventListener('click', async () => {
   overlay.innerHTML = `<div class="modal-box" style="max-width:550px;max-height:80vh;overflow-y:auto">
     <div style="font-size:15px;font-weight:500;margin-bottom:12px">🔍 历史搜索</div>
     <div style="display:flex;gap:8px;margin-bottom:12px">
-      <input id="recall-query" style="flex:1;padding:8px;border-radius:6px;background:var(--bg2,#232946);color:var(--text,#e8e6f0);border:1px solid var(--border,#3a4163)" placeholder="搜索聊天历史…" autofocus>
-      <button id="recall-search" class="btn-sm" style="padding:8px 16px;background:var(--accent,#7F77DD);color:#fff;border-radius:6px;border:none;cursor:pointer">搜索</button>
+      <input id="recall-query" style="flex:1;padding:8px;border-radius:6px;background:var(--bg2);color:var(--text);border:1px solid var(--border)" placeholder="搜索聊天历史…" autofocus>
+      <button id="recall-search" class="btn-sm" style="padding:8px 16px;background:var(--accent);color:#fff;border-radius:6px;border:none;cursor:pointer">搜索</button>
     </div>
     <label style="font-size:12px;color:var(--muted,#888)"><input type="checkbox" id="recall-global"> 跨会话搜索（默认仅当前会话）</label>
     <div id="recall-results" style="margin-top:12px;font-size:12px"></div>
@@ -2253,9 +2571,9 @@ document.getElementById('recall-btn')?.addEventListener('click', async () => {
       resBox.innerHTML = `<div style="color:var(--muted,#888);margin-bottom:8px">共 ${d.total} 条消息，找到 ${d.results.length} 条相关记忆</div>`;
       for (const item of d.results) {
         const card = document.createElement('div');
-        card.style.cssText = 'padding:8px;margin-bottom:6px;border-radius:6px;background:var(--bg2,#1f2438);border:1px solid var(--border,#3a4163);cursor:pointer';
+        card.style.cssText = 'padding:8px;margin-bottom:6px;border-radius:6px;background:var(--bg2);border:1px solid var(--border);cursor:pointer';
         const preview = item.content.length > 200 ? item.content.slice(0, 200) + '…' : item.content;
-        card.innerHTML = `<div style="display:flex;justify-content:space-between;margin-bottom:4px"><span style="color:var(--accent,#7F77DD);font-size:11px">${String(item.chatTitle || item.chatId).replace(/</g,'&lt;')}</span><span style="color:var(--muted,#888);font-size:11px">相关度 ${item.score.toFixed(2)}</span></div><div style="font-size:12px;white-space:pre-wrap;word-break:break-word">${preview.replace(/</g,'&lt;')}</div>`;
+        card.innerHTML = `<div style="display:flex;justify-content:space-between;margin-bottom:4px"><span style="color:var(--accent);font-size:11px">${String(item.chatTitle || item.chatId).replace(/</g,'&lt;')}</span><span style="color:var(--muted,#888);font-size:11px">相关度 ${item.score.toFixed(2)}</span></div><div style="font-size:12px;white-space:pre-wrap;word-break:break-word">${preview.replace(/</g,'&lt;')}</div>`;
         card.onclick = () => { els.input.value = (els.input.value ? els.input.value + '\n' : '') + item.content.slice(0, 500); overlay.remove(); els.input.focus(); };
         resBox.appendChild(card);
       }
@@ -2274,13 +2592,13 @@ function openIllustration(prefillText) {
   overlay.innerHTML = `<div class="modal-box" style="max-width:500px;max-height:80vh;overflow-y:auto">
     <div style="font-size:15px;font-weight:500;margin-bottom:12px">🎨 场景插图</div>
     <label style="font-size:12px;color:var(--muted,#888)">场景描述（已自动提取最近对话，可修改）</label>
-    <textarea id="ill-prompt" rows="3" style="width:100%;padding:8px;margin:4px 0 8px;border-radius:6px;background:var(--bg2,#232946);color:var(--text,#e8e6f0);border:1px solid var(--border,#3a4163);resize:vertical" placeholder="描述你想生成的场景…"></textarea>
+    <textarea id="ill-prompt" rows="3" style="width:100%;padding:8px;margin:4px 0 8px;border-radius:6px;background:var(--bg2);color:var(--text);border:1px solid var(--border);resize:vertical" placeholder="描述你想生成的场景…"></textarea>
     <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap">
       <button id="ill-auto" class="btn-sm" style="padding:4px 10px;margin-bottom:8px;font-size:12px">🔍 从对话提取</button>
       <button id="ill-enhance" class="btn-sm" style="padding:4px 10px;margin-bottom:8px;font-size:12px">✨ 提示词优化</button>
     </div>
     <label style="font-size:12px;color:var(--muted,#888)">风格</label>
-    <select id="ill-style" style="width:100%;padding:6px;margin:4px 0 8px;border-radius:6px;background:var(--bg2,#232946);color:var(--text,#e8e6f0);border:1px solid var(--border,#3a4163)">
+    <select id="ill-style" style="width:100%;padding:6px;margin:4px 0 8px;border-radius:6px;background:var(--bg2);color:var(--text);border:1px solid var(--border)">
       <option value="">（跟随模型默认）</option>
       <option value="anime">动漫风格</option>
       <option value="realistic">写实风格</option>
@@ -2288,7 +2606,7 @@ function openIllustration(prefillText) {
       <option value="sketch">素描风格</option>
     </select>
     <label style="font-size:12px;color:var(--muted,#888)">引擎</label>
-    <select id="ill-engine" style="width:100%;padding:6px;margin:4px 0 8px;border-radius:6px;background:var(--bg2,#232946);color:var(--text,#e8e6f0);border:1px solid var(--border,#3a4163)">
+    <select id="ill-engine" style="width:100%;padding:6px;margin:4px 0 8px;border-radius:6px;background:var(--bg2);color:var(--text);border:1px solid var(--border)">
       <option value="kolors">Kolors（免费）</option>
       <option value="zimage">Z-Image（¥0.30/张）</option>
       <option value="zturb">Z-Image-Turbo（¥0.10/张）</option>
@@ -2296,12 +2614,12 @@ function openIllustration(prefillText) {
       <option value="ernie">ERNIE-Image（¥0.11/张）</option>
     </select>
     <label style="display:flex;align-items:center;gap:6px;margin:8px 0;font-size:12px;cursor:pointer;color:var(--muted,#888)">
-      <input type="checkbox" id="ill-scenery-only" style="accent-color:var(--accent,#7F77DD)">
+      <input type="checkbox" id="ill-scenery-only" style="accent-color:var(--accent)">
       🎭 纯场景（无人物）— 过滤人物，只出环境/背景
     </label>
     <div id="ill-result" style="margin-top:12px;text-align:center"></div>
     <div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px">
-      <button id="ill-generate" class="btn-sm" style="padding:6px 16px;background:var(--accent,#7F77DD);color:#fff;border-radius:6px;border:none;cursor:pointer">生成</button>
+      <button id="ill-generate" class="btn-sm" style="padding:6px 16px;background:var(--accent);color:#fff;border-radius:6px;border:none;cursor:pointer">生成</button>
       <button id="ill-config" class="btn-sm" style="padding:6px 16px">⚙️ 配置</button>
       <button id="ill-close" class="btn-sm" style="padding:6px 16px">关闭</button>
     </div>
@@ -2330,7 +2648,7 @@ function openIllustration(prefillText) {
   overlay.querySelector('#ill-enhance').onclick = async () => {
     const promptBox = overlay.querySelector('#ill-prompt');
     const raw = promptBox.value.trim();
-    if (!raw) { alert('请先输入或提取场景描述，再优化提示词'); return; }
+    if (!raw) { toast('请先输入或提取场景描述，再优化提示词'); return; }
     const style = overlay.querySelector('#ill-style').value;
     const btn = overlay.querySelector('#ill-enhance');
     const resBox = overlay.querySelector('#ill-result');
@@ -2340,10 +2658,10 @@ function openIllustration(prefillText) {
     try {
       const r = await fetch('/api/illustration/enhance', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: raw, style }) });
       const d = await r.json();
-      if (d.error) { resBox.innerHTML = `<div style="color:#f0a3a3;padding:12px">${safeHtml(d.error)}</div>`; return; }
+      if (d.error) { resBox.innerHTML = `<div style="color:var(--danger);padding:12px">${safeHtml(d.error)}</div>`; return; }
       promptBox.value = d.enhanced;
-      resBox.innerHTML = `<div style="color:#7fe0a9;padding:12px;font-size:12px">✨ 已优化（${d.enhanced.length} 字符），可直接生成或继续修改</div>`;
-    } catch (e) { resBox.innerHTML = `<div style="color:#f0a3a3;padding:12px">优化失败：${safeHtml(e.message)}</div>`; }
+      resBox.innerHTML = `<div style="color:var(--success);padding:12px;font-size:12px">✨ 已优化（${d.enhanced.length} 字符），可直接生成或继续修改</div>`;
+    } catch (e) { resBox.innerHTML = `<div style="color:var(--danger);padding:12px">优化失败：${safeHtml(e.message)}</div>`; }
     finally { btn.textContent = oldText; btn.disabled = false; }
   };
   // 风格 → 英文提示词片段（硅基流动对英文更稳）
@@ -2353,7 +2671,7 @@ function openIllustration(prefillText) {
   };
   overlay.querySelector('#ill-generate').onclick = async () => {
     const prompt = overlay.querySelector('#ill-prompt').value.trim();
-    if (!prompt) { alert('请输入场景描述'); return; }
+    if (!prompt) { toast('请输入场景描述'); return; }
     const style = overlay.querySelector('#ill-style').value;
     const engine = overlay.querySelector('#ill-engine').value;
     const sceneryOnly = overlay.querySelector('#ill-scenery-only')?.checked || false;
@@ -2364,7 +2682,7 @@ function openIllustration(prefillText) {
       const r = await fetch('/api/illustration/generate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: fullPrompt, style, engine, chatId: App.chatId, sceneryOnly }) });
       const d = await r.json();
       if (d.error) {
-        resBox.innerHTML = `<div style="color:#f0a3a3;padding:12px">${safeHtml(d.error)}</div>`;
+        resBox.innerHTML = `<div style="color:var(--danger);padding:12px">${safeHtml(d.error)}</div>`;
         if (d.needConfig) resBox.innerHTML += '<div style="font-size:12px;color:var(--muted,#888);margin-top:8px">点击「配置」按钮设置图片生成 API Key（硅基流动）</div>';
         return;
       }
@@ -2372,9 +2690,9 @@ function openIllustration(prefillText) {
         const isData = /^data:/.test(d.image);
         const src = isData ? d.image : (d.image.url || d.image);
         resBox.innerHTML = `<img src="${src}" style="max-width:100%;max-height:360px;border-radius:8px;display:block;margin:0 auto;image-rendering:auto" alt="场景插图"/>` +
-          `<div style="color:#7fe0a9;padding:12px;font-size:12px">✅ 已生成（${safeHtml(d.label || d.model || '')}${d.price ? ' · ' + safeHtml(d.price) : ''}）</div>`;
+          `<div style="color:var(--success);padding:12px;font-size:12px">✅ 已生成（${safeHtml(d.label || d.model || '')}${d.price ? ' · ' + safeHtml(d.price) : ''}）</div>`;
       } else {
-        resBox.innerHTML = `<div style="color:#7fe0a9;padding:12px">${safeHtml(d.message || '功能就绪')}</div>`;
+        resBox.innerHTML = `<div style="color:var(--success);padding:12px">${safeHtml(d.message || '功能就绪')}</div>`;
       }
     } catch (e) { resBox.textContent = '请求失败：' + e.message; }
   };
@@ -2385,8 +2703,8 @@ function openIllustration(prefillText) {
     const baseURL = prompt('Base URL（留空用默认 api.siliconflow.cn/v1）：', '');
     try {
       await fetch('/api/illustration/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ engine, apiKey, baseURL }) });
-      alert('✅ 配置已保存');
-    } catch (e) { alert('保存失败：' + e.message); }
+      toast('✅ 配置已保存');
+    } catch (e) { toast('保存失败：' + e.message); }
   };
 }
 // 语音朗读：TTS 合成
@@ -2400,7 +2718,7 @@ function openTts(text) {
   overlay.innerHTML = `<div class="modal-box" style="max-width:460px">
     <div style="font-size:15px;font-weight:500;margin-bottom:12px">🔊 语音朗读</div>
     <div style="font-size:12px;color:var(--muted,#888);margin-bottom:8px">将朗读以下文本（${text.length} 字）</div>
-    <div style="font-size:13px;max-height:120px;overflow-y:auto;padding:8px;background:var(--bg2,#1f2438);border-radius:6px;margin-bottom:10px;white-space:pre-wrap;word-break:break-word">${safeHtml(text.slice(0, 300))}${text.length > 300 ? '…' : ''}</div>
+    <div style="font-size:13px;max-height:120px;overflow-y:auto;padding:8px;background:var(--bg2);border-radius:6px;margin-bottom:10px;white-space:pre-wrap;word-break:break-word">${safeHtml(text.slice(0, 300))}${text.length > 300 ? '…' : ''}</div>
     <label class="api-field">模型<select id="tts-model" style="width:100%">
       <option value="mimo-v2.5-tts">内置音色（7 种预设）</option>
       <option value="mimo-v2.5-tts-voicedesign">声线设计（文字描述生成声音）</option>
@@ -2427,7 +2745,7 @@ function openTts(text) {
     <div id="tts-ref-wrap" class="hidden api-field">参考音频（mp3/wav，10-30 秒清晰人声）<input id="tts-ref" type="file" accept="audio/*,.mp3,.wav" style="width:100%"><div style="font-size:11px;color:var(--muted,#888);margin-top:2px">上传后即作为克隆音色，可另填风格指令控制语气</div></div>
     <div id="tts-result" style="margin-top:8px;text-align:center"></div>
     <div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px">
-      <button id="tts-play" class="btn-sm" style="padding:6px 16px;background:var(--accent,#7F77DD);color:#fff;border-radius:6px;border:none;cursor:pointer">▶ 朗读</button>
+      <button id="tts-play" class="btn-sm" style="padding:6px 16px;background:var(--accent);color:#fff;border-radius:6px;border:none;cursor:pointer">▶ 朗读</button>
       <button id="tts-config" class="btn-sm" style="padding:6px 16px">⚙️ 配置</button>
       <button id="tts-close" class="btn-sm" style="padding:6px 16px">关闭</button>
     </div>
@@ -2457,8 +2775,8 @@ function openTts(text) {
     // 如果选择了角色且没有手动上传参考音频，服务端会自动使用角色绑定的参考音频
     if (model === 'mimo-v2.5-tts-voiceclone' && !character) {
       const file = overlay.querySelector('#tts-ref').files[0];
-      if (!file) { resBox.innerHTML = '<div style="color:#f0a3a3;padding:8px">请先选择参考音频（mp3/wav）或选择角色</div>'; return; }
-      if (file.size > 10 * 1024 * 1024) { resBox.innerHTML = '<div style="color:#f0a3a3;padding:8px">参考音频需小于 10MB</div>'; return; }
+      if (!file) { resBox.innerHTML = '<div style="color:var(--danger);padding:8px">请先选择参考音频（mp3/wav）或选择角色</div>'; return; }
+      if (file.size > 10 * 1024 * 1024) { resBox.innerHTML = '<div style="color:var(--danger);padding:8px">参考音频需小于 10MB</div>'; return; }
       const mime = file.type === 'audio/wav' || /\.wav$/i.test(file.name) ? 'audio/wav' : 'audio/mpeg';
       referenceAudio = { mime, data: await new Promise((ok, fail) => { const rd = new FileReader(); rd.onload = () => ok(String(rd.result).split(',')[1] || ''); rd.onerror = fail; rd.readAsDataURL(file); }) };
     }
@@ -2467,7 +2785,7 @@ function openTts(text) {
       const r = await fetch('/api/tts/synthesize', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text, model, voice, style, referenceAudio, character }) });
       const d = await r.json();
       if (d.error) {
-        resBox.innerHTML = `<div style="color:#f0a3a3;padding:8px">${safeHtml(d.error)}</div>`;
+        resBox.innerHTML = `<div style="color:var(--danger);padding:8px">${safeHtml(d.error)}</div>`;
         if (d.needConfig) resBox.innerHTML += '<div style="font-size:12px;color:var(--muted,#888);margin-top:4px">点击「配置」按钮设置 TTS 引擎</div>';
         return;
       }
@@ -2475,10 +2793,10 @@ function openTts(text) {
         // MiMo TTS 返回 base64 音频 → 直接播放
         const a = new Audio('data:audio/' + (d.format || 'mp3') + ';base64,' + d.audio);
         a.play().catch(() => {});
-        resBox.innerHTML = `<div style="color:#7fe0a9;padding:8px">▶ ${safeHtml(d.message || '合成成功')}</div>`;
+        resBox.innerHTML = `<div style="color:var(--success);padding:8px">▶ ${safeHtml(d.message || '合成成功')}</div>`;
         return;
       }
-      resBox.innerHTML = `<div style="color:#7fe0a9;padding:8px">${safeHtml(d.message || '朗读功能就绪')}</div>`;
+      resBox.innerHTML = `<div style="color:var(--success);padding:8px">${safeHtml(d.message || '朗读功能就绪')}</div>`;
     } catch (e) { resBox.textContent = '请求失败：' + e.message; }
   };
   overlay.querySelector('#tts-config').onclick = async () => {
@@ -2489,8 +2807,8 @@ function openTts(text) {
     const rate = prompt('语速（0.5-2.0）：', '1.0');
     try {
       await fetch('/api/tts/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ engine, apiKey, voice, rate }) });
-      alert('✅ TTS 配置已保存');
-    } catch (e) { alert('保存失败：' + e.message); }
+      toast('✅ TTS 配置已保存');
+    } catch (e) { toast('保存失败：' + e.message); }
   };
 }
 els.input.addEventListener('keydown', (e) => {
@@ -2509,7 +2827,7 @@ els.input.addEventListener('paste', (e) => {
       const file = item.getAsFile();
       if (!file) continue;
       // Limit to 1MB
-      if (file.size > 1024 * 1024) { alert('图片过大（>1MB），请压缩后粘贴'); continue; }
+      if (file.size > 1024 * 1024) { toast('图片过大（>1MB），请压缩后粘贴'); continue; }
       const reader = new FileReader();
       reader.onload = () => {
         const base64 = reader.result;
@@ -2552,6 +2870,42 @@ window.addEventListener('beforeunload', () => {
   } catch (e) { /* best effort */ }
 });
 // 全局快捷键：Ctrl+Shift+F 聚焦世界设定（通用版无检索框）
+
+// ===== 快捷键速查面板（2026-09-02 同步自正式版 F4）=====
+const SHORTCUT_LIST = [
+  ['Ctrl / ⌘ + Enter', '发送消息'],
+  ['Ctrl + Shift + F', '聚焦世界设定输入框'],
+  ['Esc', '关闭当前弹窗 / 关闭检索'],
+  ['Enter', '（检索框内）跳到下一个匹配'],
+  ['?', '打开本速查表'],
+];
+function openShortcutPanel() {
+  if (document.getElementById('shortcut-panel')) return;
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'shortcut-panel';
+  const rows = SHORTCUT_LIST.map(([k, d]) =>
+    `<div style="display:flex;justify-content:space-between;gap:16px;padding:6px 0;border-bottom:1px solid var(--border)">
+      <span style="font-family:ui-monospace,Consolas,monospace;color:var(--accent);white-space:nowrap">${safeHtml(k)}</span>
+      <span style="color:var(--muted);text-align:right">${safeHtml(d)}</span>
+    </div>`).join('');
+  overlay.innerHTML = `<div class="modal-box u-modal-sm">
+    <div style="font-size:15px;font-weight:500;margin-bottom:12px">⌨️ 快捷键速查</div>
+    ${rows}
+    <div class="u-row-end" style="margin-top:16px"><button id="sc-close" class="btn-sm u-btn-lg">关闭</button></div>
+  </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#sc-close').onclick = () => overlay.remove();
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key !== '?') return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  e.preventDefault();
+  openShortcutPanel();
+});
+
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.shiftKey && (e.key === 'F' || e.key === 'f')) {
     e.preventDefault();
@@ -2682,18 +3036,18 @@ function initMsgSearch() {
     const st = document.createElement('style');
     st.id = 'msg-search-style';
     st.textContent = `
-      .msg-search-bar{display:flex;align-items:center;gap:8px;padding:4px 10px;background:var(--card,#232946);border:1px solid var(--border,#3a4163);border-radius:10px;margin:6px 10px 2px;}
+      .msg-search-bar{display:flex;align-items:center;gap:8px;padding:4px 10px;background:var(--card);border:1px solid var(--border);border-radius:10px;margin:6px 10px 2px;}
       .msg-search-bar.hidden{display:none;}
-      .msg-search-toggle{background:var(--card,#232946);border:1px solid var(--border,#3a4163);color:var(--muted,#9aa0c0);border-radius:6px;padding:2px 10px;font-size:13px;cursor:pointer;flex:none;opacity:.75;}
-      .msg-search-toggle:hover{opacity:1;color:var(--accent,#a78bfa);border-color:var(--accent,#a78bfa);}
+      .msg-search-toggle{background:var(--card);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:2px 10px;font-size:13px;cursor:pointer;flex:none;opacity:.75;}
+      .msg-search-toggle:hover{opacity:1;color:var(--accent);border-color:var(--accent);}
       .msg-search-inputs{display:flex;align-items:center;gap:8px;flex:1;min-width:0;}
       .msg-search-inputs.hidden{display:none;}
-      .msg-search-bar input{flex:1;min-width:0;background:var(--bg2,#1f2438);color:var(--text,#e8e6f0);border:1px solid var(--border,#3a4163);border-radius:6px;padding:5px 9px;font-size:13px;outline:none;}
-      .msg-search-bar input:focus{border-color:var(--accent,#a78bfa);}
-      .msg-search-info{color:var(--muted,#9aa0c0);font-size:12px;white-space:nowrap;}
-      .msg-search-bar button{background:var(--card,#232946);border:1px solid var(--border,#3a4163);color:var(--muted,#9aa0c0);border-radius:6px;padding:3px 9px;font-size:12px;cursor:pointer;flex:none;}
-      .msg-search-bar button:hover{color:var(--accent,#a78bfa);border-color:var(--accent,#a78bfa);}
-      .msg-wrap.msg-search-hit{outline:2px solid var(--accent,#a78bfa);outline-offset:-2px;border-radius:10px;}
+      .msg-search-bar input{flex:1;min-width:0;background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 9px;font-size:13px;outline:none;}
+      .msg-search-bar input:focus{border-color:var(--accent);}
+      .msg-search-info{color:var(--muted);font-size:12px;white-space:nowrap;}
+      .msg-search-bar button{background:var(--card);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:3px 9px;font-size:12px;cursor:pointer;flex:none;}
+      .msg-search-bar button:hover{color:var(--accent);border-color:var(--accent);}
+      .msg-wrap.msg-search-hit{outline:2px solid var(--accent);outline-offset:-2px;border-radius:10px;}
     `;
     document.head.appendChild(st);
   }
@@ -2787,22 +3141,22 @@ async function loadChatProfileManage() {
     const isCurrent = id === App.currentChatProfileId;
     const d = document.createElement('div');
     d.className = 'cp-item';
-    d.style.cssText = `display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;border-left:4px solid ${p.color||'#639922'};background:var(--bg2,#f5f5f5);margin-bottom:6px;${isCurrent?'border:1px solid var(--accent,#a78bfa)':''}`;
-    d.innerHTML = `<div style="flex:1"><div style="font-weight:500;font-size:13px">${p.label||id}${isCurrent?' <span style="color:var(--accent,#a78bfa);font-size:11px">← 当前会话</span>':''}</div>${p.prefix?'<div style="font-size:11px;color:var(--muted,#888);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px">'+p.prefix+'</div>':''}</div>${!isCurrent?'<button class="head-btn cp-apply-btn" data-id="'+id+'" style="padding:2px 8px;font-size:11px" title="应用到当前会话（改绑定）">🔗 应用</button>':''}<button class="head-btn cp-edit-btn" data-id="${id}" style="padding:2px 8px;font-size:11px">编辑</button>${p.isDefault?'':'<button class="head-btn cp-del-btn" data-id="'+id+'" style="padding:2px 8px;font-size:11px;color:#f0a3a3">删</button>'}`;
+    d.style.cssText = `display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;border-left:4px solid ${p.color||'#639922'};background:var(--bg2);margin-bottom:6px;${isCurrent?'border:1px solid var(--accent)':''}`;
+    d.innerHTML = `<div style="flex:1"><div style="font-weight:500;font-size:13px">${p.label||id}${isCurrent?' <span style="color:var(--accent);font-size:11px">← 当前会话</span>':''}</div>${p.prefix?'<div style="font-size:11px;color:var(--muted,#888);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px">'+p.prefix+'</div>':''}</div>${!isCurrent?'<button class="head-btn cp-apply-btn" data-id="'+id+'" style="padding:2px 8px;font-size:11px" title="应用到当前会话（改绑定）">🔗 应用</button>':''}<button class="head-btn cp-edit-btn" data-id="${id}" style="padding:2px 8px;font-size:11px">编辑</button>${p.isDefault?'':'<button class="head-btn cp-del-btn" data-id="'+id+'" style="padding:2px 8px;font-size:11px;color:var(--danger)">删</button>'}`;
     box.appendChild(d);
   }
   // 应用按钮：把配置档应用到当前会话（改绑定）
   box.querySelectorAll('.cp-apply-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
       const cid = App.chatId;
-      if (!cid) { alert('请先打开一个会话'); return; }
+      if (!cid) { toast('请先打开一个会话'); return; }
       if (!confirm(`将配置档「${btn.dataset.id}」应用到当前会话？`)) return;
       try {
         const r = await fetch('/api/chat-profiles', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'apply', id: btn.dataset.id, profile: { chatId: cid } }) });
         const d = await r.json();
-        if (d.ok) { App.currentChatProfileId = btn.dataset.id; loadChatProfileManage(); loadChatList(); alert('已应用：当前会话改用「' + btn.dataset.id + '」配置档'); }
-        else alert('应用失败：' + (d.error || '未知错误'));
-      } catch (e) { alert('应用失败：' + e.message); }
+        if (d.ok) { App.currentChatProfileId = btn.dataset.id; loadChatProfileManage(); loadChatList(); toast('已应用：当前会话改用「' + btn.dataset.id + '」配置档'); }
+        else toast('应用失败：' + (d.error || '未知错误'));
+      } catch (e) { toast('应用失败：' + e.message); }
     });
   });
   box.querySelectorAll('.cp-edit-btn').forEach(btn => btn.addEventListener('click', () => editChatProfile(btn.dataset.id)));
@@ -2816,7 +3170,7 @@ function editChatProfile(id) {
   const p = App.chatProfilesCache[id] || {};
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
-  overlay.innerHTML = `<div class="modal-box" style="max-width:500px"><div style="font-size:15px;font-weight:500;margin-bottom:12px">编辑配置档：${id}</div><div style="font-size:12px;color:var(--muted,#888);margin-bottom:10px">💡 配置档只负责「切换标记 + 首条模板」；排除项（【排除当前状态】等）统一写在会话常驻设定里。</div><label class="api-field">显示名称<input id="ep-label" type="text" value="${p.label||id}" style="width:100%"></label><label class="api-field">颜色<input id="ep-color" type="color" value="${p.color||'#639922'}"></label><label class="api-field">首条消息模板路径<input id="ep-firstmsg" type="text" value="${p.firstMsg||''}" placeholder="文件路径" style="width:100%"></label><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="ep-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="ep-save" class="btn-sm" style="padding:6px 16px;background:var(--accent,#a78bfa);color:#fff;border:none;border-radius:6px">保存</button></div></div>`;
+  overlay.innerHTML = `<div class="modal-box" style="max-width:500px"><div style="font-size:15px;font-weight:500;margin-bottom:12px">编辑配置档：${id}</div><div style="font-size:12px;color:var(--muted,#888);margin-bottom:10px">💡 配置档只负责「切换标记 + 首条模板」；排除项（【排除当前状态】等）统一写在会话常驻设定里。</div><label class="api-field">显示名称<input id="ep-label" type="text" value="${p.label||id}" style="width:100%"></label><label class="api-field">颜色<input id="ep-color" type="color" value="${p.color||'#639922'}"></label><label class="api-field">首条消息模板路径<input id="ep-firstmsg" type="text" value="${p.firstMsg||''}" placeholder="文件路径" style="width:100%"></label><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="ep-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="ep-save" class="btn-sm" style="padding:6px 16px;background:var(--accent);color:#fff;border:none;border-radius:6px">保存</button></div></div>`;
   document.body.appendChild(overlay);
   overlay.querySelector('#ep-cancel').onclick = () => overlay.remove();
   overlay.querySelector('#ep-save').onclick = async () => {
@@ -2839,8 +3193,8 @@ async function loadNpcProfiles() {
     for (const p of d.profiles) {
       const el = document.createElement('div');
       el.className = 'cp-item';
-      el.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;background:var(--bg2,#f5f5f5);margin-bottom:6px';
-      el.innerHTML = `<div style="flex:1"><div style="font-weight:500;font-size:13px">${p.name}</div><div style="font-size:11px;color:var(--muted,#888);margin-top:2px">${[p.personality,p.appearance?.slice(0,30)].filter(Boolean).join(' · ')||'暂无描述'}</div></div><button class="head-btn npc-export-btn" data-name="${p.name}" style="padding:2px 8px;font-size:11px" title="导出为酒馆角色卡 PNG">📤</button><button class="head-btn npc-edit-btn" data-name="${p.name}" style="padding:2px 8px;font-size:11px">编辑</button><button class="head-btn npc-del-btn" data-name="${p.name}" style="padding:2px 8px;font-size:11px;color:#f0a3a3">删</button>`;
+      el.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;background:var(--bg2);margin-bottom:6px';
+      el.innerHTML = `<div style="flex:1"><div style="font-weight:500;font-size:13px">${p.name}</div><div style="font-size:11px;color:var(--muted,#888);margin-top:2px">${[p.personality,p.appearance?.slice(0,30)].filter(Boolean).join(' · ')||'暂无描述'}</div></div><button class="head-btn npc-export-btn" data-name="${p.name}" style="padding:2px 8px;font-size:11px" title="导出为酒馆角色卡 PNG">📤</button><button class="head-btn npc-edit-btn" data-name="${p.name}" style="padding:2px 8px;font-size:11px">编辑</button><button class="head-btn npc-del-btn" data-name="${p.name}" style="padding:2px 8px;font-size:11px;color:var(--danger)">删</button>`;
       box.appendChild(el);
     }
     box.querySelectorAll('.npc-edit-btn').forEach(btn => btn.addEventListener('click', () => editNpcProfile(btn.dataset.name)));
@@ -2853,7 +3207,7 @@ async function editNpcProfile(name) {
   if (name) { try { const r = await fetch('/api/npc-profiles/'+encodeURIComponent(name)); const d = await r.json(); if (d.profile) profile = d.profile; } catch (e) { /* 新建 */ } }
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
-  overlay.innerHTML = `<div class="modal-box" style="max-width:500px;max-height:85vh;overflow-y:auto"><div style="font-size:15px;font-weight:500;margin-bottom:12px">${name?'编辑':'新建'}角色档案</div><label class="api-field">名称<input id="np-name" type="text" value="${profile.name}" style="width:100%"></label><label class="api-field">外观<textarea id="np-appearance" class="world-setting" rows="2" style="width:100%">${profile.appearance||''}</textarea></label><label class="api-field">性格<textarea id="np-personality" class="world-setting" rows="2" style="width:100%">${profile.personality||''}</textarea></label><label class="api-field">关系（JSON）<textarea id="np-rel" class="world-setting" rows="2" style="width:100%">${JSON.stringify(profile.relationships||{},null,2)}</textarea></label><label class="api-field">备注<textarea id="np-notes" class="world-setting" rows="2" style="width:100%">${profile.notes||''}</textarea></label><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="np-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="np-save" class="btn-sm" style="padding:6px 16px;background:var(--accent,#a78bfa);color:#fff;border:none;border-radius:6px">保存</button></div></div>`;
+  overlay.innerHTML = `<div class="modal-box" style="max-width:500px;max-height:85vh;overflow-y:auto"><div style="font-size:15px;font-weight:500;margin-bottom:12px">${name?'编辑':'新建'}角色档案</div><label class="api-field">名称<input id="np-name" type="text" value="${profile.name}" style="width:100%"></label><label class="api-field">外观<textarea id="np-appearance" class="world-setting" rows="2" style="width:100%">${profile.appearance||''}</textarea></label><label class="api-field">性格<textarea id="np-personality" class="world-setting" rows="2" style="width:100%">${profile.personality||''}</textarea></label><label class="api-field">关系（JSON）<textarea id="np-rel" class="world-setting" rows="2" style="width:100%">${JSON.stringify(profile.relationships||{},null,2)}</textarea></label><label class="api-field">备注<textarea id="np-notes" class="world-setting" rows="2" style="width:100%">${profile.notes||''}</textarea></label><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="np-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="np-save" class="btn-sm" style="padding:6px 16px;background:var(--accent);color:#fff;border:none;border-radius:6px">保存</button></div></div>`;
   document.body.appendChild(overlay);
   overlay.querySelector('#np-cancel').onclick = () => overlay.remove();
   overlay.querySelector('#np-save').onclick = async () => {
@@ -2877,10 +3231,10 @@ document.getElementById('card-import-btn')?.addEventListener('click', () => {
       try {
         const r = await fetch('/api/cards/import', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ imageData: reader.result }) });
         const d = await r.json();
-        if (d.error) { alert('导入失败：' + d.error); return; }
-        alert(`✅ 导入成功：${d.profile.name}\n已保存为角色档案`);
+        if (d.error) { toast('导入失败：' + d.error); return; }
+        toast(`✅ 导入成功：${d.profile.name}\n已保存为角色档案`);
         loadNpcProfiles();
-      } catch (e) { alert('请求失败：' + e.message); }
+      } catch (e) { toast('请求失败：' + e.message); }
     };
     reader.readAsDataURL(file);
   };
@@ -2905,8 +3259,8 @@ async function loadSceneProfiles() {
     for (const s of d.scenes) {
       const el = document.createElement('div');
       el.className = 'cp-item';
-      el.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;background:var(--bg2,#f5f5f5);margin-bottom:6px';
-      el.innerHTML = `<div style="flex:1"><div style="font-weight:500;font-size:13px">${s.name}</div><div style="font-size:11px;color:var(--muted,#888);margin-top:2px">${s.location?s.location+' · ':''}${s.physicalFeatures?.length||0} 个特征</div></div><button class="head-btn scene-edit-btn" data-name="${s.name}" style="padding:2px 8px;font-size:11px">编辑</button><button class="head-btn scene-del-btn" data-name="${s.name}" style="padding:2px 8px;font-size:11px;color:#f0a3a3">删</button>`;
+      el.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;background:var(--bg2);margin-bottom:6px';
+      el.innerHTML = `<div style="flex:1"><div style="font-weight:500;font-size:13px">${s.name}</div><div style="font-size:11px;color:var(--muted,#888);margin-top:2px">${s.location?s.location+' · ':''}${s.physicalFeatures?.length||0} 个特征</div></div><button class="head-btn scene-edit-btn" data-name="${s.name}" style="padding:2px 8px;font-size:11px">编辑</button><button class="head-btn scene-del-btn" data-name="${s.name}" style="padding:2px 8px;font-size:11px;color:var(--danger)">删</button>`;
       box.appendChild(el);
     }
     box.querySelectorAll('.scene-edit-btn').forEach(btn => btn.addEventListener('click', () => editSceneProfile(btn.dataset.name)));
@@ -2918,7 +3272,7 @@ async function editSceneProfile(name) {
   if (name) { try { const r = await fetch('/api/scenes/'+encodeURIComponent(name)); const d = await r.json(); if (d.scene) scene = d.scene; } catch (e) { /* 新建 */ } }
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
-  overlay.innerHTML = `<div class="modal-box" style="max-width:500px;max-height:85vh;overflow-y:auto"><div style="font-size:15px;font-weight:500;margin-bottom:12px">${name?'编辑':'新建'}场景档案</div><label class="api-field">名称<input id="sp-name" type="text" value="${scene.name}" style="width:100%"></label><label class="api-field">位置<input id="sp-location" type="text" value="${scene.location||''}" style="width:100%"></label><label class="api-field">物理特征（每行一条）<textarea id="sp-features" class="world-setting" rows="5" style="width:100%">${(scene.physicalFeatures||[]).join('\n')}</textarea></label><label class="api-field">氛围<textarea id="sp-atmosphere" class="world-setting" rows="2" style="width:100%">${scene.atmosphere||''}</textarea></label><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="sp-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="sp-save" class="btn-sm" style="padding:6px 16px;background:var(--accent,#a78bfa);color:#fff;border:none;border-radius:6px">保存</button></div></div>`;
+  overlay.innerHTML = `<div class="modal-box" style="max-width:500px;max-height:85vh;overflow-y:auto"><div style="font-size:15px;font-weight:500;margin-bottom:12px">${name?'编辑':'新建'}场景档案</div><label class="api-field">名称<input id="sp-name" type="text" value="${scene.name}" style="width:100%"></label><label class="api-field">位置<input id="sp-location" type="text" value="${scene.location||''}" style="width:100%"></label><label class="api-field">物理特征（每行一条）<textarea id="sp-features" class="world-setting" rows="5" style="width:100%">${(scene.physicalFeatures||[]).join('\n')}</textarea></label><label class="api-field">氛围<textarea id="sp-atmosphere" class="world-setting" rows="2" style="width:100%">${scene.atmosphere||''}</textarea></label><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="sp-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="sp-save" class="btn-sm" style="padding:6px 16px;background:var(--accent);color:#fff;border:none;border-radius:6px">保存</button></div></div>`;
   document.body.appendChild(overlay);
   overlay.querySelector('#sp-cancel').onclick = () => overlay.remove();
   overlay.querySelector('#sp-save').onclick = async () => {
@@ -2956,8 +3310,8 @@ function renderExpressionGrid(charName) {
   if (!exprs.length) { grid.textContent = '暂无表情'; return; }
   for (const expr of exprs) {
     const el = document.createElement('div');
-    el.style.cssText = 'position:relative;border-radius:6px;overflow:hidden;aspect-ratio:1;background:var(--bg2,#232946)';
-    el.innerHTML = `<img src="${expr.url}" alt="${expr.name}" style="width:100%;height:100%;object-fit:cover"><div style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.6);color:#fff;font-size:10px;padding:2px 4px;text-align:center">${expr.name}</div><button class="head-btn expr-del-btn" data-char="${encodeURIComponent(charName)}" data-file="${encodeURIComponent(expr.file)}" title="删除此表情" style="position:absolute;top:2px;right:2px;padding:0 6px;font-size:11px;background:rgba(0,0,0,0.6);color:#f0a3a3;border:1px solid rgba(240,163,163,0.4);border-radius:4px;display:none">✕</button>`;
+    el.style.cssText = 'position:relative;border-radius:6px;overflow:hidden;aspect-ratio:1;background:var(--bg2)';
+    el.innerHTML = `<img src="${expr.url}" alt="${expr.name}" style="width:100%;height:100%;object-fit:cover"><div style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.6);color:#fff;font-size:10px;padding:2px 4px;text-align:center">${expr.name}</div><button class="head-btn expr-del-btn" data-char="${encodeURIComponent(charName)}" data-file="${encodeURIComponent(expr.file)}" title="删除此表情" style="position:absolute;top:2px;right:2px;padding:0 6px;font-size:11px;background:rgba(0,0,0,0.6);color:var(--danger);border:1px solid rgba(240,163,163,0.4);border-radius:4px;display:none">✕</button>`;
     el.addEventListener('mouseenter', () => { const b = el.querySelector('.expr-del-btn'); if (b) b.style.display = ''; });
     el.addEventListener('mouseleave', () => { const b = el.querySelector('.expr-del-btn'); if (b) b.style.display = 'none'; });
     grid.appendChild(el);
@@ -2971,24 +3325,24 @@ function renderExpressionGrid(charName) {
       try {
         const r = await fetch(`/api/expressions/${encodeURIComponent(char)}?name=${encodeURIComponent(file)}`, { method: 'DELETE' });
         const d = await r.json();
-        if (d.ok) loadExpressions(); else alert('删除失败：' + (d.error || '未知错误'));
-      } catch (err) { alert('删除失败：' + err.message); }
+        if (d.ok) loadExpressions(); else toast('删除失败：' + (d.error || '未知错误'));
+      } catch (err) { toast('删除失败：' + err.message); }
     });
   });
 }
 document.getElementById('expr-char-dropdown')?.addEventListener('change', (e) => renderExpressionGrid(e.target.value));
 document.getElementById('expr-upload-btn')?.addEventListener('click', () => {
   const charName = document.getElementById('expr-char-dropdown')?.value;
-  if (!charName) { alert('请先选择角色'); return; }
+  if (!charName) { toast('请先选择角色'); return; }
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
-  overlay.innerHTML = `<div class="modal-box" style="max-width:400px"><div style="font-size:15px;font-weight:500;margin-bottom:12px">添加表情到「${charName}」</div><label class="api-field">情绪名称<input id="exp-name" type="text" placeholder="开心" style="width:100%"></label><label class="api-field">图片<input id="exp-file" type="file" accept="image/*" style="width:100%"></label><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="exp-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="exp-save" class="btn-sm" style="padding:6px 16px;background:var(--accent,#a78bfa);color:#fff;border:none;border-radius:6px">上传</button></div></div>`;
+  overlay.innerHTML = `<div class="modal-box" style="max-width:400px"><div style="font-size:15px;font-weight:500;margin-bottom:12px">添加表情到「${charName}」</div><label class="api-field">情绪名称<input id="exp-name" type="text" placeholder="开心" style="width:100%"></label><label class="api-field">图片<input id="exp-file" type="file" accept="image/*" style="width:100%"></label><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="exp-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="exp-save" class="btn-sm" style="padding:6px 16px;background:var(--accent);color:#fff;border:none;border-radius:6px">上传</button></div></div>`;
   document.body.appendChild(overlay);
   overlay.querySelector('#exp-cancel').onclick = () => overlay.remove();
   overlay.querySelector('#exp-save').onclick = async () => {
     const name = overlay.querySelector('#exp-name').value.trim();
     const file = overlay.querySelector('#exp-file').files[0];
-    if (!name || !file) { alert('请填写名称并选择图片'); return; }
+    if (!name || !file) { toast('请填写名称并选择图片'); return; }
     const reader = new FileReader();
     reader.onload = async () => { await fetch('/api/expressions/'+encodeURIComponent(charName), { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({name,imageData:reader.result}) }); overlay.remove(); loadExpressions(); };
     reader.readAsDataURL(file);
@@ -3008,8 +3362,8 @@ async function loadRegexRulesUI() {
     for (const rule of d.rules) {
       const el = document.createElement('div');
       el.className = 'cp-item';
-      el.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;background:var(--bg2,#f5f5f5);margin-bottom:6px';
-      el.innerHTML = `<div style="flex:1"><div style="font-weight:500;font-size:13px">${rule.name||rule.id}</div><div style="font-size:11px;color:var(--muted,#888);margin-top:2px;font-family:monospace">${rule.pattern}</div></div><label style="font-size:11px"><input type="checkbox" class="regex-toggle" data-id="${rule.id}" ${rule.enabled?'checked':''}> 启用</label><button class="head-btn regex-edit-btn" data-id="${rule.id}" style="padding:2px 8px;font-size:11px">编辑</button><button class="head-btn regex-del-btn" data-id="${rule.id}" style="padding:2px 8px;font-size:11px;color:#f0a3a3">删</button>`;
+      el.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;background:var(--bg2);margin-bottom:6px';
+      el.innerHTML = `<div style="flex:1"><div style="font-weight:500;font-size:13px">${rule.name||rule.id}</div><div style="font-size:11px;color:var(--muted,#888);margin-top:2px;font-family:monospace">${rule.pattern}</div></div><label style="font-size:11px"><input type="checkbox" class="regex-toggle" data-id="${rule.id}" ${rule.enabled?'checked':''}> 启用</label><button class="head-btn regex-edit-btn" data-id="${rule.id}" style="padding:2px 8px;font-size:11px">编辑</button><button class="head-btn regex-del-btn" data-id="${rule.id}" style="padding:2px 8px;font-size:11px;color:var(--danger)">删</button>`;
       box.appendChild(el);
     }
     box.querySelectorAll('.regex-toggle').forEach(cb => cb.addEventListener('change', async () => { const rule = d.rules.find(r => r.id === cb.dataset.id); if (rule) { rule.enabled = cb.checked; await fetch('/api/regex-rules', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'save', rule }) }); loadRegexRules(); } }));
@@ -3021,7 +3375,7 @@ function editRegexRule(rule) {
   if (!rule) rule = { id: 'rule_' + Date.now(), name: '', pattern: '', replacement: '', flags: 'g', enabled: true };
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
-  overlay.innerHTML = `<div class="modal-box" style="max-width:500px"><div style="font-size:15px;font-weight:500;margin-bottom:12px">编辑过滤规则</div><label class="api-field">名称<input id="rr-name" type="text" value="${rule.name||''}" style="width:100%"></label><label class="api-field">正则表达式<input id="rr-pattern" type="text" value="${rule.pattern||''}" style="width:100%;font-family:monospace"></label><label class="api-field">替换为<input id="rr-replacement" type="text" value="${rule.replacement||''}" style="width:100%"></label><label class="api-field">标志<input id="rr-flags" type="text" value="${rule.flags||'g'}" style="width:80px"></label><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="rr-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="rr-save" class="btn-sm" style="padding:6px 16px;background:var(--accent,#a78bfa);color:#fff;border:none;border-radius:6px">保存</button></div></div>`;
+  overlay.innerHTML = `<div class="modal-box" style="max-width:500px"><div style="font-size:15px;font-weight:500;margin-bottom:12px">编辑过滤规则</div><label class="api-field">名称<input id="rr-name" type="text" value="${rule.name||''}" style="width:100%"></label><label class="api-field">正则表达式<input id="rr-pattern" type="text" value="${rule.pattern||''}" style="width:100%;font-family:monospace"></label><label class="api-field">替换为<input id="rr-replacement" type="text" value="${rule.replacement||''}" style="width:100%"></label><label class="api-field">标志<input id="rr-flags" type="text" value="${rule.flags||'g'}" style="width:80px"></label><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="rr-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="rr-save" class="btn-sm" style="padding:6px 16px;background:var(--accent);color:#fff;border:none;border-radius:6px">保存</button></div></div>`;
   document.body.appendChild(overlay);
   overlay.querySelector('#rr-cancel').onclick = () => overlay.remove();
   overlay.querySelector('#rr-save').onclick = async () => {
@@ -3034,7 +3388,7 @@ document.getElementById('regex-add-btn')?.addEventListener('click', () => editRe
 document.getElementById('regex-test-btn')?.addEventListener('click', () => {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
-  overlay.innerHTML = `<div class="modal-box" style="max-width:500px"><div style="font-size:15px;font-weight:500;margin-bottom:12px">测试过滤规则</div><label class="api-field">正则表达式<input id="rt-pattern" type="text" style="width:100%;font-family:monospace"></label><label class="api-field">替换为<input id="rt-replacement" type="text" style="width:100%"></label><label class="api-field">测试文本<textarea id="rt-text" class="world-setting" rows="4" style="width:100%"></textarea></label><div id="rt-result" style="margin-top:8px;padding:8px;background:var(--bg2,#f5f5f5);border-radius:6px;font-size:13px;min-height:40px"></div><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="rt-close" class="btn-sm" style="padding:6px 16px">关闭</button><button id="rt-run" class="btn-sm" style="padding:6px 16px;background:var(--accent,#a78bfa);color:#fff;border:none;border-radius:6px">测试</button></div></div>`;
+  overlay.innerHTML = `<div class="modal-box" style="max-width:500px"><div style="font-size:15px;font-weight:500;margin-bottom:12px">测试过滤规则</div><label class="api-field">正则表达式<input id="rt-pattern" type="text" style="width:100%;font-family:monospace"></label><label class="api-field">替换为<input id="rt-replacement" type="text" style="width:100%"></label><label class="api-field">测试文本<textarea id="rt-text" class="world-setting" rows="4" style="width:100%"></textarea></label><div id="rt-result" style="margin-top:8px;padding:8px;background:var(--bg2);border-radius:6px;font-size:13px;min-height:40px"></div><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="rt-close" class="btn-sm" style="padding:6px 16px">关闭</button><button id="rt-run" class="btn-sm" style="padding:6px 16px;background:var(--accent);color:#fff;border:none;border-radius:6px">测试</button></div></div>`;
   document.body.appendChild(overlay);
   overlay.querySelector('#rt-close').onclick = () => overlay.remove();
   overlay.querySelector('#rt-run').onclick = async () => {
@@ -3072,9 +3426,9 @@ function renderLorebookList() {
   for (const [id, entry] of filtered.sort(([, a], [, b]) => (b.priority || 0) - (a.priority || 0))) {
     const el = document.createElement('div');
     el.className = 'cp-item';
-    el.style.cssText = 'display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:6px;background:var(--bg2,#f5f5f5);margin-bottom:4px;font-size:12px';
+    el.style.cssText = 'display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:6px;background:var(--bg2);margin-bottom:4px;font-size:12px';
     const kws = (entry.keywords || []).slice(0, 3).join(', ');
-    el.innerHTML = `<div style="flex:1;min-width:0"><div style="font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(entry.name||id)}${entry.constant?' <span style="color:var(--accent,#a78bfa)">[常驻]</span>':''}</div><div style="font-size:11px;color:var(--muted,#888);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(kws||'无关键词')}</div></div><label style="font-size:11px;flex:none"><input type="checkbox" class="lb-toggle" data-id="${escapeHtml(id)}" ${entry.enabled!==false?'checked':''}> 启用</label><button class="head-btn lb-edit-btn" data-id="${escapeHtml(id)}" style="padding:2px 6px;font-size:11px;flex:none">编辑</button><button class="head-btn lb-del-btn" data-id="${escapeHtml(id)}" style="padding:2px 6px;font-size:11px;color:#f0a3a3;flex:none">删</button>`;
+    el.innerHTML = `<div style="flex:1;min-width:0"><div style="font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(entry.name||id)}${entry.constant?' <span style="color:var(--accent)">[常驻]</span>':''}</div><div style="font-size:11px;color:var(--muted,#888);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(kws||'无关键词')}</div></div><label style="font-size:11px;flex:none"><input type="checkbox" class="lb-toggle" data-id="${escapeHtml(id)}" ${entry.enabled!==false?'checked':''}> 启用</label><button class="head-btn lb-edit-btn" data-id="${escapeHtml(id)}" style="padding:2px 6px;font-size:11px;flex:none">编辑</button><button class="head-btn lb-del-btn" data-id="${escapeHtml(id)}" style="padding:2px 6px;font-size:11px;color:var(--danger);flex:none">删</button>`;
     box.appendChild(el);
   }
   box.querySelectorAll('.lb-toggle').forEach(cb => cb.addEventListener('change', async () => { const e = App.lorebookEntriesCache[cb.dataset.id]; if (e) { e.enabled = cb.checked; await fetch('/api/lorebook', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'save', id: cb.dataset.id, entry: e }) }); } }));
@@ -3088,7 +3442,7 @@ function editLorebookEntry(id, entry) {
   if (isNew) id = 'entry_' + Date.now();
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
-  overlay.innerHTML = `<div class="modal-box" style="max-width:550px;max-height:85vh;overflow-y:auto"><div style="font-size:15px;font-weight:500;margin-bottom:12px">${isNew?'新建':'编辑'}设定条目</div><label class="api-field">名称<input id="lb-name" type="text" value="${escapeHtml(entry.name||'')}" style="width:100%"></label><label class="api-field">关键词（逗号分隔）<input id="lb-keywords" type="text" value="${escapeHtml((entry.keywords||[]).join(', '))}" style="width:100%"></label><label class="api-field">内容<textarea id="lb-content" class="world-setting" rows="6" style="width:100%">${escapeHtml(entry.content||'')}</textarea></label><div style="display:flex;gap:12px;margin-top:8px"><label><input type="checkbox" id="lb-enabled" ${entry.enabled!==false?'checked':''}> 启用</label><label><input type="checkbox" id="lb-constant" ${entry.constant?'checked':''}> 常驻注入</label></div><div style="display:flex;gap:12px;margin-top:8px"><label class="api-field">优先级<input id="lb-priority" type="number" value="${entry.priority||0}" style="width:80px"></label><label class="api-field">匹配模式<select id="lb-matchmode"><option value="any" ${entry.matchMode==='any'?'selected':''}>任一关键词</option><option value="all" ${entry.matchMode==='all'?'selected':''}>全部关键词</option></select></label></div><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="lb-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="lb-save" class="btn-sm" style="padding:6px 16px;background:var(--accent,#a78bfa);color:#fff;border:none;border-radius:6px">保存</button></div></div>`;
+  overlay.innerHTML = `<div class="modal-box" style="max-width:550px;max-height:85vh;overflow-y:auto"><div style="font-size:15px;font-weight:500;margin-bottom:12px">${isNew?'新建':'编辑'}设定条目</div><label class="api-field">名称<input id="lb-name" type="text" value="${escapeHtml(entry.name||'')}" style="width:100%"></label><label class="api-field">关键词（逗号分隔）<input id="lb-keywords" type="text" value="${escapeHtml((entry.keywords||[]).join(', '))}" style="width:100%"></label><label class="api-field">内容<textarea id="lb-content" class="world-setting" rows="6" style="width:100%">${escapeHtml(entry.content||'')}</textarea></label><div style="display:flex;gap:12px;margin-top:8px"><label><input type="checkbox" id="lb-enabled" ${entry.enabled!==false?'checked':''}> 启用</label><label><input type="checkbox" id="lb-constant" ${entry.constant?'checked':''}> 常驻注入</label></div><div style="display:flex;gap:12px;margin-top:8px"><label class="api-field">优先级<input id="lb-priority" type="number" value="${entry.priority||0}" style="width:80px"></label><label class="api-field">匹配模式<select id="lb-matchmode"><option value="any" ${entry.matchMode==='any'?'selected':''}>任一关键词</option><option value="all" ${entry.matchMode==='all'?'selected':''}>全部关键词</option></select></label></div><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="lb-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="lb-save" class="btn-sm" style="padding:6px 16px;background:var(--accent);color:#fff;border:none;border-radius:6px">保存</button></div></div>`;
   document.body.appendChild(overlay);
   overlay.querySelector('#lb-cancel').onclick = () => overlay.remove();
   overlay.querySelector('#lb-save').onclick = async () => {
@@ -3118,7 +3472,7 @@ document.getElementById('lb-wb-btn')?.addEventListener('click', async () => {
     <div id="wb-list" style="flex:1;overflow-y:auto;min-height:200px"></div>
     <div style="margin-top:10px;display:flex;justify-content:flex-end;gap:8px">
       <button id="wb-cancel" class="btn-sm" style="padding:6px 16px">取消</button>
-      <button id="wb-import" class="btn-sm" style="padding:6px 16px;background:var(--accent,#a78bfa);color:#fff;border:none;border-radius:6px" disabled>导入选中</button>
+      <button id="wb-import" class="btn-sm" style="padding:6px 16px;background:var(--accent);color:#fff;border:none;border-radius:6px" disabled>导入选中</button>
     </div>
   </div>`;
   document.body.appendChild(overlay);
@@ -3141,9 +3495,9 @@ document.getElementById('lb-wb-btn')?.addEventListener('click', async () => {
       status.textContent = `${d.total} 个文件，可导入 ${entries.length} 条。勾选后点「导入选中」。`;
       listEl.innerHTML = entries.map(e => {
         const checked = e.exists ? 'checked disabled' : 'checked';
-        const constTag = e.constant ? ' <span style="color:var(--accent,#a78bfa);font-size:10px">常驻</span>' : '';
-        const existsTag = e.exists ? ' <span style="color:#f0a3a3;font-size:10px">已导入</span>' : '';
-        return `<label style="display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:4px;cursor:pointer;background:var(--bg2,#1f2438);margin-bottom:3px">
+        const constTag = e.constant ? ' <span style="color:var(--accent);font-size:10px">常驻</span>' : '';
+        const existsTag = e.exists ? ' <span style="color:var(--danger);font-size:10px">已导入</span>' : '';
+        return `<label style="display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:4px;cursor:pointer;background:var(--bg2);margin-bottom:3px">
           <input type="checkbox" class="wb-item" data-id="${escapeHtml(e.id)}" ${checked}> 
           <span style="flex:1;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(e.name)}${constTag}${existsTag}</span>
           <span style="font-size:10px;color:var(--muted,#888)">${e.contentLength}字</span>
@@ -3157,13 +3511,13 @@ document.getElementById('lb-wb-btn')?.addEventListener('click', async () => {
   overlay.querySelector('#wb-onlynew').onclick = () => checkboxes().forEach(c => { c.checked = c.disabled; });
   overlay.querySelector('#wb-import').onclick = async () => {
     const ids = checkboxes().filter(c => c.checked && !c.disabled).map(c => c.dataset.id);
-    if (!ids.length) { alert('请先勾选要导入的条目'); return; }
+    if (!ids.length) { toast('请先勾选要导入的条目'); return; }
     const p = overlay.querySelector('#wb-path').value.trim();
     const ir = await fetch('/api/lorebook', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'import-worldbook', entry: { ids, path: p || undefined } }) });
     const id = await ir.json();
     overlay.remove();
     loadLorebookUI();
-    alert(`✅ 已导入 ${id.imported || 0} 条设定触发器`);
+    toast(`✅ 已导入 ${id.imported || 0} 条设定触发器`);
   };
 });
 document.getElementById('lb-scan-btn')?.addEventListener('click', async () => {
@@ -3171,12 +3525,12 @@ document.getElementById('lb-scan-btn')?.addEventListener('click', async () => {
   if (testText === null) return;
   const r = await fetch('/api/lorebook', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'scan', testText, entry: { chatId: App.chatId } }) });
   const d = await r.json();
-  alert(`扫描结果：${d.matched||0} 条命中，注入 ${d.totalTokens||0} token（预算 ${d.budget||0}）`);
+  toast(`扫描结果：${d.matched||0} 条命中，注入 ${d.totalTokens||0} token（预算 ${d.budget||0}）`);
 });
 document.getElementById('lb-settings-btn')?.addEventListener('click', () => {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
-  overlay.innerHTML = `<div class="modal-box" style="max-width:400px"><div style="font-size:15px;font-weight:500;margin-bottom:12px">设定触发器设置</div><label style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><input type="checkbox" id="lbs-enabled" ${App.lorebookSettingsCache.enabled!==false?'checked':''}> 启用设定触发器（关闭后整体不注入）</label><label class="api-field">Token 预算模式<select id="lbs-budget-mode"><option value="auto" ${App.lorebookSettingsCache.tokenBudget==='auto'?'selected':''}>自动（10% maxContext）</option><option value="custom" ${typeof App.lorebookSettingsCache.tokenBudget==='number'?'selected':''}>自定义</option><option value="unlimited" ${App.lorebookSettingsCache.tokenBudget==='unlimited'?'selected':''}>不限制</option></select></label><label class="api-field">自定义预算（token）<input id="lbs-budget-val" type="number" value="${typeof App.lorebookSettingsCache.tokenBudget==='number'?App.lorebookSettingsCache.tokenBudget:10000}" style="width:100%"></label><label class="api-field">自动模式比例（0.01-0.5）<input id="lbs-ratio" type="number" step="0.01" min="0.01" max="0.5" value="${App.lorebookSettingsCache.budgetRatio||0.1}" style="width:100%"></label><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="lbs-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="lbs-save" class="btn-sm" style="padding:6px 16px;background:var(--accent,#a78bfa);color:#fff;border:none;border-radius:6px">保存</button></div></div>`;
+  overlay.innerHTML = `<div class="modal-box" style="max-width:400px"><div style="font-size:15px;font-weight:500;margin-bottom:12px">设定触发器设置</div><label style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><input type="checkbox" id="lbs-enabled" ${App.lorebookSettingsCache.enabled!==false?'checked':''}> 启用设定触发器（关闭后整体不注入）</label><label class="api-field">Token 预算模式<select id="lbs-budget-mode"><option value="auto" ${App.lorebookSettingsCache.tokenBudget==='auto'?'selected':''}>自动（10% maxContext）</option><option value="custom" ${typeof App.lorebookSettingsCache.tokenBudget==='number'?'selected':''}>自定义</option><option value="unlimited" ${App.lorebookSettingsCache.tokenBudget==='unlimited'?'selected':''}>不限制</option></select></label><label class="api-field">自定义预算（token）<input id="lbs-budget-val" type="number" value="${typeof App.lorebookSettingsCache.tokenBudget==='number'?App.lorebookSettingsCache.tokenBudget:10000}" style="width:100%"></label><label class="api-field">自动模式比例（0.01-0.5）<input id="lbs-ratio" type="number" step="0.01" min="0.01" max="0.5" value="${App.lorebookSettingsCache.budgetRatio||0.1}" style="width:100%"></label><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="lbs-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="lbs-save" class="btn-sm" style="padding:6px 16px;background:var(--accent);color:#fff;border:none;border-radius:6px">保存</button></div></div>`;
   document.body.appendChild(overlay);
   overlay.querySelector('#lbs-cancel').onclick = () => overlay.remove();
   overlay.querySelector('#lbs-save').onclick = async () => {
@@ -3226,8 +3580,8 @@ function renderGraph() {
   const positions = {};
   nodes.forEach((n, i) => { const a = (2 * Math.PI * i) / nodes.length - Math.PI / 2; positions[n.id] = { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) }; });
   let svgContent = '';
-  for (const e of edges) { const f = positions[e.from], t = positions[e.to]; if (!f || !t) continue; svgContent += `<line x1="${f.x}" y1="${f.y}" x2="${t.x}" y2="${t.y}" stroke="var(--muted,#9aa0c0)" stroke-width="${e.weight||1}"/>`; if (e.label) svgContent += `<text x="${(f.x+t.x)/2}" y="${(f.y+t.y)/2-6}" text-anchor="middle" fill="var(--text,#e8e6f0)" font-size="11">${e.label}</text>`; }
-  for (const n of nodes) { const p = positions[n.id]; if (!p) continue; const c = n.type==='character'?'#a78bfa':n.type==='location'?'#6ee7a0':'#f0a35e'; svgContent += `<circle cx="${p.x}" cy="${p.y}" r="20" fill="${c}" stroke="var(--border,#3a4163)" stroke-width="1" style="cursor:pointer" onclick="editGraphNode('${n.id}')"/>`; svgContent += `<text x="${p.x}" y="${p.y+30}" text-anchor="middle" fill="var(--text,#e8e6f0)" font-size="11">${n.name}</text>`; }
+  for (const e of edges) { const f = positions[e.from], t = positions[e.to]; if (!f || !t) continue; svgContent += `<line x1="${f.x}" y1="${f.y}" x2="${t.x}" y2="${t.y}" stroke="var(--muted)" stroke-width="${e.weight||1}"/>`; if (e.label) svgContent += `<text x="${(f.x+t.x)/2}" y="${(f.y+t.y)/2-6}" text-anchor="middle" fill="var(--text)" font-size="11">${e.label}</text>`; }
+  for (const n of nodes) { const p = positions[n.id]; if (!p) continue; const c = n.type==='character'?'#a78bfa':n.type==='location'?'#6ee7a0':'#f0a35e'; svgContent += `<circle cx="${p.x}" cy="${p.y}" r="20" fill="${c}" stroke="var(--border)" stroke-width="1" style="cursor:pointer" onclick="editGraphNode('${n.id}')"/>`; svgContent += `<text x="${p.x}" y="${p.y+30}" text-anchor="middle" fill="var(--text)" font-size="11">${n.name}</text>`; }
   svg.innerHTML = svgContent;
 }
 function editGraphNode(nodeId) {
@@ -3235,7 +3589,7 @@ function editGraphNode(nodeId) {
   if (!node) return;
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
-  overlay.innerHTML = `<div class="modal-box" style="max-width:400px"><div style="font-size:15px;font-weight:500;margin-bottom:12px">编辑角色</div><label class="api-field">名称<input id="gn-name" type="text" value="${node.name}" style="width:100%"></label><label class="api-field">类型<select id="gn-type"><option value="character" ${node.type==='character'?'selected':''}>角色</option><option value="location" ${node.type==='location'?'selected':''}>地点</option><option value="faction" ${node.type==='faction'?'selected':''}>势力</option></select></label><label class="api-field">描述<textarea id="gn-desc" class="world-setting" rows="2" style="width:100%">${node.description||''}</textarea></label><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="gn-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="gn-save" class="btn-sm" style="padding:6px 16px;background:var(--accent,#a78bfa);color:#fff;border:none;border-radius:6px">保存</button><button id="gn-delete" class="btn-sm" style="padding:6px 16px;color:#f0a3a3">删除</button></div></div>`;
+  overlay.innerHTML = `<div class="modal-box" style="max-width:400px"><div style="font-size:15px;font-weight:500;margin-bottom:12px">编辑角色</div><label class="api-field">名称<input id="gn-name" type="text" value="${node.name}" style="width:100%"></label><label class="api-field">类型<select id="gn-type"><option value="character" ${node.type==='character'?'selected':''}>角色</option><option value="location" ${node.type==='location'?'selected':''}>地点</option><option value="faction" ${node.type==='faction'?'selected':''}>势力</option></select></label><label class="api-field">描述<textarea id="gn-desc" class="world-setting" rows="2" style="width:100%">${node.description||''}</textarea></label><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="gn-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="gn-save" class="btn-sm" style="padding:6px 16px;background:var(--accent);color:#fff;border:none;border-radius:6px">保存</button><button id="gn-delete" class="btn-sm" style="padding:6px 16px;color:var(--danger)">删除</button></div></div>`;
   document.body.appendChild(overlay);
   overlay.querySelector('#gn-cancel').onclick = () => overlay.remove();
   overlay.querySelector('#gn-save').onclick = async () => { await fetch('/api/graph', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'updateNode', node: { id: nodeId, name: overlay.querySelector('#gn-name').value.trim(), type: overlay.querySelector('#gn-type').value, description: overlay.querySelector('#gn-desc').value } }) }); overlay.remove(); loadGraphUI(); };
@@ -3244,13 +3598,13 @@ function editGraphNode(nodeId) {
 }
 document.getElementById('graph-add-node')?.addEventListener('click', async () => { const name = prompt('角色名称：'); if (!name?.trim()) return; await fetch('/api/graph', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'addNode', node: { name: name.trim() } }) }); loadGraphUI(); });
 document.getElementById('graph-add-edge')?.addEventListener('click', async () => {
-  const nodes = App.graphDataCache.nodes; if (nodes.length < 2) { alert('至少需要 2 个角色'); return; }
+  const nodes = App.graphDataCache.nodes; if (nodes.length < 2) { toast('至少需要 2 个角色'); return; }
   const from = prompt('从哪个角色？\n可选：' + nodes.map(n => n.name).join(', '));
   const to = prompt('到哪个角色？\n可选：' + nodes.map(n => n.name).join(', '));
   const label = prompt('关系标签（如：朋友/家人/敌人）：');
   if (!from || !to) return;
   const fn = nodes.find(n => n.name === from), tn = nodes.find(n => n.name === to);
-  if (!fn || !tn) { alert('名称不匹配'); return; }
+  if (!fn || !tn) { toast('名称不匹配'); return; }
   await fetch('/api/graph', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'addEdge', edge: { from: fn.id, to: tn.id, label: label || '' } }) }); loadGraphUI();
 });
 loadGraphUI();
@@ -3274,7 +3628,7 @@ async function loadStoryMemoryUI() {
       if (scenes.length) {
         const items = [...scenes].reverse().slice(0, 8).map((s, i) => {
           const isLatest = i === 0;
-          const timeStr = s.story_time ? `<span style="color:var(--accent,#a78bfa)">${safeHtml(s.story_time)}</span>` : '';
+          const timeStr = s.story_time ? `<span style="color:var(--accent)">${safeHtml(s.story_time)}</span>` : '';
           const atmo = s.atmosphere ? ` · ${safeHtml(s.atmosphere)}` : '';
           const ev = s.event ? `<div style="margin-left:16px;color:var(--muted,#888);font-size:11px">${safeHtml(s.event)}</div>` : '';
           return `<div style="${isLatest ? 'font-weight:600' : ''}">${isLatest ? '📍 ' : '· '}${timeStr} ${safeHtml(s.location)}${atmo}</div>${ev}`;
@@ -3342,7 +3696,7 @@ document.getElementById('memory-config-btn')?.addEventListener('click', async ()
   const config = d.config || {};
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
-  overlay.innerHTML = `<div class="modal-box" style="max-width:400px"><div style="font-size:15px;font-weight:500;margin-bottom:12px">剧情记忆配置</div><label style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><input type="checkbox" id="smc-scene" ${config.scene ? 'checked' : ''}> 场景档案注入</label><label style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><input type="checkbox" id="smc-character" ${config.character ? 'checked' : ''}> 角色档案注入</label><label style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><input type="checkbox" id="smc-relationship" ${config.relationship ? 'checked' : ''}> 关系档案注入</label><label style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><input type="checkbox" id="smc-expression" ${config.expression ? 'checked' : ''}> 情绪注入</label><label style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><input type="checkbox" id="smc-wardrobe" ${config.wardrobe !== false ? 'checked' : ''}> 着装注入</label><label style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><input type="checkbox" id="smc-inventory" ${config.inventory !== false ? 'checked' : ''}> 物品栏注入</label><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="smc-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="smc-save" class="btn-sm" style="padding:6px 16px;background:var(--accent,#a78bfa);color:#fff;border:none;border-radius:6px">保存</button></div></div>`;
+  overlay.innerHTML = `<div class="modal-box" style="max-width:400px"><div style="font-size:15px;font-weight:500;margin-bottom:12px">剧情记忆配置</div><label style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><input type="checkbox" id="smc-scene" ${config.scene ? 'checked' : ''}> 场景档案注入</label><label style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><input type="checkbox" id="smc-character" ${config.character ? 'checked' : ''}> 角色档案注入</label><label style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><input type="checkbox" id="smc-relationship" ${config.relationship ? 'checked' : ''}> 关系档案注入</label><label style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><input type="checkbox" id="smc-expression" ${config.expression ? 'checked' : ''}> 情绪注入</label><label style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><input type="checkbox" id="smc-wardrobe" ${config.wardrobe !== false ? 'checked' : ''}> 着装注入</label><label style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><input type="checkbox" id="smc-inventory" ${config.inventory !== false ? 'checked' : ''}> 物品栏注入</label><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="smc-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="smc-save" class="btn-sm" style="padding:6px 16px;background:var(--accent);color:#fff;border:none;border-radius:6px">保存</button></div></div>`;
   document.body.appendChild(overlay);
   overlay.querySelector('#smc-cancel').onclick = () => overlay.remove();
   overlay.querySelector('#smc-save').onclick = async () => {
@@ -3400,8 +3754,8 @@ async function loadPersonasUI() {
     for (const [id, p] of Object.entries(App.personasCache)) {
       const el = document.createElement('div');
       el.className = 'cp-item';
-      el.style.cssText = `display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;background:var(--bg2,#f5f5f5);margin-bottom:6px;${id===App.activePersonaCache?'border:2px solid var(--accent,#a78bfa)':''}`;
-      el.innerHTML = `<div style="flex:1"><div style="font-weight:500;font-size:13px">${p.name}${id===App.activePersonaCache?' <span style="color:var(--accent,#a78bfa)">[当前]</span>':''}</div><div style="font-size:11px;color:var(--muted,#888);margin-top:2px">${p.description||'暂无描述'}</div></div>${id!==App.activePersonaCache?`<button class="head-btn persona-activate" data-id="${id}" style="padding:2px 8px;font-size:11px">切换</button>`:''}<button class="head-btn persona-edit" data-id="${id}" style="padding:2px 8px;font-size:11px">编辑</button>${!p.isDefault?`<button class="head-btn persona-del" data-id="${id}" style="padding:2px 8px;font-size:11px;color:#f0a3a3">删</button>`:''}`;
+      el.style.cssText = `display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;background:var(--bg2);margin-bottom:6px;${id===App.activePersonaCache?'border:2px solid var(--accent)':''}`;
+      el.innerHTML = `<div style="flex:1"><div style="font-weight:500;font-size:13px">${p.name}${id===App.activePersonaCache?' <span style="color:var(--accent)">[当前]</span>':''}</div><div style="font-size:11px;color:var(--muted,#888);margin-top:2px">${p.description||'暂无描述'}</div></div>${id!==App.activePersonaCache?`<button class="head-btn persona-activate" data-id="${id}" style="padding:2px 8px;font-size:11px">切换</button>`:''}<button class="head-btn persona-edit" data-id="${id}" style="padding:2px 8px;font-size:11px">编辑</button>${!p.isDefault?`<button class="head-btn persona-del" data-id="${id}" style="padding:2px 8px;font-size:11px;color:var(--danger)">删</button>`:''}`;
       box.appendChild(el);
     }
     box.querySelectorAll('.persona-activate').forEach(btn => btn.addEventListener('click', async () => { await fetch('/api/personas', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'activate', id: btn.dataset.id }) }); loadPersonasUI(); }));
@@ -3413,7 +3767,7 @@ function editPersona(id) {
   const p = App.personasCache[id] || { name: '', description: '' };
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
-  overlay.innerHTML = `<div class="modal-box" style="max-width:400px"><div style="font-size:15px;font-weight:500;margin-bottom:12px">${id?'编辑':'新建'}玩家身份</div><label class="api-field">名称<input id="pe-name" type="text" value="${p.name||''}" style="width:100%"></label><label class="api-field">描述<textarea id="pe-desc" class="world-setting" rows="3" style="width:100%">${p.description||''}</textarea></label><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="pe-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="pe-save" class="btn-sm" style="padding:6px 16px;background:var(--accent,#a78bfa);color:#fff;border:none;border-radius:6px">保存</button></div></div>`;
+  overlay.innerHTML = `<div class="modal-box" style="max-width:400px"><div style="font-size:15px;font-weight:500;margin-bottom:12px">${id?'编辑':'新建'}玩家身份</div><label class="api-field">名称<input id="pe-name" type="text" value="${p.name||''}" style="width:100%"></label><label class="api-field">描述<textarea id="pe-desc" class="world-setting" rows="3" style="width:100%">${p.description||''}</textarea></label><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="pe-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="pe-save" class="btn-sm" style="padding:6px 16px;background:var(--accent);color:#fff;border:none;border-radius:6px">保存</button></div></div>`;
   document.body.appendChild(overlay);
   overlay.querySelector('#pe-cancel').onclick = () => overlay.remove();
   overlay.querySelector('#pe-save').onclick = async () => { await fetch('/api/personas', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'save', id: id||undefined, persona: { name: overlay.querySelector('#pe-name').value.trim(), description: overlay.querySelector('#pe-desc').value } }) }); overlay.remove(); loadPersonasUI(); };
@@ -3434,8 +3788,8 @@ async function loadAgendaUI() {
     if (!pending.length && !completed.length) { box.textContent = '（暂无备忘）'; return; }
     for (const item of pending) {
       const el = document.createElement('div');
-      el.style.cssText = 'display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:6px;background:var(--bg2,#f5f5f5);margin-bottom:4px;font-size:12px';
-      el.innerHTML = `<div style="flex:1">${escapeHtml(item.content)}</div><button class="head-btn agenda-complete" data-id="${escapeHtml(item.id)}" style="padding:2px 6px;font-size:11px">✓</button><button class="head-btn agenda-del" data-id="${escapeHtml(item.id)}" style="padding:2px 6px;font-size:11px;color:#f0a3a3">✕</button>`;
+      el.style.cssText = 'display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:6px;background:var(--bg2);margin-bottom:4px;font-size:12px';
+      el.innerHTML = `<div style="flex:1">${escapeHtml(item.content)}</div><button class="head-btn agenda-complete" data-id="${escapeHtml(item.id)}" style="padding:2px 6px;font-size:11px">✓</button><button class="head-btn agenda-del" data-id="${escapeHtml(item.id)}" style="padding:2px 6px;font-size:11px;color:var(--danger)">✕</button>`;
       box.appendChild(el);
     }
     if (completed.length) {
@@ -3446,7 +3800,7 @@ async function loadAgendaUI() {
     box.querySelectorAll('.agenda-del').forEach(btn => btn.addEventListener('click', async () => { await fetch('/api/agenda/' + encodeURIComponent(App.chatId), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'delete', item: { id: btn.dataset.id } }) }); loadAgendaUI(); }));
   } catch (e) { box.textContent = '加载失败'; }
 }
-document.getElementById('agenda-add-btn')?.addEventListener('click', async () => { if (!App.chatId) { alert('请先打开对话'); return; } const content = prompt('备忘内容：'); if (!content?.trim()) return; await fetch('/api/agenda/' + encodeURIComponent(App.chatId), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'add', item: { content: content.trim() } }) }); loadAgendaUI(); });
+document.getElementById('agenda-add-btn')?.addEventListener('click', async () => { if (!App.chatId) { toast('请先打开对话'); return; } const content = prompt('备忘内容：'); if (!content?.trim()) return; await fetch('/api/agenda/' + encodeURIComponent(App.chatId), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'add', item: { content: content.trim() } }) }); loadAgendaUI(); });
 
 // ---------- 报告系统 UI ----------
 async function loadReportListUI() {
@@ -3458,7 +3812,7 @@ async function loadReportListUI() {
     if (!d.reports?.length) { box.textContent = '（暂无报告）'; return; }
     for (const report of d.reports.slice(0, 10)) {
       const el = document.createElement('div');
-      el.style.cssText = 'display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:6px;background:var(--bg2,#f5f5f5);margin-bottom:4px;font-size:12px;cursor:pointer';
+      el.style.cssText = 'display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:6px;background:var(--bg2);margin-bottom:4px;font-size:12px;cursor:pointer';
       el.innerHTML = `<div style="flex:1">${report.filename}</div><span style="font-size:11px;color:var(--muted,#888)">${report.ts.slice(0, 16)}</span>`;
       el.onclick = async () => { const r2 = await fetch('/api/report/' + encodeURIComponent(App.chatId) + '/' + encodeURIComponent(report.filename)); const d2 = await r2.json(); if (d2.content) showReportPreview(d2.content, report.filename); };
       box.appendChild(el);
@@ -3473,24 +3827,24 @@ function showReportPreview(content, title) {
   overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
 }
 document.getElementById('report-overview-btn')?.addEventListener('click', async () => {
-  if (!App.chatId) { alert('请先打开对话'); return; }
+  if (!App.chatId) { toast('请先打开对话'); return; }
   const range = prompt('报告范围（last10/today/all）：', 'last10');
   if (!range) return;
   const overlay = document.createElement('div'); overlay.className = 'modal-overlay'; overlay.innerHTML = `<div class="modal-box" style="max-width:400px"><div style="text-align:center;padding:20px;color:var(--muted,#888)">正在生成回顾报告...</div></div>`; document.body.appendChild(overlay);
-  try { const r = await fetch('/api/report/overview', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatId: App.chatId, range }) }); const d = await r.json(); overlay.remove(); if (d.error) { alert('生成失败：' + d.error); return; } showReportPreview(d.content, '回顾报告'); loadReportListUI(); } catch (e) { overlay.remove(); alert('请求失败：' + e.message); }
+  try { const r = await fetch('/api/report/overview', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatId: App.chatId, range }) }); const d = await r.json(); overlay.remove(); if (d.error) { toast('生成失败：' + d.error); return; } showReportPreview(d.content, '回顾报告'); loadReportListUI(); } catch (e) { overlay.remove(); toast('请求失败：' + e.message); }
 });
 document.getElementById('report-audit-btn')?.addEventListener('click', async () => {
-  if (!App.chatId) { alert('请先打开对话'); return; }
+  if (!App.chatId) { toast('请先打开对话'); return; }
   const range = prompt('报告范围（last10/today/all）：', 'last10');
   if (!range) return;
   const overlay = document.createElement('div'); overlay.className = 'modal-overlay'; overlay.innerHTML = `<div class="modal-box" style="max-width:400px"><div style="text-align:center;padding:20px;color:var(--muted,#888)">正在生成自检报告...</div></div>`; document.body.appendChild(overlay);
-  try { const r = await fetch('/api/report/audit', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatId: App.chatId, range }) }); const d = await r.json(); overlay.remove(); if (d.error) { alert('生成失败：' + d.error); return; } showReportPreview(d.content, '自检报告'); loadReportListUI(); } catch (e) { overlay.remove(); alert('请求失败：' + e.message); }
+  try { const r = await fetch('/api/report/audit', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatId: App.chatId, range }) }); const d = await r.json(); overlay.remove(); if (d.error) { toast('生成失败：' + d.error); return; } showReportPreview(d.content, '自检报告'); loadReportListUI(); } catch (e) { overlay.remove(); toast('请求失败：' + e.message); }
 });
 document.getElementById('report-retro-btn')?.addEventListener('click', async () => {
-  if (!App.chatId) { alert('请先打开对话'); return; }
+  if (!App.chatId) { toast('请先打开对话'); return; }
   if (!confirm('回溯分析会分批调用 AI 分析全部历史消息，可能消耗较多 token。继续？')) return;
   const overlay = document.createElement('div'); overlay.className = 'modal-overlay'; overlay.innerHTML = `<div class="modal-box" style="max-width:400px"><div style="text-align:center;padding:20px;color:var(--muted,#888)">正在回溯分析...</div></div>`; document.body.appendChild(overlay);
-  try { const r = await fetch('/api/analyze/retro', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatId: App.chatId }) }); const d = await r.json(); overlay.remove(); if (d.error) { alert('分析失败：' + d.error); return; } showReportPreview(d.content, `回溯分析（${d.stats?.messages||0} 条消息，${d.stats?.batches||0} 批）`); loadReportListUI(); } catch (e) { overlay.remove(); alert('请求失败：' + e.message); }
+  try { const r = await fetch('/api/analyze/retro', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatId: App.chatId }) }); const d = await r.json(); overlay.remove(); if (d.error) { toast('分析失败：' + d.error); return; } showReportPreview(d.content, `回溯分析（${d.stats?.messages||0} 条消息，${d.stats?.batches||0} 批）`); loadReportListUI(); } catch (e) { overlay.remove(); toast('请求失败：' + e.message); }
 });
 loadReportListUI();
 
@@ -3505,8 +3859,8 @@ async function loadAnnotationsUI() {
     if (!notes.length) { box.textContent = '（暂无旁注）'; return; }
     for (const note of notes) {
       const el = document.createElement('div');
-      el.style.cssText = 'display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:6px;background:var(--bg2,#f5f5f5);margin-bottom:4px;font-size:12px';
-      el.innerHTML = `<div style="flex:1"><div style="font-weight:500">第${note.position}条消息后</div><div style="font-size:11px;color:var(--muted,#888);margin-top:2px">${note.content}</div></div><label style="font-size:11px;flex:none"><input type="checkbox" class="ann-toggle" data-id="${note.id}" ${note.enabled?'checked':''}> 启用</label><button class="head-btn ann-edit" data-id="${note.id}" style="padding:2px 6px;font-size:11px;flex:none">编辑</button><button class="head-btn ann-del" data-id="${note.id}" style="padding:2px 6px;font-size:11px;color:#f0a3a3;flex:none">删</button>`;
+      el.style.cssText = 'display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:6px;background:var(--bg2);margin-bottom:4px;font-size:12px';
+      el.innerHTML = `<div style="flex:1"><div style="font-weight:500">第${note.position}条消息后</div><div style="font-size:11px;color:var(--muted,#888);margin-top:2px">${note.content}</div></div><label style="font-size:11px;flex:none"><input type="checkbox" class="ann-toggle" data-id="${note.id}" ${note.enabled?'checked':''}> 启用</label><button class="head-btn ann-edit" data-id="${note.id}" style="padding:2px 6px;font-size:11px;flex:none">编辑</button><button class="head-btn ann-del" data-id="${note.id}" style="padding:2px 6px;font-size:11px;color:var(--danger);flex:none">删</button>`;
       box.appendChild(el);
     }
     box.querySelectorAll('.ann-toggle').forEach(cb => cb.addEventListener('change', async () => { await fetch('/api/annotations/' + encodeURIComponent(App.chatId), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'update', note: { id: cb.dataset.id, enabled: cb.checked } }) }); }));
@@ -3517,7 +3871,7 @@ async function loadAnnotationsUI() {
 function editAnnotation(note) {
   if (!note) note = { position: 3, content: '' };
   const overlay = document.createElement('div'); overlay.className = 'modal-overlay';
-  overlay.innerHTML = `<div class="modal-box" style="max-width:400px"><div style="font-size:15px;font-weight:500;margin-bottom:12px">${note.id?'编辑':'添加'}旁注</div><label class="api-field">位置（在第几条消息后）<input id="an-pos" type="number" min="1" value="${note.position||3}" style="width:80px"></label><label class="api-field">内容<textarea id="an-content" class="world-setting" rows="3" style="width:100%">${note.content||''}</textarea></label><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="an-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="an-save" class="btn-sm" style="padding:6px 16px;background:var(--accent,#a78bfa);color:#fff;border:none;border-radius:6px">保存</button></div></div>`;
+  overlay.innerHTML = `<div class="modal-box" style="max-width:400px"><div style="font-size:15px;font-weight:500;margin-bottom:12px">${note.id?'编辑':'添加'}旁注</div><label class="api-field">位置（在第几条消息后）<input id="an-pos" type="number" min="1" value="${note.position||3}" style="width:80px"></label><label class="api-field">内容<textarea id="an-content" class="world-setting" rows="3" style="width:100%">${note.content||''}</textarea></label><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="an-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="an-save" class="btn-sm" style="padding:6px 16px;background:var(--accent);color:#fff;border:none;border-radius:6px">保存</button></div></div>`;
   document.body.appendChild(overlay);
   overlay.querySelector('#an-cancel').onclick = () => overlay.remove();
   overlay.querySelector('#an-save').onclick = async () => {
@@ -3558,6 +3912,113 @@ document.querySelectorAll('#sidebar .card.collapsible .card-title').forEach(titl
     if (card) { card.classList.toggle('collapsed'); saveFoldedState(); }
   });
 });
+// ---------- 侧栏面板切换（2026-09-02：31 卡片一长列 → 4 tab 分面板）----------
+// 记住上次选的面板（localStorage），刷新后停在原处。
+(function initSidebarPanels() {
+  const KEY = 'rw-sidebar-panel';
+  const tabs = [...document.querySelectorAll('.sb-tab')];
+  const panels = [...document.querySelectorAll('.sb-panel')];
+  if (!tabs.length) return;
+
+  function activate(panelId, save) {
+    // 切换前钩子（收藏面板用它把卡片搬回原位；未注册时为空操作）
+    if (typeof window.__sbBeforePanelSwitch === 'function') window.__sbBeforePanelSwitch(panelId);
+    for (const t of tabs) t.classList.toggle('active', t.dataset.panel === panelId);
+    for (const p of panels) p.classList.toggle('hidden', p.id !== panelId);
+    if (save) { try { localStorage.setItem(KEY, panelId); } catch (e) { /* 忽略 */ } }
+    // 切换后钩子（收藏面板用它把收藏卡片搬进来）
+    if (typeof window.__sbAfterPanelSwitch === 'function') window.__sbAfterPanelSwitch(panelId);
+    document.getElementById('sidebar')?.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+  for (const t of tabs) t.addEventListener('click', () => activate(t.dataset.panel, true));
+  // 恢复上次面板
+  let saved = '';
+  try { saved = localStorage.getItem(KEY) || ''; } catch (e) { /* 忽略 */ }
+  if (saved && panels.some(p => p.id === saved)) activate(saved, false);
+  // 暴露给搜索用：命中跨面板时自动切过去
+  window.__sbActivatePanel = activate;
+})();
+
+// ---------- 侧栏收藏（⭐ 常用）：把高频卡片钉到第一个 tab，不用记它在哪个分类 ----------
+// 实现方式：不移动 DOM（避免打乱面板结构与已绑定事件），而是**克隆引用**——
+// 收藏面板里放的是原卡片的「移动占位」：切到 ⭐ 时把收藏的卡片临时 append 进来，切走时还原回原面板。
+(function initSidebarFav() {
+  const FAV_KEY = 'rw-sidebar-fav';
+  const favPanel = document.getElementById('panel-fav');
+  const sidebar = document.getElementById('sidebar');
+  if (!favPanel || !sidebar) return;
+
+  let favs = [];
+  try { favs = JSON.parse(localStorage.getItem(FAV_KEY) || '[]'); } catch (e) { favs = []; }
+  const homeOf = new Map();   // cardId -> 原所属面板 id（用于还原）
+
+  function saveFavs() { try { localStorage.setItem(FAV_KEY, JSON.stringify(favs)); } catch (e) { /* 忽略 */ } }
+
+  // 给每张卡片标题挂 ☆ / ★ 按钮
+  function mountStars() {
+    for (const card of sidebar.querySelectorAll('.sb-panel:not(#panel-fav) > .card')) {
+      const title = card.querySelector(':scope > .card-title');
+      if (!title || title.querySelector('.card-fav')) continue;
+      if (!homeOf.has(card.id)) homeOf.set(card.id, card.closest('.sb-panel')?.id || '');
+      const btn = document.createElement('button');
+      btn.className = 'card-fav' + (favs.includes(card.id) ? ' on' : '');
+      btn.textContent = favs.includes(card.id) ? '★' : '☆';
+      btn.title = favs.includes(card.id) ? '取消收藏' : '收藏到 ⭐ 常用';
+      btn.setAttribute('aria-label', btn.title);
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();   // 不触发卡片折叠
+        const i = favs.indexOf(card.id);
+        if (i >= 0) favs.splice(i, 1); else favs.push(card.id);
+        saveFavs();
+        const on = favs.includes(card.id);
+        btn.classList.toggle('on', on);
+        btn.textContent = on ? '★' : '☆';
+        btn.title = on ? '取消收藏' : '收藏到 ⭐ 常用';
+        toast(on ? '已收藏到 ⭐ 常用' : '已取消收藏');
+      });
+      // 插到折叠箭头之前（箭头需保持在最右），无箭头时直接追加
+      const arrow = title.querySelector('.fold-arrow, .group-arrow');
+      if (arrow) title.insertBefore(btn, arrow);
+      else title.appendChild(btn);
+    }
+  }
+
+  // 切到 ⭐ 面板时：把收藏的卡片搬进来；切走时搬回原面板
+  function fillFav() {
+    favPanel.querySelector('#panel-fav-empty')?.remove();
+    const valid = favs.filter(id => document.getElementById(id));
+    if (!valid.length) {
+      const tip = document.createElement('div');
+      tip.id = 'panel-fav-empty';
+      tip.innerHTML = '还没有收藏的功能<br><span style="opacity:.7">在任意卡片标题右侧点 ☆ 即可收藏</span>';
+      favPanel.appendChild(tip);
+      return;
+    }
+    for (const id of valid) {
+      const card = document.getElementById(id);
+      if (card && card.parentElement !== favPanel) favPanel.appendChild(card);
+    }
+  }
+  function restoreFav() {
+    for (const card of [...favPanel.children]) {
+      if (card.id === 'panel-fav-empty') continue;
+      const home = document.getElementById(homeOf.get(card.id) || '');
+      if (home) home.appendChild(card);
+    }
+  }
+
+  mountStars();
+  // 通过面板切换钩子进出 ⭐：离开时把卡片搬回原面板，进入时搬进来
+  window.__sbBeforePanelSwitch = (nextPanelId) => {
+    if (nextPanelId !== 'panel-fav') restoreFav();
+  };
+  window.__sbAfterPanelSwitch = (panelId) => {
+    if (panelId === 'panel-fav') fillFav();
+  };
+  // 若刷新后停在 ⭐ 面板，补填一次
+  if (!favPanel.classList.contains('hidden')) fillFav();
+})();
+
 applyFoldedState();
 
 // ---------- 侧栏卡片拖拽排序（card-group + 独立卡片，顺序存 localStorage） ----------
@@ -3674,4 +4135,160 @@ setInterval(loadStats, 15000);
     } catch (e) { /* 继续新建 */ }
   }
   await newChat();
+})();
+
+
+// ===== 消息书签 UI（2026-09-02 同步自正式版 NEW-2）=====
+
+
+// ===== 从某条消息分叉出新会话（2026-09-02 同步自正式版）=====
+async function forkFromSeq(seq) {
+  if (App.streaming) { toast('生成中，请稍后再分叉'); return; }
+  if (!App.chatId) { toast('请先打开对话'); return; }
+  const idx = App.history.findIndex(m => m.seq === seq);
+  if (idx < 0) { toast('未找到该消息'); return; }
+  const keep = App.history.slice(0, idx + 1);
+  const ok = await confirmDialog(
+    `⤵ 从这里分叉出新会话？
+
+新会话将包含前 ${keep.length} 条消息（到 seq ${seq} 为止）。
+` +
+    `当前会话保持不变，你可以在两条线上分别继续。`,
+    { okText: '创建分支' }
+  );
+  if (!ok) return;
+  try {
+    await saveChat();
+    const { id } = await (await fetch('/api/chats', { method: 'POST' })).json();
+    if (!id) { toast('创建分支会话失败', 'err'); return; }
+    const baseTitle = App.chatTitle || (keep.find(m => m.role === 'user')?.content || '新对话').slice(0, 16);
+    const forkTitle = `${baseTitle} · 分支@${seq}`;
+    const forkVersions = {};
+    for (const [anchor, list] of Object.entries(rerollVersions)) {
+      if (Number(anchor) <= Number(seq)) forkVersions[anchor] = list;
+    }
+    const r = await fetch('/api/chats/' + id, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: forkTitle, messages: keep, versions: forkVersions }),
+    });
+    if (!r.ok) { toast('写入分支内容失败', 'err'); return; }
+    if (App.currentChatProfileId) {
+      try {
+        await fetch('/api/chat-profiles', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ action: 'apply', id: App.currentChatProfileId, profile: { chatId: id } }),
+        });
+      } catch (e) { /* 不阻断 */ }
+    }
+    toast(`✅ 已创建分支（${keep.length} 条）：${forkTitle}`);
+    await loadChatList();
+    const goNow = await confirmDialog('分支已创建。现在切换过去吗？', { okText: '切换到分支', cancelText: '留在当前' });
+    if (goNow) await openChat(id);
+  } catch (e) {
+    toast('分叉失败：' + e.message, 'err');
+  }
+}
+
+async function loadBookmarksUI() {
+  const box = document.getElementById('bookmark-list');
+  if (!box) return;
+  if (!App.chatId) { box.textContent = '请先打开对话'; return; }
+  await withLoading(box, async () => {
+    const d = await fetchJson('/api/bookmarks/' + encodeURIComponent(App.chatId));
+    const marks = d.marks || [];
+    App.bookmarksCache = marks;
+    syncBookmarkButtons();
+    box.innerHTML = '';
+    if (!marks.length) { box.textContent = '（暂无书签，在气泡点 🔖 添加）'; return; }
+    for (const bm of marks) {
+      const el = document.createElement('div');
+      el.className = 'bm-item';
+      const who = bm.role === 'user' ? '用户' : 'AI';
+      el.innerHTML = `<span class="bm-seq">#${safeHtml(bm.seq)}</span>
+        <span class="bm-label" title="点击跳转">${safeHtml(bm.label || '(无摘要)')}</span>
+        <span class="bm-who">${who}</span>
+        <button class="head-btn bm-del" data-id="${safeHtml(bm.id)}" title="删除该书签">✕</button>`;
+      const jump = () => jumpToSeq(bm.seq);
+      el.querySelector('.bm-label').addEventListener('click', jump);
+      el.querySelector('.bm-seq').addEventListener('click', jump);
+      el.querySelector('.bm-del').addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await fetch('/api/bookmarks/' + encodeURIComponent(App.chatId), {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ action: 'delete', mark: { id: bm.id } }),
+        });
+        loadBookmarksUI();
+      });
+      box.appendChild(el);
+    }
+  }, { rows: 3 });
+}
+
+function syncBookmarkButtons() {
+  const set = new Set((App.bookmarksCache || []).map(b => Number(b.seq)));
+  for (const btn of document.querySelectorAll('.bm-btn')) {
+    btn.classList.toggle('on', set.has(Number(btn.dataset.seq)));
+  }
+}
+
+// 跳到指定 seq 的气泡（分段加载下若未渲染，先自动加载更早的直到出现）
+function jumpToSeq(seq) {
+  let wrap = els.messages.querySelector(`.msg-wrap[data-seq="${seq}"]`);
+  let guard = 0;
+  while (!wrap && Number(App.renderCursor) > 0 && guard++ < 40) {
+    renderHistorySlice(RENDER_BATCH);
+    wrap = els.messages.querySelector(`.msg-wrap[data-seq="${seq}"]`);
+  }
+  if (!wrap) { toast('未找到该消息（可能已被删除或截断）', 'err'); return; }
+  wrap.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  wrap.classList.add('msg-search-hit');
+  setTimeout(() => wrap.classList.remove('msg-search-hit'), 1800);
+}
+
+
+// ===== 消息时间轴导航（2026-09-02 同步自正式版，去除旁注色分支）=====
+function renderTimelineNav() {
+  const nav = document.getElementById('timeline-nav');
+  if (!nav) return;
+  const wraps = [...els.messages.querySelectorAll('.msg-wrap[data-seq]')];
+  if (wraps.length < 6) { nav.classList.add('hidden'); return; }
+  nav.classList.remove('hidden');
+  const bmSet = new Set((App.bookmarksCache || []).map(b => Number(b.seq)));
+  nav.innerHTML = '';
+  for (const w of wraps) {
+    const seq = Number(w.dataset.seq);
+    const tick = document.createElement('div');
+    tick.className = 'tn-tick' + (bmSet.has(seq) ? ' bm' : (w.classList.contains('user') ? ' user' : ''));
+    tick.dataset.seq = String(seq);
+    const preview = (w.querySelector('.bubble')?.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+    tick.title = `#${seq}${bmSet.has(seq) ? ' 🔖' : ''} ${preview}`;
+    tick.addEventListener('click', () => {
+      w.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      w.classList.add('msg-search-hit');
+      setTimeout(() => w.classList.remove('msg-search-hit'), 1200);
+    });
+    nav.appendChild(tick);
+  }
+  updateTimelineCurrent();
+}
+
+function updateTimelineCurrent() {
+  const nav = document.getElementById('timeline-nav');
+  if (!nav || nav.classList.contains('hidden')) return;
+  const box = els.messages;
+  const mid = box.scrollTop + box.clientHeight / 2;
+  let bestSeq = null, bestDist = Infinity;
+  for (const w of els.messages.querySelectorAll('.msg-wrap[data-seq]')) {
+    const c = w.offsetTop + w.offsetHeight / 2;
+    const d = Math.abs(c - mid);
+    if (d < bestDist) { bestDist = d; bestSeq = w.dataset.seq; }
+  }
+  for (const t of nav.children) t.classList.toggle('cur', t.dataset.seq === bestSeq);
+}
+(function bindTimelineScroll() {
+  let raf = 0;
+  els.messages?.addEventListener('scroll', () => {
+    if (raf) return;
+    raf = requestAnimationFrame(() => { raf = 0; updateTimelineCurrent(); });
+  }, { passive: true });
 })();
