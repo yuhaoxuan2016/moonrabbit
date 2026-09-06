@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Moonrabbit 桌面端默认能力（WebView 加载 localhost + 基础窗口）","local":true,"windows":["main"],"permissions":["core:default","core:window:default"]}}

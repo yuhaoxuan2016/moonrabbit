@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/favicon.png">
+<title>Moonrabbit · 月兔</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<a href="#input" class="skip-link">跳到输入框</a>
+<header>
+  <button class="hamburger" id="sidebar-toggle" title="打开侧栏菜单（移动端抽屉）" aria-label="菜单">☰</button>
+  <div class="brand">
+    <img class="brand-logo" src="/logo.png" alt="Rabbit" title="Rabbit">
+    <h1>Moonrabbit</h1>
+    <span class="subtitle">月兔 · 多角色同台的月光剧场</span>
+  </div>
+  <div class="header-right">
+    <select id="profile-input" class="head-input" title="配置档案（端点 + 模型 + 参数整套切换）">
+      <option value="">— 配置档案 —</option>
+    </select>
+    <select id="model-input" class="head-input" title="切换模型（选择即生效，自动保存）">
+      <option value="deepseek-chat">deepseek-chat</option>
+      <option value="deepseek-reasoner">deepseek-reasoner</option>
+      <option value="gpt-4o-mini">gpt-4o-mini</option>
+      <option value="claude-3-5-sonnet">claude-3-5-sonnet</option>
+      <option value="__custom__">✎ 自定义…</option>
+    </select>
+    <button id="new-chat-btn" class="head-btn">＋ 新对话</button>
+    <button id="api-btn" class="head-btn" title="API / 端点设置">⚙ API</button>
+  </div>
+</header>
+<div id="api-modal" class="modal hidden">
+  <div class="modal-box">
+    <div class="card-title">⚙ API 设置（保存时自动探测验证）</div>
+    <label class="api-field">协议
+      <select id="api-protocol">
+        <option value="anthropic">Anthropic 兼容（如 DeepSeek / Claude 中转）</option>
+        <option value="openai">OpenAI 兼容（如硅基流动 / OpenRouter / 本地服务）</option>
+      </select>
+    </label>
+    <label class="api-field">Base URL
+      <input id="api-base" type="text" placeholder="https://api.deepseek.com/anthropic/v1">
+    </label>
+    <label class="api-field">API Key
+      <input id="api-key" type="password" placeholder="留空 = 沿用当前 Key">
+    </label>
+    <label class="api-field">输出上限 max_tokens（256-393216）
+      <input id="api-maxtokens" type="number" min="256" max="393216" step="256" value="393216">
+    </label>
+    <label class="api-field">思考 thinking
+      <select id="api-thinking">
+        <option value="auto">自动（端点默认）</option>
+        <option value="disabled">关闭</option>
+        <option value="low">轻量思考（约 4K 预算）</option>
+        <option value="medium">标准思考（约 8K 预算）</option>
+        <option value="high">深度思考（约 32K 预算）</option>
+        <option value="max">极致思考（约 64K 预算 / reasoning_effort: max）</option>
+        <option value="custom">自定义预算（用下方预算框）</option>
+      </select>
+    </label>
+    <label class="api-field">思考预算 token（256-393216，自定义档生效）
+      <input id="api-budget" type="number" min="256" max="393216" step="1024" value="32768">
+    </label>
+    <label class="api-field">上下文预算 token（system+历史，0=不裁剪）
+      <input id="api-context" type="number" min="0" max="1048576" step="1024" value="1048576">
+    </label>
+    <label class="api-field">自动压缩总结（历史超阈值时压最旧一半为摘要）
+      <select id="api-autosummary">
+        <option value="true">开启（推荐）</option>
+        <option value="false">关闭</option>
+      </select>
+    </label>
+    <label class="api-field">摘要触发阈值（历史字符数）
+      <input id="api-sumthreshold" type="number" min="2000" max="100000" step="1000" value="12000">
+    </label>
+    <div class="set-group-title">🎛 采样预设（命名预设 · 一键切换）</div>
+    <div class="api-field">预设
+      <span style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+        <select id="preset-select" style="flex:1;min-width:170px;"></select>
+        <button id="preset-apply" class="head-btn" style="padding:2px 10px;">应用</button>
+        <button id="preset-save" class="head-btn" style="padding:2px 10px;">💾 保存</button>
+        <button id="preset-del" class="head-btn" style="padding:2px 10px;">🗑 删除</button>
+      </span>
+    </div>
+    <label class="api-field">温度 temperature（0-2，创作向推荐 1.5）
+      <input id="preset-temp" type="number" min="0" max="2" step="0.1" placeholder="1.0">
+    </label>
+    <label class="api-field">top_p（0-1）
+      <input id="preset-topp" type="number" min="0" max="1" step="0.05" placeholder="1.0">
+    </label>
+    <label class="api-field">top_k（0-100，0=不传；仅 Anthropic 协议生效）
+      <input id="preset-topk" type="number" min="0" max="100" step="1" placeholder="0">
+    </label>
+    <label class="api-field">presence_penalty（0-2；仅 OpenAI 协议生效）
+      <input id="preset-presence" type="number" min="0" max="2" step="0.1" placeholder="0">
+    </label>
+    <label class="api-field">frequency_penalty（0-2；仅 OpenAI 协议生效）
+      <input id="preset-freq" type="number" min="0" max="2" step="0.1" placeholder="0">
+    </label>
+    <div class="api-msg">💡 预设内含「输出上限 / 上下文预算」：应用预设会覆盖上方对应字段；改完参数点「💾 保存」= 存入当前选中预设（同名覆盖），应用后下一轮生效。</div>
+    <div class="set-group-title">📋 配置档案（端点 + 模型 + 参数 · 一键切换整套配置）</div>
+    <div class="api-field">档案
+      <span style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+        <select id="profile-select" style="flex:1;min-width:170px;"></select>
+        <button id="profile-apply" class="head-btn" style="padding:2px 10px;">切换</button>
+        <button id="profile-save" class="head-btn" style="padding:2px 10px;">💾 保存</button>
+        <button id="profile-del" class="head-btn" style="padding:2px 10px;">🗑 删除</button>
+      </span>
+    </div>
+    <div class="api-msg">💡 配置档案 = 端点（协议 / URL）+ 模型 + 采样预设的完整快照。切换档案 = 一步切换整套配置。<b>Key 按端点自动记忆</b>：第一次在某端点填 Key 保存后即记住，之后切到该端点的档案自动带上对应 Key，<b>无需重填</b>；全新端点首次切换沿用当前 Key（在上方 API 设置填一次即自动记住）。</div>
+    <div class="set-group-title">辅助 API（后台任务走独立端点，不抢主 API）</div>
+    <label class="api-field">启用辅助 API
+      <select id="api-aux-enabled">
+        <option value="false">关闭（后台任务走主端点）</option>
+        <option value="true">开启（摘要 / 联网搜索走辅助端点）</option>
+      </select>
+    </label>
+    <label class="api-field">辅助协议
+      <select id="api-aux-protocol">
+        <option value="anthropic">Anthropic 兼容（如 DeepSeek / Claude 中转）</option>
+        <option value="openai">OpenAI 兼容</option>
+      </select>
+    </label>
+    <label class="api-field">辅助 Base URL（留空 = 关闭辅助）
+      <input id="api-aux-base" type="text" placeholder="https://api.deepseek.com/anthropic/v1">
+    </label>
+    <label class="api-field">辅助 API Key（留空 = 沿用当前 Key）
+      <input id="api-aux-key" type="password" placeholder="留空 = 沿用当前 Key">
+    </label>
+    <label class="api-field">辅助模型（建议用便宜模型做摘要）
+      <input id="api-aux-model" type="text" placeholder="如 deepseek-chat">
+    </label>
+    <label class="api-field">辅助失败时回退主端点
+      <select id="api-aux-fallback">
+        <option value="false">不回退（默认，避免撞主 API 限流）</option>
+        <option value="true">回退主端点（辅助挂了也能跑）</option>
+      </select>
+    </label>
+    <div class="set-group-title">⚙️ 自定义注入（前缀 / 后缀 · 按当前会话）</div>
+    <label class="api-field">注入前缀（置于 system 最前）
+      <textarea id="inject-prefix" rows="2" placeholder="留空 = 不注入。如：本会话以第二人称「你」称呼用户、禁止网络用语…"></textarea>
+    </label>
+    <label class="api-field">注入后缀（置于 system 最后）
+      <textarea id="inject-suffix" rows="2" placeholder="留空 = 不注入。如：每轮回复末尾不要总结、不要反问…"></textarea>
+    </label>
+    <div class="api-field" style="display:flex;gap:8px;align-items:center;">
+      <button id="inject-save" class="head-btn" style="padding:2px 10px;">💾 保存注入</button>
+      <span id="inject-note" class="attach-note hidden">已保存（下一轮生效）</span>
+    </div>
+    <div class="api-msg">💡 前缀/后缀按会话保存，随每轮 system 注入：前缀置顶、后缀置底。适合不想写进「会话常驻设定」的临时指令。</div>
+    <div class="api-field" id="api-now">当前：—</div>
+    <div class="modal-actions">
+      <button id="api-save" class="head-btn">保存并探测</button>
+      <button id="api-cancel" class="head-btn">取消</button>
+    </div>
+    <div id="api-msg" class="api-msg"></div>
+  </div>
+</div>
+<div id="stats-bar" class="stats-bar">— 轮 · — 次调用 | LLM 总耗时 — | 首 token 平均 — | 缓存命中 — | 输入 — · 输出 —</div>
+<div id="peak-banner" class="peak-banner hidden">⚠️ 高峰时段（工作日上午 9:00-12:00 / 14:00-18:00）：API 费率较高、可能限流变卡；周末全天为低谷价</div>
+
+<main>
+  <section id="chat">
+    <div id="chat-inner">
+      <div id="messages"></div>
+      <div id="timeline-nav" title="消息时间轴：点击跳转 · 金色=书签"></div>
+      <div id="typing" class="typing hidden">角色们正在想……</div>
+    </div>
+  </section>
+
+  <aside id="sidebar">
+    <div id="sidebar-search-wrap">
+      <input id="sidebar-search" type="text" placeholder="🔍 搜功能" autocomplete="off">
+      <button id="sidebar-search-clear" title="清空筛选" aria-label="清空筛选">✕</button>
+    </div>
+    <div id="sidebar-tabs">
+      <button class="sb-tab" data-panel="panel-fav" title="收藏的常用功能（点卡片标题右侧 ☆ 添加）">⭐</button>
+      <button class="sb-tab active" data-panel="panel-chat">💬 对话</button>
+      <button class="sb-tab" data-panel="panel-setting">📖 设定</button>
+      <button class="sb-tab" data-panel="panel-data">📊 数据</button>
+      <button class="sb-tab" data-panel="panel-system">⚙ 系统</button>
+    </div>
+    <div class="sb-panel hidden" id="panel-fav"></div>
+    <div class="sb-panel" id="panel-chat">
+      <div class="card collapsible" id="card-chats">
+      <div class="card-title">📁 会话（旧对话自动归档）<span class="fold-arrow">▾</span>
+      <span style="float:right;">
+      <button id="export-md-btn" class="head-btn" style="padding:1px 8px;" title="导出当前会话（Markdown 可读版）">📄 MD</button>
+      <button id="export-btn" class="head-btn" style="padding:1px 8px;" title="导出当前会话（JSON 完整备份，可恢复）">📤 导出</button>
+      <button id="import-btn" class="head-btn" style="padding:1px 8px;" title="导入会话（JSON 文件）">📥 导入</button>
+      <button id="savepoint-btn" class="head-btn" style="padding:1px 8px;" title="存档当前会话">💾 存档</button>
+      <button id="loadpoint-btn" class="head-btn" style="padding:1px 8px;" title="读取存档点">↩ 读档</button>
+      </span>
+      </div>
+      <div id="chat-list" class="chat-list">加载中…</div>
+      </div>
+      <div class="card" id="card-chat-profiles">
+      <div class="card-title">📋 配置档</div>
+      <div id="cp-manage-list" class="cp-list">加载中…</div>
+      <div style="margin-top:8px"><button id="cp-add-btn" class="head-btn" style="padding:4px 12px">＋ 新建</button></div>
+      </div>
+      <div class="card collapsible" id="card-bookmarks">
+      <div class="card-title">🔖 书签 <span class="fold-arrow">▾</span></div>
+      <div id="bookmark-list" style="font-size:12px">加载中…</div>
+      <div class="em-hint">在气泡操作栏点 🔖 加书签，这里可一键跳回。</div>
+      </div>
+      <div class="card collapsible" id="card-annotations">
+      <div class="card-title">🖍 旁注（作者笔记）<span class="fold-arrow">▾</span></div>
+      <div id="annotation-list" style="font-size:12px">加载中…</div>
+      <div class="em-row" style="margin-top:8px">
+      <input id="ann-pos-input" type="number" min="1" step="1" placeholder="位置(消息序号)" style="max-width:120px">
+      <input id="ann-content-input" type="text" placeholder="旁注内容（回车即添加）">
+      <button id="ann-add-btn" class="head-btn">✅ 添加</button>
+      </div>
+      <div class="em-hint">给对话某处加作者视角的批注，会按位置注入 AI 上下文做引导。</div>
+      </div>
+      <div class="card collapsible" id="card-tm">
+      <div class="card-title">📜 剧情记忆（回合自动记账）<span class="fold-arrow">▾</span></div>
+      <div class="tm-tabs">
+      <button id="tm-tab-tl" class="tm-tab active">时间线</button>
+      <button id="tm-tab-inv" class="tm-tab">物品栏</button>
+      <button id="tm-tab-wd" class="tm-tab" title="当前着装（AI 输出 costume 自动更新，可手动改）">换装</button>
+      <button id="tm-tab-em" class="tm-tab">情绪</button>
+      <button id="tm-tab-auto" class="tm-tab" title="从 <storyevent> 自动提取的角色简介/关系/场景（注入 system）">自动提取</button>
+      <button id="tm-tab-loc" class="tm-tab" title="地点详细档案（location_detail），可导出为知识库格式">地点档案</button>
+      </div>
+      <div id="tm-timeline" class="tm-body">加载中…</div>
+      <div class="tm-edit" id="tm-edit-tl">
+      <div class="tm-edit-title">✍️ 手动补记（时间线）</div>
+      <div class="em-row"><input id="mt-time" data-f="story_time" type="text" placeholder="时间（如：第3天 早上）"><input id="mt-loc" data-f="location" type="text" placeholder="地点（可留空）"></div>
+      <div class="em-row"><input id="mt-char" data-f="characters" type="text" placeholder="在场角色（顿号分隔，可留空）"><input id="mt-cos" data-f="costume" type="text" placeholder="着装变化（可留空）"></div>
+      <div class="em-row"><input id="mt-atm" data-f="atmosphere" type="text" placeholder="氛围（可留空）"><input id="mt-event" data-f="event" type="text" placeholder="事件一句话（可留空）"></div>
+      <div class="em-row"><button id="mt-ai" class="ma-btn">✨ AI 补全</button><button id="mt-btn" class="head-btn">✅ 补记</button></div>
+      <div id="mt-note" class="attach-note hidden"></div>
+      </div>
+      <div id="tm-inventory" class="tm-body hidden">加载中…</div>
+      <div class="tm-edit hidden" id="inv-edit">
+      <div class="tm-edit-title">✍️ 手动修改物品栏</div>
+      <div class="em-row">
+      <select id="inv-act">
+      <option value="gain">＋ 添加/获得</option>
+      <option value="loss">－ 消耗/移除</option>
+      </select>
+      <input id="inv-name" type="text" placeholder="物品名（如：素描本）">
+      <input id="inv-holder" type="text" placeholder="持有者（添加时可选）">
+      <button id="inv-btn" class="head-btn">✅ 提交</button>
+      </div>
+      <div id="inv-note" class="attach-note hidden"></div>
+      </div>
+      <div id="tm-wardrobe" class="tm-body hidden">
+      <div class="wd-current" id="wd-current">当前着装：加载中…</div>
+      <div class="wd-row">
+      <input id="wd-char" type="text" placeholder="角色名（如：艾琳）">
+      <input id="wd-outfit" type="text" placeholder="着装描述（如：米白针织衫+百褶裙）">
+      </div>
+      <div class="wd-row">
+      <input id="wd-day" type="text" placeholder="日期（留空=今日）">
+      <button id="wd-btn" class="head-btn">✅ 提交换装</button>
+      </div>
+      <div id="wd-note" class="attach-note hidden"></div>
+      <div class="em-hint">AI 回复输出 <code>&lt;storyevent&gt;costume: 角色：着装&lt;/storyevent&gt;</code> 自动更新；此面板可手动修正。</div>
+      </div>
+      <div id="tm-emotions" class="tm-body hidden">
+      <div class="em-list" id="em-list">加载中…</div>
+      <div class="em-row">
+      <input id="em-name" type="text" placeholder="角色名（如：艾琳）" list="em-names">
+      <datalist id="em-names">
+      <option value="艾琳"></option><option value="卫队长"></option><option value="旁白"></option>
+      </datalist>
+      </div>
+      <div class="em-row">
+      <input id="em-text" type="text" placeholder="情绪描述（如：平静带笑意；留空=清除）">
+      <button id="em-btn" class="head-btn">✅ 记录</button>
+      </div>
+      <div id="em-note" class="attach-note hidden"></div>
+      <div class="em-hint">AI 回复可输出 <code>&lt;storyevent&gt;emotion: 角色=情绪&lt;/storyevent&gt;</code> 自动记录；此面板可手动修正。情绪会注入 system 帮助保持连续。</div>
+      </div>
+      <div id="tm-auto" class="tm-body hidden">
+      <div id="memory-scene" style="margin-bottom:8px;padding:8px;background:var(--bg2);border-radius:6px;font-size:12px">加载中…</div>
+      <div id="memory-characters" style="margin-bottom:8px;padding:8px;background:var(--bg2);border-radius:6px;font-size:12px">加载中…</div>
+      <div id="memory-relationships" style="margin-bottom:8px;padding:8px;background:var(--bg2);border-radius:6px;font-size:12px">加载中…</div>
+      <div id="memory-wardrobe" style="margin-bottom:8px;padding:8px;background:var(--bg2);border-radius:6px;font-size:12px">加载中…</div>
+      <div id="memory-emotions" style="margin-bottom:8px;padding:8px;background:var(--bg2);border-radius:6px;font-size:12px">加载中…</div>
+      <div id="memory-inventory" style="margin-bottom:8px;padding:8px;background:var(--bg2);border-radius:6px;font-size:12px">加载中…</div>
+      <div id="memory-locations2" style="margin-bottom:8px;padding:8px;background:var(--bg2);border-radius:6px;font-size:12px">加载中…</div>
+      <div style="margin-top:8px;display:flex;gap:6px">
+      <button id="memory-refresh-btn" class="head-btn" style="padding:4px 12px">🔄 刷新</button>
+      <button id="memory-config-btn" class="head-btn" style="padding:4px 12px">⚙️ 注入开关</button>
+      </div>
+      <div class="em-hint">AI 回复输出 <code>&lt;storyevent&gt;</code> 标签自动提取；各模块注入 system 可通过 ⚙️ 开关控制。</div>
+      </div>
+      <div id="tm-locations" class="tm-body hidden">
+      <div id="location-list" style="padding:8px;background:var(--bg2);border-radius:6px;font-size:12px;max-height:260px;overflow-y:auto;white-space:pre-wrap">加载中…</div>
+      <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+      <button id="location-refresh-btn" class="head-btn" style="padding:4px 12px">🔄 刷新</button>
+      </div>
+      <div class="em-hint">AI 输出 <code>&lt;storyevent&gt;location_detail: 分组| 地点名：详细描写&lt;/storyevent&gt;</code> 自动建档（新地点首次造访时）；此面板为知识库格式预览，可导出 markdown 供其他知识库复用。</div>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      <button id="tm-export" class="attach">⬇ 导出回合记录（markdown）</button>
+      <button id="tm-export-copy" class="attach hidden" title="一键复制导出内容（也可直接在框内选中复制）">📋 复制</button>
+      </div>
+      <div id="tm-export-box" class="tm-export-box hidden"></div>
+      <button id="prompt-btn" class="attach" title="查看最近一轮发给 AI 的完整提示词（system）">💬 查看最近提示词</button>
+      </div>
+    </div>
+    <div class="sb-panel hidden" id="panel-setting">
+      <div class="card collapsible" id="card-world">
+      <div class="card-title">🌍 设定（世界 / 角色卡 / 规则，可留空）<span class="fold-arrow">▾</span></div>
+      <label class="api-field">世界设定（背景 / 地点 / 势力 / 时间线…）
+      <textarea id="world-setting" class="world-setting" placeholder="填入世界观：世界背景、地点、势力、时间线、叙事偏好……"></textarea>
+      </label>
+      <label class="api-field">角色卡（每个角色一段，用空行分隔）
+      <textarea id="chars-setting" class="world-setting" placeholder="如：&#10;艾琳：女剑士，性格直率，暗恋队长。&#10;卫队长：沉稳寡言，责任感强。"></textarea>
+      </label>
+      <label class="api-field">规则（输出 / 叙事 / 额外约束…）
+      <textarea id="rules-setting" class="world-setting" placeholder="如：禁止替用户角色说话 / 每轮回复不超过300字 / 战斗场景详细描写……"></textarea>
+      </label>
+      <div id="world-note" class="attach-note hidden">已保存 ✓（对话时注入 system）</div>
+      <div class="man-attach">
+      <button id="man-attach-btn" class="attach">📎 手动附加资料（临时注入，不进对话历史）</button>
+      <div id="man-attach-box" class="hidden">
+      <textarea id="man-attach-input" rows="5" placeholder="粘贴要临时注入的文本（剧情对话原文/设定补充等），发送下一条消息时随 system 的「## 补充资料」段注入，用完即弃。示例：【参考对话原文】凯文：「……不必了，抱歉。面很好吃。」"></textarea>
+      <div class="man-attach-row">
+      <button id="man-attach-ok" class="head-btn">✅ 附加到下一轮</button>
+      <button id="man-attach-cancel" class="head-btn">取消</button>
+      </div>
+      <div id="man-attach-note" class="attach-note hidden">已附加：下一条消息会带上手动资料</div>
+      </div>
+      </div>
+      <div class="man-attach">
+      <button id="note-attach-btn" class="attach">📌 会话常驻设定（每轮注入，防遗忘）</button>
+      <div id="note-attach-box" class="hidden">
+      <div class="note-slot-tabs" title="多槽位：切换页签分别编辑，保存后按槽合并注入 system">
+      <button type="button" class="note-slot-tab active" data-slot="其他">其他</button>
+      <button type="button" class="note-slot-tab" data-slot="背景">背景</button>
+      <button type="button" class="note-slot-tab" data-slot="关系">关系</button>
+      <button type="button" class="note-slot-tab" data-slot="规则">规则</button>
+      </div>
+      <textarea id="note-attach-input" rows="6" placeholder="写入本会话「每轮必读」的设定速记（不会被上下文裁剪；切换页签分别编辑 背景/关系/规则/其他 槽，保存后合并注入）。用于长线剧情的关键设定，如：&#10;· 主角当前状态：受伤未愈／对某角色抱有戒心&#10;· 某物件的真实来历（暂未对外揭示）&#10;· 本线特殊规则：夜间不可使用某能力"></textarea>
+      <div class="man-attach-row">
+      <button id="note-attach-ok" class="head-btn">✅ 保存到本会话</button>
+      <button id="note-attach-cancel" class="head-btn">取消</button>
+      </div>
+      <div id="note-attach-note" class="attach-note hidden">已保存：每轮注入 system（冲突时以此为准）</div>
+      </div>
+      </div>
+      </div>
+      <div class="card" id="card-lorebook">
+      <div class="card-title">📖 设定触发器</div>
+      <input id="lb-search" type="text" placeholder="🔍 搜索条目名称…" style="width:100%;padding:6px 8px;margin-bottom:6px;border-radius:6px;background:var(--bg2);color:var(--text);border:1px solid var(--border);font-size:12px">
+      <div id="lorebook-list" class="cp-list" style="max-height:200px;overflow-y:auto">加载中…</div>
+      <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+      <button id="lb-add-btn" class="head-btn" style="padding:4px 12px">＋ 新建</button>
+      <button id="lb-wb-btn" class="head-btn" style="padding:4px 12px" title="从自定义路径导入世界书条目">📥 世界书</button>
+      <button id="lb-scan-btn" class="head-btn" style="padding:4px 12px">🔍 扫描</button>
+      <button id="lb-settings-btn" class="head-btn" style="padding:4px 12px" title="设定触发器设置（注入预算等）" aria-label="设定触发器设置">⚙️</button>
+      </div>
+      </div>
+      <div class="card" id="card-personas">
+      <div class="card-title">🎭 玩家身份</div>
+      <div id="persona-list" class="cp-list">加载中…</div>
+      <div style="margin-top:8px"><button id="persona-add-btn" class="head-btn" style="padding:4px 12px">＋ 新建</button></div>
+      </div>
+      <div class="card" id="card-expressions">
+      <div class="card" id="card-regex-rules">
+      <div class="card-title">🔧 输出过滤器（正则规则）</div>
+      <div class="api-msg" style="margin-bottom:6px">对 AI 回复按正则替换（去粗体 / 去 OOC / 统一称呼等）。同时作用于气泡显示与回合记录落盘。</div>
+      <div id="regex-rules-list" class="cp-list" style="max-height:200px;overflow-y:auto">加载中…</div>
+      <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+      <button id="regex-add-btn" class="head-btn" style="padding:4px 12px">＋ 新建</button>
+      <button id="regex-test-btn" class="head-btn" style="padding:4px 12px" title="不保存规则，先试跑看替换效果">🧪 测试</button>
+      </div>
+      </div>
+      <div class="card-title">😊 表情系统</div>
+      <div id="expr-char-select" style="margin-bottom:8px"><select id="expr-char-dropdown" style="width:100%;padding:4px 8px;border-radius:6px;background:var(--bg2);color:var(--text);border:1px solid var(--border)"></select></div>
+      <div id="expr-grid" class="cp-list" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">加载中…</div>
+      <div style="margin-top:8px;display:flex;gap:6px">
+      <button id="expr-upload-btn" class="head-btn" style="padding:4px 12px">＋ 添加</button>
+      </div>
+      </div>
+      <div class="card" id="card-npc-profiles">
+      <div class="card-title">👤 角色档案</div>
+      <div id="npc-list" class="cp-list">加载中…</div>
+      <div style="margin-top:8px;display:flex;gap:6px">
+      <button id="npc-add-btn" class="head-btn" style="padding:4px 12px">＋ 新建</button>
+      <button id="card-import-btn" class="head-btn" style="padding:4px 12px" title="从酒馆角色卡 PNG 导入">📥 导入卡</button>
+      </div>
+      </div>
+      <div class="card" id="card-scene-profiles">
+      <div class="card-title">🏛️ 场景档案</div>
+      <div id="scene-list" class="cp-list">加载中…</div>
+      <div style="margin-top:8px"><button id="scene-add-btn" class="head-btn" style="padding:4px 12px">＋ 新建</button></div>
+      </div>
+    </div>
+    <div class="sb-panel hidden" id="panel-data">
+      <div class="card" id="card-agenda">
+      <div class="card-title">📌 待办 / 备忘</div>
+      <div id="agenda-list" style="font-size:12px">加载中…</div>
+      <div class="em-row" style="margin-top:8px">
+      <input id="agenda-input" type="text" placeholder="备忘内容（回车即添加，如：记得买牛奶）">
+      <button id="agenda-add-btn" class="head-btn">✅ 添加</button>
+      </div>
+      <div class="em-hint">本会话的剧情待办 / 备忘，按会话隔离。</div>
+      </div>
+      <div class="card" id="card-graph">
+      <div class="card-title">🕸️ 关系图谱</div>
+      <div id="graph-container" style="width:100%;height:250px;background:var(--bg2);border-radius:8px;overflow:hidden;position:relative"><svg id="graph-svg" width="100%" height="100%"></svg></div>
+      <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+      <button id="graph-add-node" class="head-btn" style="padding:4px 12px">＋ 角色</button>
+      <button id="graph-add-edge" class="head-btn" style="padding:4px 12px">＋ 关系</button>
+      </div>
+      </div>
+      <div class="card" id="card-reports">
+      <div class="card-title">📊 报告</div>
+      <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">
+      <button id="report-overview-btn" class="head-btn" style="padding:4px 12px">📝 回顾</button>
+      <button id="report-audit-btn" class="head-btn" style="padding:4px 12px">🔍 自检</button>
+      <button id="report-retro-btn" class="head-btn" style="padding:4px 12px">🔄 回溯</button>
+      </div>
+      <div id="report-list" class="cp-list" style="max-height:150px;overflow-y:auto">加载中…</div>
+      </div>
+    </div>
+    <div class="sb-panel hidden" id="panel-system">
+      <div class="card collapsible" id="card-skin">
+      <div class="card-title">🎨 皮肤 & 背景 <span class="fold-arrow">▾</span></div>
+      <label class="api-field">主题
+      <select id="theme-select">
+      <option value="default">夜空（默认）</option>
+      <option value="paper">纸面（浅色）</option>
+      <option value="warm-night">暖夜</option>
+      <option value="forest">森林</option>
+      <option value="future">未来科技（亮色）</option>
+      <option value="custom">自定义（调色板）</option>
+      </select>
+      </label>
+      <label class="api-field">背景图 URL（自定义，如 https://…/bg.jpg）
+      <input id="bg-url-input" type="text" placeholder="留空 = 无背景">
+      </label>
+      <div id="custom-skin" class="custom-skin hidden">
+      <label class="api-field">明暗
+      <select id="cs-mode">
+      <option value="dark">深色</option>
+      <option value="light">浅色</option>
+      </select>
+      </label>
+      <label class="api-field">色相（0-360）<input id="cs-hue" type="range" min="0" max="360" value="250"></label>
+      <label class="api-field">饱和度（0-100%）<input id="cs-sat" type="range" min="0" max="100" value="55"></label>
+      <label class="api-field">亮度（30-90%）<input id="cs-light" type="range" min="30" max="90" value="45"></label>
+      <button id="cs-reset" class="head-btn">恢复默认配色</button>
+      <div class="attach-note hidden" id="cs-note">已应用自定义配色（本地保存）</div>
+      </div>
+      </div>
+      <div class="card collapsible" id="card-settings">
+      <div class="card-title">⚙ 显示设置 <span class="fold-arrow">▾</span></div>
+      <button id="settings-toggle" class="btn-ghost">展开 / 收起设置</button>
+      <div id="settings-panel" class="hidden"></div>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+<footer>
+  <div class="view-bar">
+    <label>视角
+      <select id="view-select">
+        <option value="">默认（用户角色主观视角）</option>
+        <option value="旁白">旁白（全知视角）</option>
+      </select>
+    </label>
+    <input id="view-custom" type="text" placeholder="自定义视角角色名（可留空）">
+    <button id="view-btn" class="head-btn" title="切换叙事视角（已记账，可导出）">切换</button>
+    <span id="view-note" class="view-note"></span>
+    <!-- 常用按钮（直接显示） -->
+    <button id="illustration-btn" class="tool-chip" title="AI 生成场景插图（需配置 API Key）">🎨 插图</button>
+    <button id="tts-btn" class="tool-chip" title="朗读最近 AI 回复（需配置 TTS 引擎）">🔊 朗读</button>
+    <button id="suggestions-btn" class="tool-chip" title="AI 剧情走向建议">✨ 建议</button>
+    <button id="recall-btn" class="tool-chip" title="搜索聊天历史（跨会话）">🔍 历史搜索</button>
+    <!-- 折叠菜单（开关类按钮） -->
+    <div class="tool-chip-group" style="position:relative;display:inline-block">
+      <button id="more-tools-btn" class="tool-chip" title="更多工具" aria-label="更多工具">⋯</button>
+      <div id="more-tools-menu" class="hidden" style="position:absolute;bottom:100%;left:0;z-index:100;min-width:160px">
+        <div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:4px">
+          <button id="expand-btn" class="tool-chip" title="开启后，短指令会被扩写为详细动作/场景/台词描写" style="width:100%;text-align:left">✍️ 扩写</button>
+          <button class="tool-chip" data-tool="web_search" title="联网搜索（仅用户明确要求「联网/查一下/搜索」时）" style="width:100%;text-align:left">🔍 联网</button>
+          <button id="var-hint-btn" class="tool-chip" title="可用变量模板" style="width:100%;text-align:left">📋 变量</button>
+        </div>
+      </div>
+    </div>
+    <span id="op-note" class="view-note"></span>
+  </div>
+  <textarea id="input" rows="2" placeholder="开始输入你的剧情……"></textarea>
+  <div id="token-estimate" class="token-estimate"></div>
+  <button id="send">发送</button>
+</footer>
+
+<!-- 提示词查看弹窗（调试） -->
+<div id="prompt-modal" class="modal hidden">
+  <div class="modal-box prompt-box">
+    <div class="card-title">💬 最近提示词（system prompt）</div>
+    <div id="prompt-meta" class="prompt-meta">加载中…</div>
+    <div id="prompt-body" class="prompt-body">…</div>
+    <div class="modal-actions">
+      <button id="prompt-close" class="head-btn">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 新手导航（首次使用引导） -->
+<div id="tour-overlay" class="tour-overlay hidden">
+  <div class="tour-box">
+    <div class="tour-title">👋 欢迎使用通用多角色 RP 界面</div>
+    <div class="tour-body" id="tour-body"></div>
+    <div class="tour-actions">
+      <button id="tour-prev" class="head-btn hidden">上一步</button>
+      <span id="tour-dots" class="tour-dots"></span>
+      <button id="tour-next" class="head-btn">下一步</button>
+      <button id="tour-skip" class="head-btn ghost">跳过</button>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

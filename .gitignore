@@ -1,0 +1,16 @@
+# 运行时数据（含 API Key，勿提交）
+data/
+
+# 日志
+*.log
+
+# 系统
+Thumbs.db
+.DS_Store
+
+# 桌面端编译产物（不入库）
+moonrabbit-tauri/src-tauri/target/
+
+# 本地备份（不入库）
+*.bak_*
+*.syncbak_*
