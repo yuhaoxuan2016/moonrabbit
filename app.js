@@ -278,9 +278,16 @@ function parseSegments(text) {
   const push = () => { if (cur && cur.text.trim()) segs.push(cur); cur = null; };
   for (const raw of lines) {
     const line = raw.trimEnd();
+    /* ⭐ m0 混合式兜底（2026-09-07）：AI 常输出「角色名（动作）：台词」——m1 名字类不含括号、
+       m2 要求整行以）结尾，两条都不中 → 整段落进旁白累加器（角色丢头像/丢气泡，内部空行原样显示）。
+       这里先吃掉混合式，角色名与台词各归其位，动作存 seg.action 渲染为斜体动作行。 */
+    const m0 = /^([\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7afA-Za-z][\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7afA-Za-z·]{0,10})[（(]([^）)]{1,60})[）)]\s*[：:]\s*(.*)$/.exec(line);
     const m1 = /^([\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7afA-Za-z][\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7afA-Za-z·]{0,10})[：:]\s*(.*)$/.exec(line);
     const m2 = /^([\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7afA-Za-z][\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7afA-Za-z·]{0,10})[（(](.+)[）)]$/.exec(line);
-    if (m1) {
+    if (m0) {
+      push();
+      segs.push({ char: m0[1], action: m0[2], text: m0[3], actionOnly: false });
+    } else if (m1) {
       push();
       segs.push({ char: m1[1], text: m1[2], actionOnly: false });
     } else if (m2) {
@@ -292,7 +299,7 @@ function parseSegments(text) {
     }
   }
   push();
-  return segs.filter((s) => s.text.trim());
+  return segs.filter((s) => s.text.trim() || (s.action && s.action.trim()));
 }
 
 // XSS 防护：转义 HTML 特殊字符（含引号，可安全用于属性上下文）
@@ -719,6 +726,10 @@ function stripTurnTags(text) {
     .replace(/<items>[\s\S]*?<\/items>/gi, '')
     .replace(/^【更新】[^\n]*$/gm, '');
   for (const rule of App.regexRulesCache) { if (!rule.enabled) continue; try { result = result.replace(new RegExp(rule.pattern, rule.flags || 'g'), rule.replacement || ''); } catch (e) { /* 跳过 */ } }
+  /* ⭐ 空行压缩（2026-09-07）：.bubble 是 white-space: pre-wrap，每个 \n 都原样可见。
+     上面剥离标签块只删内容不收拾周围换行 + AI 自己输出的多余空行 → 气泡里成片空白。
+     3+ 连续换行压成一个空行；单空行保留（段落间距）。 */
+  result = result.replace(/\n{3,}/g, '\n\n');
   return result;
 }
 App.regexRulesCache = [];
@@ -747,6 +758,14 @@ function renderAssistant(content, seq) {
     }
     const bub = document.createElement('div');
     bub.className = 'bubble';
+    /* ⭐ 混合式动作行（2026-09-07）：seg.action 来自 parseSegments 的 m0
+       「角色名（动作）：台词」——动作独立成斜体灰行置于台词之上，不与台词混排、也不丢失。 */
+    if (seg.action && seg.action.trim()) {
+      const actNode = document.createElement('div');
+      actNode.className = 'action';
+      actNode.innerHTML = `（${renderMarkdown(seg.action.trim())}）`;
+      bub.appendChild(actNode);
+    }
     const contentNode = document.createElement('span');
     contentNode.innerHTML = renderMarkdown(seg.text.trim());
     if (seg.actionOnly) { contentNode.className = 'action'; contentNode.innerHTML = `（${renderMarkdown(seg.text.trim())}）`; }
