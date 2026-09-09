@@ -492,12 +492,16 @@ function reroll(seq) {
   const idx = App.history.findIndex((m) => m.seq === seq);
   if (idx < 0) return;
   // 记录旧版进版本链（锚点 = 该回复之前最近一条 user 消息的 seq；多次重roll 累积）
+  // 2026-09-09 方案 C：链语义 = 全部版本（含当前显示版）。重roll 时旧版已在链中（首次则入链），
+  // 新生成的回复由 generate 收尾时入链（见 pushVersionToChain），保证位次连续。
   const oldMsg = App.history[idx];
   let anchorSeq = seq;
   for (let i = idx - 1; i >= 0; i--) { if (App.history[i].role === 'user') { anchorSeq = App.history[i].seq; break; } }
   if (oldMsg && oldMsg.role === 'assistant') {
-    (rerollVersions[anchorSeq] = rerollVersions[anchorSeq] || []).push({ content: oldMsg.content, ts: Date.now() });
+    const chain = (rerollVersions[anchorSeq] = rerollVersions[anchorSeq] || []);
+    if (!chain.some((v) => v.content === oldMsg.content)) chain.push({ content: oldMsg.content, ts: Date.now() });
   }
+  App.anchorForNextGen = anchorSeq;   // 供 generate 收尾时把新回复入链
   App.history = App.history.slice(0, idx);          // 截断：该条及其后全部作废（旧文本不进 AI 上下文）
   // 同步清理回合记录：删除 seq >= n 的记账（旧回复的账本不残留）
   fetch('/api/timeline/truncate', {
@@ -505,7 +509,8 @@ function reroll(seq) {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ chatId: App.chatId, seq, mode: 'gte' }),
   }).catch(() => {});
-  // 旧气泡保留为「旧版本」样式（仅对比用，可删除/可恢复；不参与后续上下文）
+  // 旧气泡保留为「旧版本」对比样式（不进上下文；切换版本统一走气泡底部 ‹ n/N ›）
+  // 2026-09-09 方案 C：移除「↩ 恢复此版」按钮——与 ‹ › 切换器语义重复，双入口易状态不同步。
   const wrap = els.messages.querySelector(`.msg-wrap[data-seq="${seq}"]`);
   if (wrap) {
     let node = wrap.nextSibling;
@@ -517,19 +522,12 @@ function reroll(seq) {
       const tag = document.createElement('span');
       tag.className = 'alt-tag';
       tag.textContent = '旧版本';
-      tag.title = '重roll 前的回复（不进上下文，仅对比/可恢复）';
+      tag.title = '重roll 前的回复（不进上下文，仅对比；用下方 ‹ › 切换版本）';
       bar.appendChild(tag);
-      const verIdx = (rerollVersions[anchorSeq] || []).length - 1;   // 本版本在链中的下标
-      const rst = document.createElement('button');
-      rst.className = 'ma-btn';
-      rst.textContent = '↩ 恢复此版';
-      rst.title = '放弃新回复，恢复这一版（可再切回其它版本）';
-      rst.addEventListener('click', () => restoreVersion(anchorSeq, verIdx, seq));
-      bar.appendChild(rst);
       const del = document.createElement('button');
       del.className = 'ma-btn del';
-      del.textContent = '✕ 删旧版';
-      del.title = '删除旧版本（仅移除对比气泡，不影响对话）';
+      del.textContent = '✕ 关闭对比';
+      del.title = '仅关闭这个对比气泡；该版本仍在 ‹ › 版本链中可切换';
       del.addEventListener('click', () => { wrap.remove(); });
       bar.appendChild(del);
     }
@@ -537,35 +535,30 @@ function reroll(seq) {
   generate();
 }
 
-// 恢复旧版本：移除当前最新 assistant 回复 → 旧版文本放回原位 → 旧气泡恢复为正常样式
+// 恢复旧版本：把链中某一版放回对话尾部，成为当前显示版
+// 2026-09-09 方案 C 重构：版本链语义统一为「链 = 全部版本（含当前显示版）」，
+// 位次由内容反查（见 attachVersionSwiper）。此前语义混乱（链=历史版，当前版不在链）
+// 导致每切一次就往链里补一份「退位版」，序号虚高（2 版切一次变 1/3、再切变 3/4）。
 function restoreVersion(anchorSeq, verIdx, oldSeq) {
   if (App.streaming) return;
   const versions = rerollVersions[anchorSeq];
   if (!versions || !versions[verIdx]) return;
   const content = versions[verIdx].content;
-  // 1) 从 history 移除锚点之后的所有消息（当前链）
   const anchorIdx = App.history.findIndex((m) => m.seq === anchorSeq);
   if (anchorIdx < 0) return;
-  /* F-3 修复（2026-09-05）：回溯前把当前链上的最新回复压入版本链（按内容去重）——
-     旧版直接 slice 截断 → 最新回复被丢弃且不入链，「‹ 回去一次」后新回复永久丢失、
-     「›」也无从回来。入链后 total=versions.length+1 的位次语义才真正成立。 */
-  const curLatest = App.history[anchorIdx + 1];
-  if (curLatest && curLatest.role === 'assistant') {
-    const chain = (rerollVersions[anchorSeq] = rerollVersions[anchorSeq] || []);
-    if (!chain.some((v) => v.content === curLatest.content)) chain.push({ content: curLatest.content, ts: Date.now() });
-  }
+  // 链已含全部版本 → 只切换 history 指针，链本身不动（避免重复入链导致序号虚高）
   App.history = App.history.slice(0, anchorIdx + 1);
-  // 1.5) 清理锚点后的回合记录（重roll 后新回复的账本不残留）
+  // 清理锚点后的回合记录（切换后旧回复的账本不残留）
   fetch('/api/timeline/truncate', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ chatId: App.chatId, seq: anchorSeq + 1, mode: 'gte' }),
   }).catch(() => {});
-  // 2) 旧版放回原位（新 seq，避免与已存消息冲突）
+  // 目标版放回原位（新 seq，避免与已存消息冲突）
   const newSeq = ++App.msgSeq;
   App.history.push({ role: 'assistant', content, seq: newSeq });
   saveChat();
-  // 3) DOM：删除旧版本气泡（本版转正），并移除其后所有气泡
+  // DOM：目标气泡转正（移除 alt-version 样式），并移除其后所有气泡
   const oldWrap = els.messages.querySelector(`.msg-wrap[data-seq="${oldSeq}"]`);
   if (oldWrap) {
     // 2026-09-03 修复 M-15：原缺此行（正式版有）→ 气泡 data-seq 仍是旧值，
@@ -591,12 +584,11 @@ function restoreVersion(anchorSeq, verIdx, oldSeq) {
     }
     let node = oldWrap.nextSibling;
     while (node) { const next = node.nextSibling; node.remove(); node = next; }
-    // 重建气泡内容（显示旧版文本；走 renderMarkdown 以支持图片渲染）
+    // 重建气泡内容（显示该版文本；走 renderMarkdown 以支持图片渲染）
     const bub = oldWrap.querySelector('.bubble');
     if (bub) { bub.innerHTML = renderMarkdown(stripTurnTags(content)); }
-    // M-16：切版后重建切换器，标签才会显示真实位次
-    /* F-3 修复：恢复到链内最新一版 = 回到「最新」槽位（cur=total），不再是悬空的次末位 */
-    attachVersionSwiper(oldWrap, newSeq, (verIdx >= versions.length - 1) ? null : verIdx);
+    // 重建版本切换器：位次由 attachVersionSwiper 按内容反查，此处不传 curIdx
+    attachVersionSwiper(oldWrap, newSeq);
     // seq 变了 → 书签高亮与时间轴刻度需同步
     if (typeof syncBookmarkButtons === 'function') syncBookmarkButtons();
     if (typeof renderTimelineNav === 'function') renderTimelineNav();
@@ -784,7 +776,10 @@ function renderAssistant(content, seq) {
 // 给 assistant 气泡挂版本切换器：‹ 当前/总数 ›（同步自正式版 F1）
 // curIdx: 当前显示的是第几版（0..versions.length-1 = 历史版本；null = 最新版）
 // 2026-09-03 修复 M-16：原标签写死 `${total}/${total}` 且 › 永久 disabled → 切旧版后仍显示 N/N
-function attachVersionSwiper(wrap, seq, curIdx) {
+// 给 assistant 气泡挂版本切换器：‹ 当前/总数 ›，点箭头原地切换版本
+// 2026-09-09 方案 C：链语义 = 全部版本（含当前显示版）；位次由「当前气泡内容」在链中反查，
+// 不再依赖调用方传 curIdx（此前 curIdx 语义在 reroll/restore 两条路径下不一致，导致序号错乱）。
+function attachVersionSwiper(wrap, seq) {
   if (!wrap || seq == null) return;
   const idx = App.history.findIndex((m) => m.seq === seq);
   if (idx < 0) return;
@@ -793,8 +788,12 @@ function attachVersionSwiper(wrap, seq, curIdx) {
   if (anchorSeq == null) return;
   const versions = rerollVersions[anchorSeq];
   if (!Array.isArray(versions) || !versions.length) return;
-  const total = versions.length + 1;
-  const cur = (Number.isInteger(curIdx) && curIdx >= 0 && curIdx < versions.length) ? curIdx + 1 : total;
+  const curContent = App.history[idx].content;
+  // 位次反查：内容匹配 → 该下标；找不到（理论不该发生）→ 视为最后一版
+  let curIdx = versions.findIndex((v) => v.content === curContent);
+  if (curIdx < 0) curIdx = versions.length - 1;
+  const total = versions.length;
+  const cur = curIdx + 1;
   wrap.querySelector('.ver-swiper')?.remove();
   const sw = document.createElement('div');
   sw.className = 'ver-swiper';
@@ -806,12 +805,12 @@ function attachVersionSwiper(wrap, seq, curIdx) {
   prev.addEventListener('click', (e) => {
     e.stopPropagation();
     if (prev.disabled) return;
-    restoreVersion(anchorSeq, cur - 2, seq);
+    restoreVersion(anchorSeq, curIdx - 1, seq);
   });
   const label = document.createElement('span');
   label.className = 'ver-label';
   label.textContent = `${cur}/${total}`;
-  label.title = `共 ${total} 个版本（含当前），正在看第 ${cur} 个`;
+  label.title = `共 ${total} 个版本，正在看第 ${cur} 个`;
   const next = document.createElement('button');
   next.className = 'ma-btn';
   next.textContent = '›';
@@ -820,11 +819,18 @@ function attachVersionSwiper(wrap, seq, curIdx) {
   next.addEventListener('click', (e) => {
     e.stopPropagation();
     if (next.disabled) return;
-    restoreVersion(anchorSeq, Math.min(cur, versions.length - 1), seq);
+    restoreVersion(anchorSeq, curIdx + 1, seq);
   });
   sw.appendChild(prev); sw.appendChild(label); sw.appendChild(next);
   const bub = wrap.querySelector('.bubble');
   if (bub) bub.appendChild(sw);
+}
+
+// 把版本压入链（按内容去重）——generate 收尾与重roll 共用，保证链 = 全部版本
+function pushVersionToChain(anchorSeq, content) {
+  if (anchorSeq == null || !content) return;
+  const chain = (rerollVersions[anchorSeq] = rerollVersions[anchorSeq] || []);
+  if (!chain.some((v) => v.content === content)) chain.push({ content, ts: Date.now() });
 }
 
 // ===== 分段渲染（2026-09-02 同步自正式版 FN-1：长对话不再全量渲染）=====
@@ -1011,6 +1017,13 @@ async function generate() {
       renderAssistant(acc.trim(), seq);
       // 思考记录一并存进 history（刷新/切会话后恢复显示）
       App.history.push({ role: 'assistant', content: acc.trim(), seq, thinking: thinkAcc.trim() || undefined });
+      // 2026-09-09 方案 C：重roll 产生的新回复也入版本链（链=全部版本），
+      // 保证 ‹ › 位次连续、切回旧版后还能切回来。非重roll 轮次 App.anchorForNextGen 为空 → 不入链。
+      if (App.anchorForNextGen != null) {
+        pushVersionToChain(App.anchorForNextGen, acc.trim());
+        App.anchorForNextGen = null;
+        attachVersionSwiper(els.messages.querySelector(`.msg-wrap[data-seq="${seq}"]`), seq);
+      }
       // 记账标签自检（2026-08-30 修复「剧情记忆是摆设」）：AI 未输出 storyevent/items → 提醒
       if (!/<storyevent>/i.test(acc) && !/<items>/i.test(acc)) {
         renderThinking('⚠️ 本轮 AI 未输出记账标签（storyevent/items）——剧情记忆未更新；后端已将标签指令重申置底，若持续出现请在「剧情记忆」手动补记或重发。');
@@ -1021,6 +1034,8 @@ async function generate() {
     renderAssistant(`（叙事者提示：${e.message}）`, seq);
   } finally {
     App.streaming = false;
+    // 2026-09-09 方案 C：生成失败/中止时清理重roll锚点，防残留污染下一轮普通对话的入链判断
+    App.anchorForNextGen = null;
     els.send.disabled = false;
     els.typing.classList.add('hidden');
     els.input.focus();
@@ -1425,6 +1440,16 @@ async function openChat(id) {
     for (const m of App.history) {   // 先统一补 seq（分段渲染也要保证 seq 完整）
       if (!m.seq) m.seq = ++App.msgSeq;
       else App.msgSeq = Math.max(App.msgSeq, m.seq);
+    }
+    /* 2026-09-09 方案 C 兼容：旧数据的链语义是「历史版（不含当前显示版）」，新语义为
+       「全部版本（含当前）」。此处把每条回复的当前内容补入对应链（按内容去重），
+       使新旧数据统一，位次反查才能正确。必须在 seq 回填之后执行（锚点查找依赖 seq）。 */
+    for (let mi = 0; mi < App.history.length; mi++) {
+      const m = App.history[mi];
+      if (m.role !== 'assistant' || m.seq == null) continue;
+      let aSeq = null;
+      for (let i = mi - 1; i >= 0; i--) { if (App.history[i].role === 'user') { aSeq = App.history[i].seq; break; } }
+      if (aSeq != null && rerollVersions[aSeq]) pushVersionToChain(aSeq, m.content);
     }
     App.renderCursor = App.history.length;
     App.renderHidden = new Set();
