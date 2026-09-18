@@ -255,12 +255,12 @@ function buildSystemPrompt(setting, chatId) {
       lastMessage = userMsgs.length ? userMsgs[userMsgs.length - 1].content : '';
     } catch (e) { /* 忽略 */ }
   }
-  // 设定触发器注入（可通过【排除设定触发器】标记跳过；配置档 flags 已瘦身移除，2026-08-26）
+  // 设定触发器 / 世界书注入（合并扫描：扁平条目 + 多本世界书；本会话写了【排除设定触发器】＝整条链不注入）
   const skipLore = /【排除设定触发器】/.test(noteText(chatId || ''));
-  const lorebookResult = (!skipLore) ? scanLorebook(chatMessages, lastMessage, State.endpoint.maxContext) : { entries: [] };
+  const lorebookResult = (!skipLore) ? scanWorldbooks(chatMessages, lastMessage, State.endpoint.maxContext, chatId || '', {}) : { entries: [] };
   if (lorebookResult.entries.length) {
     const lorebookText = lorebookResult.entries.map(e => `[${e.name}]\n${e.content}`).join('\n\n---\n\n');
-    raw += '\n\n---\n\n## 设定触发器（关键词匹配注入）\n' + lorebookText;
+    raw += '\n\n---\n\n## 设定触发器 / 世界书（强制注入 + 关键词匹配）\n' + lorebookText;
   }
   // 旁注注入（位置感知）
   const annotations = loadAnnotations(chatId || '');
@@ -503,6 +503,112 @@ function scanLorebook(messages, userInput, maxContext) {
   for (const e of keywordEntries) { const t = Math.ceil(String(e.content || '').length * 0.67); if (total + t > budget) break; total += t; result.push(e); }
   return { entries: result, totalTokens: total, budget, matched: matched.length };
 }
+
+// ---------- 世界书（多本 · 按会话作用域） ----------
+// 与上方「设定触发器」并存：世界书是更结构化的一套（多本／每本一文件／可按会话启用或停用／书级总开关）。
+// 注入时两者合并为一条扫描链——设定触发器的扁平条目作为最前面的「全局」层入池，再叠 scope=global 的书，
+// 再叠本会话启用的书。通用版不预置任何书：data/worldbooks/ 为空（或不存在）时本段完全不产生注入。
+const WORLDBOOKS_DIR = path.join(DATA_DIR, 'worldbooks');
+State.worldbooks = {};   // {bookId: {book, settings, entries}}
+function loadWorldbooks() {
+  State.worldbooks = {};
+  try {
+    if (!fs.existsSync(WORLDBOOKS_DIR)) return;   // 空库：直接可用
+    for (const f of fs.readdirSync(WORLDBOOKS_DIR)) {
+      if (!f.endsWith('.json')) continue;         // .bak_* 等非 json 自然不进
+      try {
+        const raw = JSON.parse(fs.readFileSync(path.join(WORLDBOOKS_DIR, f), 'utf8'));
+        const bid = (raw.book && raw.book.id) || f.replace(/\.json$/, '');
+        State.worldbooks[bid] = {
+          book: {
+            id: bid,
+            name: (raw.book && raw.book.name) || bid,
+            description: (raw.book && raw.book.description) || '',
+            scope: (raw.book && raw.book.scope) === 'global' ? 'global' : 'chat',
+            version: (raw.book && raw.book.version) || 1,
+            note: (raw.book && raw.book.note) || '',
+          },
+          settings: { enabled: true, tokenBudget: 'auto', budgetRatio: 0.08, scanDepth: 10, ...(raw.settings || {}) },
+          entries: raw.entries || {},
+        };
+      } catch (e) { console.error('世界书解析失败 ' + f + ': ' + e.message); }
+    }
+  } catch (e) { /* 忽略 */ }
+}
+function saveWorldbook(bookId) {
+  const wb = State.worldbooks[bookId];
+  if (!wb) return false;
+  try {
+    fs.mkdirSync(WORLDBOOKS_DIR, { recursive: true });
+    writeFileAtomicSync(path.join(WORLDBOOKS_DIR, bookId + '.json'),
+      JSON.stringify({ book: wb.book, settings: wb.settings, entries: wb.entries }, null, 2), 'utf8');
+    return true;
+  } catch (e) { console.error('世界书保存失败: ' + e.message); return false; }
+}
+// 会话启用的书 id 列表
+function activeBookIds(chatId) {
+  const cid = sanitizeId(chatId || '');
+  const rec = (State.opState.worldbooks && State.opState.worldbooks[cid]) || null;
+  return Array.isArray(rec && rec.active) ? rec.active.slice() : [];
+}
+// 会话「停用」的书 id 列表（用于 scope=global 的按会话反向覆盖）
+function offBookIds(chatId) {
+  const cid = sanitizeId(chatId || '');
+  const rec = (State.opState.worldbooks && State.opState.worldbooks[cid]) || null;
+  return Array.isArray(rec && rec.off) ? rec.off.slice() : [];
+}
+// 合并扫描：设定触发器扁平条目（全局层）+ scope=global 的书 + 本会话启用的书 − 本会话停用的书
+function scanWorldbooks(messages, userInput, maxContext, chatId, opts) {
+  // 整体开关（设置里「启用注入」）：关闭后设定触发器与世界书都不注入
+  if (State.lorebookSettings.enabled === false) return { entries: [], totalTokens: 0, budget: 0, matched: 0, disabled: true };
+  const skipGlobal = !!(opts && opts.skipGlobal) || !!(opts && opts.skipLegacy);
+  const budget = State.lorebookSettings.tokenBudget === 'auto'
+    ? Math.floor((maxContext || 1048576) * (State.lorebookSettings.budgetRatio || 0.1))
+    : State.lorebookSettings.tokenBudget === 'unlimited' ? Infinity : Number(State.lorebookSettings.tokenBudget) || 10000;
+  const actives = activeBookIds(chatId);
+  const offs = offBookIds(chatId);
+  const pool = [];
+  if (!skipGlobal) {
+    for (const [id, e] of Object.entries(State.lorebookEntries || {})) {
+      if (e && e.enabled !== false) pool.push({ id, ...e, book: '全局设定触发器' });
+    }
+  }
+  for (const [bookId, wb] of Object.entries(State.worldbooks || {})) {
+    if (wb.settings && wb.settings.enabled === false) continue;
+    const isGlobal = wb.book.scope === 'global';
+    if (isGlobal && skipGlobal) continue;
+    if (offs.includes(bookId)) continue;   // 本会话已停用（对 global / chat 书都生效）
+    if (!isGlobal && !actives.includes(bookId)) continue;
+    for (const [eid, e] of Object.entries(wb.entries || {})) {
+      if (e && e.enabled !== false) pool.push({ id: bookId + ':' + eid, ...e, book: wb.book.name || bookId, bookId });
+    }
+  }
+  const recentText = (messages || []).slice(-10).map(m => String(m.content || '')).join('\n') + '\n' + (userInput || '');
+  const matched = [];
+  for (const e of pool) {
+    if (e.constant) { matched.push(e); continue; }
+    const kws = e.keywords || [];
+    const mode = e.matchMode || 'any';
+    const allMode = (mode === 'every' || mode === 'all');
+    const hit = allMode
+      ? (kws.length > 0 && kws.every(kw => String(kw).length >= 2 && recentText.includes(kw)))
+      : kws.some(kw => String(kw).length >= 2 && recentText.includes(kw));
+    if (hit) matched.push(e);
+  }
+  matched.sort((a, b) => (b.priority || 0) - (a.priority || 0));
+  let tokens = 0;
+  const result = [];
+  for (const e of matched.filter(x => x.constant)) {
+    result.push(e); tokens += Math.ceil(String(e.content || '').length * 0.67);
+  }
+  for (const e of matched.filter(x => !x.constant)) {
+    const t = Math.ceil(String(e.content || '').length * 0.67);
+    if (tokens + t > budget) break;
+    tokens += t; result.push(e);
+  }
+  return { entries: result, totalTokens: tokens, budget, matched: matched.length };
+}
+loadWorldbooks();
 
 // ---------- 关系图谱 ----------
 const GRAPH_FILE = path.join(DATA_DIR, 'graph.json');
@@ -3097,6 +3203,155 @@ async function h_api_lorebook_31(req, res, url, p) {
   return false;
 }
 
+async function h_api_worldbooks_get(req, res, url, p) {
+  if (p === '/api/worldbooks' && req.method === 'GET') {
+    const chatId = url.searchParams.get('chatId') || '';
+    const actives = activeBookIds(chatId);
+    const offs = offBookIds(chatId);
+    const books = Object.entries(State.worldbooks || {}).map(([id, wb]) => {
+      const isGlobal = wb.book.scope === 'global';
+      return {
+        id, name: wb.book.name, description: wb.book.description, scope: wb.book.scope,
+        enabled: wb.settings.enabled !== false, entryCount: Object.keys(wb.entries || {}).length,
+        active: isGlobal ? !offs.includes(id) : actives.includes(id),
+        sessionOff: offs.includes(id),
+      };
+    });
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+    { res.end(JSON.stringify({ ok: true, books, active: actives, off: offs })); return true; }
+  }
+  return false;
+}
+
+async function h_api_worldbooks_post(req, res, url, p) {
+  if (p !== '/api/worldbooks' || req.method !== 'POST') return false;
+  const body = await readBody(req);
+  const send = (obj) => { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); return true; };
+  try {
+    const parsed = JSON.parse(body);
+    const { action, chatId, bookId, entryId, entry, book } = parsed;
+    const cid = sanitizeId(chatId || '');
+    if (action === 'get') {
+      const wb = State.worldbooks[bookId];
+      if (!wb) return send({ error: '世界书不存在' });
+      return send({ ok: true, book: wb.book, settings: wb.settings, entries: wb.entries });
+    }
+    if (action === 'create-book') {
+      const id = String((book && book.id) || '').trim().replace(/[^a-zA-Z0-9_-]/g, '-') || ('book-' + Date.now());
+      if (State.worldbooks[id]) return send({ error: '该书 id 已存在' });
+      State.worldbooks[id] = {
+        book: { id, name: (book && book.name) || id, description: (book && book.description) || '', scope: (book && book.scope) === 'global' ? 'global' : 'chat', version: 1, note: (book && book.note) || '' },
+        settings: { enabled: true, tokenBudget: 'auto', budgetRatio: 0.08, scanDepth: 10 },
+        entries: {},
+      };
+      saveWorldbook(id);
+      return send({ ok: true, id });
+    }
+    if (action === 'save-book') {
+      const wb = State.worldbooks[bookId];
+      if (!wb) return send({ error: '世界书不存在' });
+      wb.book = { ...wb.book, ...(book || {}), id: bookId };
+      if (wb.book.scope !== 'global') wb.book.scope = 'chat';
+      if (parsed.settings) wb.settings = { ...wb.settings, ...parsed.settings };
+      saveWorldbook(bookId);
+      return send({ ok: true, book: wb.book, settings: wb.settings });
+    }
+    if (action === 'delete-book') {
+      delete State.worldbooks[bookId];
+      try { fs.unlinkSync(path.join(WORLDBOOKS_DIR, bookId + '.json')); } catch (e) { /* 忽略 */ }
+      return send({ ok: true });
+    }
+    if (action === 'set-active') {
+      const list = Array.isArray(parsed.active) ? parsed.active.map(String) : [];
+      const off = Array.isArray(parsed.off) ? parsed.off.map(String) : [];
+      if (!State.opState.worldbooks) State.opState.worldbooks = {};
+      if (list.length || off.length) State.opState.worldbooks[cid] = { active: list, off };
+      else delete State.opState.worldbooks[cid];
+      saveOpState();
+      return send({ ok: true, active: list, off });
+    }
+    // 书级总开关：对所有会话生效
+    if (action === 'toggle-book') {
+      const wb = State.worldbooks[bookId];
+      if (!wb) return send({ error: '世界书不存在' });
+      wb.settings.enabled = parsed.enabled !== false;
+      saveWorldbook(bookId);
+      return send({ ok: true, enabled: wb.settings.enabled });
+    }
+    if (action === 'save-entry') {
+      const wb = State.worldbooks[bookId];
+      if (!wb) return send({ error: '世界书不存在' });
+      const eid = entryId || ('e_' + Date.now());
+      const prev = wb.entries[eid] || {};
+      const next = { ...prev, ...(entry || {}), id: eid };
+      next.keywords = Array.isArray(next.keywords) ? next.keywords.map(k => String(k).trim()).filter(Boolean) : [];
+      next.priority = Number(next.priority) || 0;
+      next.constant = !!next.constant;
+      next.matchMode = next.constant ? 'any' : (next.matchMode === 'every' ? 'every' : 'any');
+      next.enabled = next.enabled !== false;
+      wb.entries[eid] = next;
+      saveWorldbook(bookId);
+      return send({ ok: true, id: eid, entry: next });
+    }
+    if (action === 'delete-entry') {
+      const wb = State.worldbooks[bookId];
+      if (!wb) return send({ error: '世界书不存在' });
+      delete wb.entries[entryId];
+      saveWorldbook(bookId);
+      return send({ ok: true });
+    }
+    if (action === 'batch-enable') {
+      const wb = State.worldbooks[bookId];
+      if (!wb) return send({ error: '世界书不存在' });
+      const ids = Array.isArray(parsed.ids) && parsed.ids.length ? parsed.ids : Object.keys(wb.entries);
+      let cnt = 0;
+      for (const id of ids) { if (wb.entries[id]) { wb.entries[id].enabled = !!parsed.enabled; cnt++; } }
+      saveWorldbook(bookId);
+      return send({ ok: true, count: cnt });
+    }
+    if (action === 'import-entries') {
+      const wb = State.worldbooks[bookId];
+      if (!wb) return send({ error: '世界书不存在' });
+      let obj = null;
+      try { obj = JSON.parse(parsed.json || '{}'); } catch (e) { return send({ error: 'JSON 格式错误：' + e.message }); }
+      const src = obj.entries || obj;
+      let cnt = 0;
+      for (const [id, e] of Object.entries(src || {})) {
+        if (!e || typeof e !== 'object') continue;
+        const eid = String(e.id || id);
+        wb.entries[eid] = { enabled: true, priority: 0, constant: false, matchMode: 'any', keywords: [], ...e, id: eid };
+        cnt++;
+      }
+      saveWorldbook(bookId);
+      return send({ ok: true, count: cnt });
+    }
+    if (action === 'scan') {
+      const chatFile = path.join(DATA_DIR, 'chats', cid + '.json');
+      let messages = [];
+      if (fs.existsSync(chatFile)) { try { messages = JSON.parse(fs.readFileSync(chatFile, 'utf8')).messages || []; } catch (e) { /* 忽略 */ } }
+      const excluded = /【排除设定触发器】/.test(noteText(cid));
+      if (excluded) {
+        // 本会话写了排除标记 → 与真实注入口径一致：整条链都不注入，扫描直接给空结果
+        return send({ ok: true, entries: [], names: [], matched: 0, totalTokens: 0, budget: 0, disabled: true, onlyMatched: 0, onlyEntries: 0, onlyNames: [] });
+      }
+      const nm = (r) => (r.entries || []).map(e => (e.book ? e.book + ' / ' : '') + e.name);
+      // 两组口径：①真实注入口径（本会话最近 10 条 + 测试文本）②仅测试文本口径
+      // （只返回①时测试文本会被会话上下文淹没，故两组都返回，前端分组显示）
+      const withCtx = scanWorldbooks(messages, parsed.testText || '', State.endpoint.maxContext, cid, {});
+      const onlyText = scanWorldbooks([], parsed.testText || '', State.endpoint.maxContext, cid, {});
+      return send({
+        ok: true, ...withCtx, names: nm(withCtx),
+        onlyMatched: onlyText.matched, onlyEntries: (onlyText.entries || []).length, onlyNames: nm(onlyText),
+      });
+    }
+    return send({ error: '未知 action: ' + action });
+  } catch (e) {
+    res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ error: String(e) }));
+    return true;
+  }
+}
+
 async function h_api_graph_32(req, res, url, p) {
   // 关系图谱
     if (p === '/api/graph' && req.method === 'GET') { res.writeHead(200,{'content-type':'application/json; charset=utf-8'}); { res.end(JSON.stringify({ok:true,...State.graphData})); return true; }; }
@@ -4402,6 +4657,8 @@ const ROUTES = [
   { test: (p, req) => (p === '/api/suggestions/generate' && req.method === 'POST'), handler: h_api_suggestions_generate_29 },
   { test: (p, req) => (p === '/api/lorebook' && req.method === 'GET'), handler: h_api_lorebook_30 },
   { test: (p, req) => (p === '/api/lorebook' && req.method === 'POST'), handler: h_api_lorebook_31 },
+  { test: (p, req) => (p === '/api/worldbooks' && req.method === 'GET'), handler: h_api_worldbooks_get },
+  { test: (p, req) => (p === '/api/worldbooks' && req.method === 'POST'), handler: h_api_worldbooks_post },
   { test: (p, req) => (p === '/api/graph' && req.method === 'GET'), handler: h_api_graph_32 },
   { test: (p, req) => (p === '/api/graph' && req.method === 'POST'), handler: h_api_graph_33 },
   { test: (p, req) => (p === '/api/personas' && req.method === 'GET'), handler: h_api_personas_34 },

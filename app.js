@@ -1423,6 +1423,8 @@ async function openChat(id) {
     if (c.error) return;
     App.chatId = c.id;
     App.chatTitle = c.title;
+    // ⭐ 世界书按会话生效：切/开会话后必须重载，否则面板停留在上一会话的启用状态
+    if (typeof loadWorldbooksUI === 'function') loadWorldbooksUI();
     App.currentChatProfileId = c.chatProfile || 'main';
     localStorage.setItem(CUR_CHAT_KEY, id);
     els.messages.innerHTML = '';
@@ -3768,6 +3770,280 @@ document.getElementById('lb-settings-btn')?.addEventListener('click', () => {
   overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
 });
 loadLorebookUI();
+
+// ---------- 世界书（多本 · 按会话启用）UI ----------
+// 与「设定触发器」并存：世界书是更结构化的一套（多本／每本一文件／按会话启用／书级总开关），
+// 注入时两者合并为一条扫描链（服务端 scanWorldbooks）。
+App.wbBooks = [];
+App.wbActive = [];
+App.wbOff = [];
+App.wbCurrent = null;
+App.wbEntries = {};
+async function loadWorldbooksUI() {
+  const box = document.getElementById('wb-books');
+  if (!box) return;
+  try {
+    const r = await fetch('/api/worldbooks?chatId=' + encodeURIComponent(App.chatId || ''));
+    const d = await r.json();
+    App.wbBooks = d.books || [];
+    App.wbActive = d.active || [];
+    App.wbOff = d.off || [];
+    const sess = document.getElementById('wb-session');
+    if (sess) sess.textContent = App.chatId
+      ? '📍 本会话：' + (App.chatTitle || App.chatId) + ' —— 以下开关只作用于本会话'
+      : '📍 会话加载中…（世界书按会话生效，加载完自动刷新）';
+    renderWbBooks();
+  } catch (e) { box.textContent = '加载失败'; }
+}
+function renderWbBooks() {
+  const box = document.getElementById('wb-books');
+  if (!box) return;
+  box.innerHTML = '';
+  if (!App.wbBooks.length) { box.textContent = '（暂无世界书 · 点「＋ 新建世界书」）'; return; }
+  for (const b of App.wbBooks) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:4px 2px';
+    const isGlobal = b.scope === 'global';
+    const checked = !!b.active;
+    const stateTxt = b.entryCount + ' 条 · ' + (b.enabled ? '启用' : '已停用') + (b.sessionOff ? ' · 本会话已关' : '');
+    const tip = isGlobal ? '勾选＝本会话启用；取消＝本会话停用（不影响其他会话）' : '勾选＝本会话启用';
+    row.innerHTML = '<input type="checkbox" class="wb-active" data-id="' + safeHtml(b.id) + '" ' + (checked ? 'checked' : '') + ' style="flex:none" title="' + tip + '"><div style="flex:1;min-width:0" title="' + safeHtml(b.name) + '"><div style="font-weight:500;white-space:normal;word-break:break-word;line-height:1.35">' + safeHtml(b.name) + (isGlobal ? ' <span style="color:var(--muted);font-size:11px">[全局]</span>' : '') + '</div><div style="font-size:11px;color:var(--muted)">' + stateTxt + '</div></div><button class="head-btn wb-toggle" data-id="' + safeHtml(b.id) + '" style="padding:2px 8px;font-size:11px;flex:none" title="书级总开关：对所有会话生效">' + (b.enabled ? '⏸ 停用全书' : '▶ 启用全书') + '</button><button class="head-btn wb-edit" data-id="' + safeHtml(b.id) + '" style="padding:2px 8px;font-size:11px;flex:none">编辑</button><button class="head-btn wb-del" data-id="' + safeHtml(b.id) + '" style="padding:2px 8px;font-size:11px;color:var(--danger);flex:none">删</button>';
+    box.appendChild(row);
+  }
+  box.querySelectorAll('.wb-active').forEach(cb => cb.addEventListener('change', async () => {
+    const id = cb.dataset.id;
+    const b = App.wbBooks.find(x => x.id === id) || {};
+    let active = (App.wbActive || []).slice();
+    let off = (App.wbOff || []).slice();
+    if (b.scope === 'global') {
+      if (cb.checked) off = off.filter(x => x !== id);
+      else if (!off.includes(id)) off.push(id);
+    } else {
+      if (cb.checked) { if (!active.includes(id)) active.push(id); }
+      else active = active.filter(x => x !== id);
+    }
+    App.wbActive = active; App.wbOff = off;
+    await fetch('/api/worldbooks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'set-active', chatId: App.chatId || '', active, off }) });
+    loadWorldbooksUI();
+  }));
+  box.querySelectorAll('.wb-toggle').forEach(btn => btn.addEventListener('click', async () => {
+    const id = btn.dataset.id;
+    const b = App.wbBooks.find(x => x.id === id) || {};
+    await fetch('/api/worldbooks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'toggle-book', bookId: id, enabled: !b.enabled }) });
+    loadWorldbooksUI();
+  }));
+  box.querySelectorAll('.wb-edit').forEach(btn => btn.addEventListener('click', () => openWbEditor(btn.dataset.id)));
+  box.querySelectorAll('.wb-del').forEach(btn => btn.addEventListener('click', () => {
+    const id = btn.dataset.id;
+    wbConfirm('删除世界书', '确定删除「' + id + '」？会同时删除对应的 json 文件。', async () => {
+      await fetch('/api/worldbooks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'delete-book', bookId: id }) });
+      if (App.wbCurrent === id) closeWbEditor();
+      loadWorldbooksUI();
+    });
+  }));
+}
+async function openWbEditor(bookId) {
+  try {
+    const r = await fetch('/api/worldbooks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'get', bookId }) });
+    const d = await r.json();
+    if (d.error) { toast(d.error); return; }
+    App.wbCurrent = bookId;
+    App.wbEntries = d.entries || {};
+    const ed = document.getElementById('wb-editor');
+    const title = document.getElementById('wb-editor-title');
+    if (ed) ed.style.display = '';
+    if (title) title.textContent = '📖 ' + (d.book.name || bookId) + '（' + (d.book.scope === 'global' ? '全局' : '按会话') + '）· ' + Object.keys(App.wbEntries).length + ' 条';
+    renderWbEntries();
+  } catch (e) { toast('加载失败'); }
+}
+function closeWbEditor() {
+  App.wbCurrent = null; App.wbEntries = {};
+  const ed = document.getElementById('wb-editor');
+  if (ed) ed.style.display = 'none';
+}
+function renderWbEntries() {
+  const box = document.getElementById('wb-entries');
+  if (!box) return;
+  box.innerHTML = '';
+  const kw = (document.getElementById('wb-entry-search')?.value || '').trim().toLowerCase();
+  let list = Object.entries(App.wbEntries);
+  if (kw) list = list.filter(([, e]) => (e.name || '').toLowerCase().includes(kw) || (e.keywords || []).some(k => String(k).toLowerCase().includes(kw)));
+  if (!list.length) { box.textContent = kw ? '（无匹配条目）' : '（暂无条目）'; return; }
+  list.sort((a, b) => (b[1].priority || 0) - (a[1].priority || 0));
+  for (const [eid, e] of list) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:4px 2px';
+    const mode = e.constant ? '强制注入' : '关键词';
+    const kws = (e.keywords || []).join('、') || '—';
+    const off = e.enabled === false;
+    // 固定位置的「启用」复选框（名字再长也看得见状态）
+    row.innerHTML = '<input type="checkbox" class="wb-e-sel" data-id="' + safeHtml(eid) + '" style="flex:none"><div style="flex:1;min-width:0;opacity:' + (off ? '0.5' : '1') + '" title="' + safeHtml((e.name || eid) + '\n关键词：' + kws) + '"><div style="font-weight:500;white-space:normal;word-break:break-word;line-height:1.35">' + safeHtml(e.name || eid) + ' <span style="color:var(--accent);font-size:11px">[' + mode + ']</span></div><div style="font-size:11px;color:var(--muted);white-space:normal;word-break:break-word;line-height:1.3">' + safeHtml(kws) + ' · P' + (e.priority || 0) + '</div></div><label style="font-size:11px;flex:none;display:flex;align-items:center;gap:3px;color:' + (off ? 'var(--danger)' : 'inherit') + '" title="勾选＝本条参与注入"><input type="checkbox" class="wb-e-toggle" data-id="' + safeHtml(eid) + '"' + (off ? '' : ' checked') + '>启用</label><button class="head-btn wb-e-edit" data-id="' + safeHtml(eid) + '" style="padding:2px 6px;font-size:11px;flex:none">编辑</button><button class="head-btn wb-e-del" data-id="' + safeHtml(eid) + '" style="padding:2px 6px;font-size:11px;color:var(--danger);flex:none">删</button>';
+    box.appendChild(row);
+  }
+  // 行内「启用」开关（免开弹窗）
+  box.querySelectorAll('.wb-e-toggle').forEach(cb => cb.addEventListener('change', async () => {
+    const eid = cb.dataset.id;
+    const e = App.wbEntries[eid];
+    if (!e) return;
+    cb.disabled = true;
+    const r = await fetch('/api/worldbooks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'save-entry', bookId: App.wbCurrent, entryId: eid, entry: { ...e, enabled: cb.checked } }) });
+    const d = await r.json();
+    cb.disabled = false;
+    if (d.error) { toast(d.error); cb.checked = !cb.checked; return; }
+    App.wbEntries[eid] = d.entry;
+    renderWbEntries();
+    loadWorldbooksUI();
+  }));
+  box.querySelectorAll('.wb-e-edit').forEach(btn => btn.addEventListener('click', () => editWbEntry(btn.dataset.id, App.wbEntries[btn.dataset.id])));
+  box.querySelectorAll('.wb-e-del').forEach(btn => btn.addEventListener('click', () => {
+    const eid = btn.dataset.id;
+    wbConfirm('删除条目', '确定删除条目「' + eid + '」？', async () => {
+      await fetch('/api/worldbooks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'delete-entry', bookId: App.wbCurrent, entryId: eid }) });
+      delete App.wbEntries[eid]; renderWbEntries(); loadWorldbooksUI();
+    });
+  }));
+}
+function editWbEntry(eid, entry) {
+  if (!App.wbCurrent) { toast('请先选择一本世界书'); return; }
+  const isNew = !eid;
+  if (!entry) entry = { name: '', keywords: [], content: '', enabled: true, priority: 50, constant: false, matchMode: 'any' };
+  if (isNew) eid = 'e_' + Date.now();
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = '<div class="modal-box" style="max-width:560px;max-height:85vh;overflow-y:auto"><div style="font-size:15px;font-weight:500;margin-bottom:12px">' + (isNew ? '新建' : '编辑') + '世界书条目</div><label class="api-field">名称<input id="wb-name" type="text" value="' + safeHtml(entry.name || '') + '" style="width:100%"></label><label class="api-field">关键词（逗号分隔；每个 ≥2 字）<input id="wb-keywords" type="text" value="' + safeHtml((entry.keywords || []).join(', ')) + '" style="width:100%"></label><label class="api-field">内容<textarea id="wb-content" class="world-setting" rows="8" style="width:100%">' + safeHtml(entry.content || '') + '</textarea></label><div style="display:flex;gap:12px;margin-top:8px"><label class="api-field">注入方式<select id="wb-constant"><option value="0"' + (!entry.constant ? ' selected' : '') + '>关键词匹配</option><option value="1"' + (entry.constant ? ' selected' : '') + '>强制注入（每轮）</option></select></label><label class="api-field">匹配模式<select id="wb-matchmode"><option value="any"' + (entry.matchMode !== 'all' && entry.matchMode !== 'every' ? ' selected' : '') + '>任一关键词</option><option value="all"' + (entry.matchMode === 'all' || entry.matchMode === 'every' ? ' selected' : '') + '>全部关键词</option></select></label></div><div style="display:flex;gap:12px;margin-top:8px"><label class="api-field">优先级<input id="wb-priority" type="number" value="' + safeHtml(entry.priority || 0) + '" style="width:90px"></label><label style="display:flex;align-items:center;gap:4px"><input type="checkbox" id="wb-enabled"' + (entry.enabled !== false ? ' checked' : '') + '> 启用</label></div><div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button id="wb-cancel" class="btn-sm" style="padding:6px 16px">取消</button><button id="wb-save" class="btn-sm" style="padding:6px 16px;background:var(--accent);color:#fff;border:none;border-radius:6px">保存</button></div></div>';
+  document.body.appendChild(overlay);
+  overlay.querySelector('#wb-cancel').onclick = () => overlay.remove();
+  overlay.querySelector('#wb-save').onclick = async () => {
+    const payload = {
+      name: overlay.querySelector('#wb-name').value.trim().slice(0, 60),
+      keywords: overlay.querySelector('#wb-keywords').value.split(',').map(s => s.trim()).filter(Boolean),
+      content: overlay.querySelector('#wb-content').value,
+      constant: overlay.querySelector('#wb-constant').value === '1',
+      matchMode: overlay.querySelector('#wb-matchmode').value,
+      priority: Number(overlay.querySelector('#wb-priority').value) || 0,
+      enabled: overlay.querySelector('#wb-enabled').checked,
+    };
+    const r = await fetch('/api/worldbooks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'save-entry', bookId: App.wbCurrent, entryId: eid, entry: payload }) });
+    const d = await r.json();
+    if (d.error) { toast(d.error); return; }
+    App.wbEntries[eid] = d.entry; overlay.remove(); renderWbEntries(); loadWorldbooksUI();
+  };
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+}
+document.getElementById('wb-add-entry')?.addEventListener('click', () => editWbEntry(null));
+document.getElementById('wb-close-editor')?.addEventListener('click', closeWbEditor);
+// 页内弹窗（统一走 modal-overlay，不依赖系统 prompt/alert/confirm）
+function wbModal(title, bodyHtml, onOk, okText) {
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay';
+  ov.innerHTML = '<div class="modal-box" style="max-width:560px;max-height:85vh;overflow-y:auto"><div style="font-size:15px;font-weight:500;margin-bottom:12px">' + safeHtml(title) + '</div>' + bodyHtml + '<div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px"><button class="btn-sm wbdlg-cancel" style="padding:6px 16px">关闭</button><button class="btn-sm wbdlg-ok" style="padding:6px 16px;background:var(--accent);color:#fff;border:none;border-radius:6px">' + safeHtml(okText || '确定') + '</button></div></div>';
+  document.body.appendChild(ov);
+  ov.querySelector('.wbdlg-cancel').onclick = () => ov.remove();
+  ov.querySelector('.wbdlg-ok').onclick = () => onOk(ov);
+  ov.onclick = (e) => { if (e.target === ov) ov.remove(); };
+  return ov;
+}
+function wbConfirm(title, text, onOk) {
+  wbModal(title, '<div style="font-size:13px;line-height:1.7">' + safeHtml(text) + '</div>', (ov) => { ov.remove(); onOk(); }, '确定');
+}
+document.getElementById('wb-new-btn')?.addEventListener('click', () => {
+  wbModal('新建世界书',
+    '<label class="api-field">名称<input id="wbn-name" type="text" placeholder="如：本作主线设定" style="width:100%"></label>' +
+    '<label class="api-field">id（英文/数字/短横线，用作文件名）<input id="wbn-id" type="text" value="book-' + Date.now() + '" style="width:100%"></label>' +
+    '<label class="api-field">作用域<select id="wbn-scope"><option value="chat">chat ＝ 按会话启用</option><option value="global">global ＝ 全局始终生效</option></select></label>',
+    async (ov) => {
+      const name = ov.querySelector('#wbn-name').value.trim();
+      const id = ov.querySelector('#wbn-id').value.trim();
+      const scope = ov.querySelector('#wbn-scope').value;
+      if (!name) { toast('请填写世界书名称'); return; }
+      if (!id) { toast('请填写 id'); return; }
+      const r = await fetch('/api/worldbooks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'create-book', book: { id, name, scope } }) });
+      const d = await r.json();
+      if (d.error) { toast(d.error); return; }
+      ov.remove();
+      await loadWorldbooksUI();
+      openWbEditor(d.id);
+    }, '创建');
+});
+// ⚙️ 注入设置（总开关 / Token 预算）
+document.getElementById('wb-settings-btn')?.addEventListener('click', async () => {
+  let st = {};
+  try { st = (await (await fetch('/api/lorebook')).json()).settings || {}; } catch (e) { st = {}; }
+  const mode = st.tokenBudget === 'unlimited' ? 'unlimited' : (typeof st.tokenBudget === 'number' ? 'custom' : 'auto');
+  wbModal('世界书注入设置',
+    '<label style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><input type="checkbox" id="wbs-enabled"' + (st.enabled !== false ? ' checked' : '') + '> 启用注入（关闭后设定触发器与世界书都不注入）</label>' +
+    '<label class="api-field">Token 预算模式<select id="wbs-mode"><option value="auto"' + (mode === 'auto' ? ' selected' : '') + '>自动（maxContext × 比例）</option><option value="custom"' + (mode === 'custom' ? ' selected' : '') + '>自定义</option><option value="unlimited"' + (mode === 'unlimited' ? ' selected' : '') + '>不限制</option></select></label>' +
+    '<label class="api-field">自定义预算（token）<input id="wbs-budget" type="number" value="' + (typeof st.tokenBudget === 'number' ? st.tokenBudget : (st.maxBudget || 10000)) + '" style="width:100%"></label>' +
+    '<label class="api-field">自动模式比例（0.01-0.5）<input id="wbs-ratio" type="number" step="0.01" min="0.01" max="0.5" value="' + (st.budgetRatio || 0.1) + '" style="width:100%"></label>' +
+    '<div style="font-size:11px;color:var(--muted,#888);margin-top:8px;line-height:1.6">· 「强制注入（每轮）」条目不受预算限制<br>· 其余条目按优先级排序后截断到预算内</div>',
+    async (ov) => {
+      const m = ov.querySelector('#wbs-mode').value;
+      const tokenBudget = m === 'auto' ? 'auto' : m === 'unlimited' ? 'unlimited' : (Number(ov.querySelector('#wbs-budget').value) || 10000);
+      const settings = { enabled: ov.querySelector('#wbs-enabled').checked, tokenBudget, budgetRatio: Number(ov.querySelector('#wbs-ratio').value) || 0.1 };
+      const r = await fetch('/api/lorebook', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'settings', settings }) });
+      const d = await r.json();
+      if (d.error) { toast(d.error); return; }
+      ov.remove();
+      toast('已保存：' + (settings.enabled ? '注入开启' : '⛔ 注入已关闭') + ' · 预算 ' + (tokenBudget === 'auto' ? '自动 ' + settings.budgetRatio : tokenBudget === 'unlimited' ? '不限制' : tokenBudget + ' tokens'));
+      loadWorldbooksUI();
+    }, '保存');
+});
+// 📥 从世界书目录导入条目 —— 复用「设定触发器」卡片的导入弹窗（同一份 frontmatter 导入器）
+document.getElementById('wb-import-st-btn')?.addEventListener('click', () => {
+  const btn = document.getElementById('lb-wb-btn');
+  if (btn) btn.click(); else toast('导入入口不可用');
+});
+document.getElementById('wb-scan-btn')?.addEventListener('click', () => {
+  wbModal('扫描测试',
+    '<label class="api-field">测试文本<textarea id="wbs-text" class="world-setting" rows="3" style="width:100%" placeholder="含角色名/地点名，如：某角色站在旧居门口"></textarea></label><div style="font-size:11px;color:var(--muted,#888);margin-top:4px">结果分两组：①仅按你输入的测试文本 ②再叠加本会话最近 10 条消息（＝真实注入口径）</div><div id="wbs-result" style="margin-top:10px;font-size:12px;color:var(--muted,#888);white-space:pre-wrap;line-height:1.7"></div>',
+    async (ov) => {
+      const text = ov.querySelector('#wbs-text').value;
+      const r = await fetch('/api/worldbooks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'scan', chatId: App.chatId || '', testText: text }) });
+      const d = await r.json();
+      if (d.error) { ov.querySelector('#wbs-result').textContent = d.error; return; }
+      if (d.disabled) { ov.querySelector('#wbs-result').textContent = '本会话写了【排除设定触发器】⇒ 整条注入链都不注入（扫描无结果）'; return; }
+      const onlyList = (d.onlyNames || []).join('\n') || '（无）';
+      const ctxList = (d.names || []).join('\n') || '（无）';
+      ov.querySelector('#wbs-result').textContent =
+        '【仅按测试文本】命中 ' + (d.onlyMatched || 0) + ' 条 / 注入 ' + (d.onlyEntries || 0) + ' 条\n' + onlyList +
+        '\n\n【含本会话最近 10 条上下文】命中 ' + (d.matched || 0) + ' 条 / 注入 ' + ((d.entries || []).length) + ' 条（预算 ' + (d.budget || 0) + ' tokens）\n' + ctxList;
+    }, '扫描');
+});
+// 批量启用/关闭 + 导入条目
+async function wbBatch(ids, enabled) {
+  if (!App.wbCurrent) { toast('请先选择一本世界书'); return; }
+  const r = await fetch('/api/worldbooks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'batch-enable', bookId: App.wbCurrent, ids, enabled }) });
+  const d = await r.json();
+  if (d.error) { toast(d.error); return; }
+  await openWbEditor(App.wbCurrent);
+}
+function wbSelectedIds() {
+  return Array.from(document.querySelectorAll('.wb-e-sel')).filter(cb => cb.checked).map(cb => cb.dataset.id);
+}
+document.getElementById('wb-select-all')?.addEventListener('change', (e) => {
+  document.querySelectorAll('.wb-e-sel').forEach(cb => { cb.checked = e.target.checked; });
+});
+document.getElementById('wb-enable-sel')?.addEventListener('click', () => wbBatch(wbSelectedIds(), true));
+document.getElementById('wb-disable-sel')?.addEventListener('click', () => wbBatch(wbSelectedIds(), false));
+document.getElementById('wb-enable-all')?.addEventListener('click', () => wbBatch([], true));
+document.getElementById('wb-disable-all')?.addEventListener('click', () => wbBatch([], false));
+document.getElementById('wb-import-btn')?.addEventListener('click', () => {
+  if (!App.wbCurrent) { toast('请先选择一本世界书'); return; }
+  wbModal('导入条目',
+    '<div style="font-size:12px;color:var(--muted,#888);margin-bottom:6px">粘贴 JSON（支持 {"entries":{...}} 或直接 {...} 形式），并入当前世界书</div><textarea id="wbi-json" class="world-setting" rows="8" style="width:100%" placeholder=\'{"entries":{"my-entry":{"name":"条目名","keywords":["关键词"],"content":"内容"}}}\'></textarea>',
+    async (ov) => {
+      const json = ov.querySelector('#wbi-json').value;
+      if (!json.trim()) { toast('请粘贴 JSON'); return; }
+      const r = await fetch('/api/worldbooks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'import-entries', bookId: App.wbCurrent, json }) });
+      const d = await r.json();
+      if (d.error) { toast(d.error); return; }
+      ov.remove();
+      toast('已导入 ' + d.count + ' 条');
+      await openWbEditor(App.wbCurrent); loadWorldbooksUI();
+    }, '导入');
+});
+document.getElementById('wb-entry-search')?.addEventListener('input', () => renderWbEntries());
+loadWorldbooksUI();
 
 // ---------- 关系图谱管理 UI ----------
 App.graphDataCache = { nodes: [], edges: [] };

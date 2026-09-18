@@ -359,6 +359,35 @@
       <button id="lb-settings-btn" class="head-btn" style="padding:4px 12px" title="设定触发器设置（注入预算等）" aria-label="设定触发器设置">⚙️</button>
       </div>
       </div>
+      <div class="card" id="card-worldbooks">
+      <div class="card-title">📚 世界书（按会话启用 · 强制注入 / 关键词匹配）</div>
+      <div class="api-msg" style="margin-bottom:6px">一书一文件（data/worldbooks/*.json）。勾选＝本会话启用，取消＝仅本会话停用；「全局」书默认所有会话生效，可用「⏸ 停用全书」一键全局关闭。条目可编辑名称/关键词/内容/注入方式。与上方「设定触发器」并存——世界书是更结构化的一套。</div>
+      <div id="wb-session" style="font-size:11px;color:var(--accent);margin-bottom:6px"></div>
+      <div id="wb-books" class="cp-list" style="max-height:340px;overflow-y:auto">加载中…</div>
+      <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+      <button id="wb-new-btn" class="head-btn" style="padding:4px 12px">＋ 新建世界书</button>
+      <button id="wb-scan-btn" class="head-btn" style="padding:4px 12px">🔍 扫描测试</button>
+      <button id="wb-settings-btn" class="head-btn" style="padding:4px 12px" title="注入总开关 / Token 预算">⚙️ 设置</button>
+      <button id="wb-import-st-btn" class="head-btn" style="padding:4px 12px" title="从世界书目录（frontmatter 格式）导入条目">📥 世界书</button>
+      </div>
+      <div id="wb-editor" style="display:none;margin-top:8px;border-top:1px solid var(--border);padding-top:8px">
+      <div id="wb-editor-title" style="font-size:12px;color:var(--muted,#888);margin-bottom:4px"></div>
+      <input id="wb-entry-search" type="text" placeholder="🔍 搜索本世界书条目…" style="width:100%;padding:6px 8px;margin-bottom:6px;border-radius:6px;background:var(--bg2);color:var(--text);border:1px solid var(--border);font-size:12px">
+      <div id="wb-entries" class="cp-list" style="max-height:340px;overflow-y:auto"></div>
+      <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      <label style="font-size:11px;color:var(--muted,#888);display:flex;align-items:center;gap:4px"><input type="checkbox" id="wb-select-all"> 全选</label>
+      <button id="wb-enable-sel" class="head-btn" style="padding:3px 10px;font-size:11px">✅ 启用选中</button>
+      <button id="wb-disable-sel" class="head-btn" style="padding:3px 10px;font-size:11px">⛔ 关闭选中</button>
+      <button id="wb-enable-all" class="head-btn" style="padding:3px 10px;font-size:11px">✅ 全部启用</button>
+      <button id="wb-disable-all" class="head-btn" style="padding:3px 10px;font-size:11px">⛔ 全部关闭</button>
+      <button id="wb-import-btn" class="head-btn" style="padding:3px 10px;font-size:11px" title="粘贴 JSON 条目并入本世界书">📥 导入条目</button>
+      </div>
+      <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+      <button id="wb-add-entry" class="head-btn" style="padding:3px 10px;font-size:11px">＋ 新增条目</button>
+      <button id="wb-close-editor" class="head-btn" style="padding:3px 10px;font-size:11px">关闭</button>
+      </div>
+      </div>
+      </div>
       <div class="card" id="card-personas">
       <div class="card-title">🎭 玩家身份</div>
       <div id="persona-list" class="cp-list">加载中…</div>
