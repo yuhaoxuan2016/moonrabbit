@@ -2927,6 +2927,61 @@ const am = p.match(/^\/avatars\/([^/]+)$/);
     sendJson({ ok: true, files });
     return true;
   }
+  // 图生图产头像（同步自正式版 server.js:6598-6665，去 RW 化）：
+  //   引擎/端点/模型一律跟随已有的场景插图配置（illustration-config.json），不新增配置口；
+  //   与正式版差在三处——①不搬 Ark 分支（本版的生图层也没有 Ark）
+  //   ②外观锚不读真值源文件，改读本版的本地 NPC 档案 appearance（无档案则退回通用兜底句）
+  //   ③必须显式传示例图（本版没有「角色立绘库」可回落）。
+  if (p === '/api/avatar/generate' && req.method === 'POST') {
+    let body = await readBody(req);
+    try {
+      const { name, imageData } = JSON.parse(body);
+      const nm = sanitizeFileName(name || '', 40);
+      if (!nm) { sendJson({ error: '缺少角色名' }, 400); return true; }
+      if (!imageData) { sendJson({ error: '请提供示例图（base64 data URL）' }, 400); return true; }
+      const imgMatch = String(imageData).match(/^data:image\/(png|jpeg|jpg|webp|gif);base64,(.+)$/);
+      if (!imgMatch) { sendJson({ error: '示例图格式不支持（需 base64 data URL）' }, 400); return true; }
+      const ext = imgMatch[1] === 'jpeg' ? 'jpg' : imgMatch[1];
+      const illustConfigFile = path.join(DATA_DIR, 'illustration-config.json');
+      let config = { engine: 'kolors', apiKey: '', baseURL: SILICON_BASE };
+      try { if (fs.existsSync(illustConfigFile)) config = Object.assign({ engine: 'kolors', apiKey: '', baseURL: SILICON_BASE }, JSON.parse(fs.readFileSync(illustConfigFile, 'utf8'))); } catch (e) {}
+      const key = config.apiKey || getSiliconImgKey();
+      if (!key) { sendJson({ error: '图片生成功能未配置。请先在设置里填写生图 API Key。', needConfig: true }, 400); return true; }
+      // Authorization 头只能放 Latin1 字符：粘进中文/全角括号会让 fetch 直接抛 TypeError（报错看不懂），
+      // 所以在入口就拒掉并说清是哪的问题（key 本身没被送到任何远端）。
+      if (!/^[\x21-\x7e]+$/.test(key)) { sendJson({ error: '生图 API Key 含非法字符（应为 ASCII，注意别把中文说明一起粘进来）' }, 400); return true; }
+      const prof = loadNpcProfile(nm);
+      const appearance = prof && prof.appearance ? String(prof.appearance).slice(0, 300) : '';
+      const prompt = '根据这张图片中的人物，生成一张头像（脸部特写为主，白色背景，动漫风格）' +
+        (appearance ? '。角色外观特征：' + appearance + '。必须严格保持上述外观（发色/瞳色/发型/服装），不得改变' : '。保持人物外观一致');
+      const baseURL = (config.baseURL || SILICON_BASE).replace(/\/+$/, '');
+      const modelKey = String(config.engine || 'kolors');
+      const modelCfg = SILICON_IMG_MODELS[modelKey] || SILICON_IMG_MODELS.kolors;
+      const model = typeof modelCfg === 'string' ? modelCfg : modelCfg.id;
+      const r = await fetch(baseURL + '/images/generations', {
+        method: 'POST',
+        headers: { 'authorization': 'Bearer ' + key, 'content-type': 'application/json' },
+        body: JSON.stringify({ model, prompt, image: imageData, image_size: '512x512', batch_size: 1, num_inference_steps: 20, guidance_scale: 7.5 }),
+        signal: AbortSignal.timeout(180000),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { sendJson({ error: (d && d.message) || (d && d.error && d.error.message) || ('接口错误(' + r.status + ')') }, 200); return true; }
+      const img = (d.images && Array.isArray(d.images) && d.images[0]) || null;
+      if (!img || !img.url) { sendJson({ error: '头像生成失败（接口未返回图片 URL）' }, 200); return true; }
+      const imageR = await fetch(img.url, { signal: AbortSignal.timeout(60000) });
+      if (!imageR.ok) { sendJson({ error: '头像图片下载失败（接口返回的 URL 不可达）' }, 200); return true; }
+      const buf = Buffer.from(await imageR.arrayBuffer());
+      if (!buf.length) { sendJson({ error: '头像生成失败（接口返回空图）' }, 200); return true; }
+      if (buf.length > 5 * 1024 * 1024) { sendJson({ error: '生成的图片过大（>5MB）' }, 200); return true; }
+      fs.mkdirSync(AVATAR_CUSTOM_DIR, { recursive: true });
+      const fileName = nm + '.' + ext;
+      writeFileAtomicSync(path.join(AVATAR_CUSTOM_DIR, fileName), buf);
+      State.avatarCustom[nm] = fileName;   /* 与 upload 分支同构：映射存纯文件名，防双重目录 */
+      saveAvatarCustom();
+      sendJson({ ok: true, url: '/avatars/' + encodeURIComponent(nm), name: nm, model });
+      return true;
+    } catch (e) { sendJson({ error: String(e) }, 400); return true; }
+  }
   return false;
 }
 async function h_route_22(req, res, url, p) {
@@ -4284,7 +4339,7 @@ const ROUTES = [
   { test: (p, req) => (p === '/api/chat-profiles' && req.method === 'GET'), handler: h_api_chat_profiles_20 },
   { test: (p, req) => (p === '/api/chat-profiles' && req.method === 'POST'), handler: h_api_chat_profiles_21 },
   { test: (p, req) => (/^\/api\/npc-profiles(?:\/([^/]+))?$/).test(p), handler: h_route_22 },
-  { test: (p, req) => (p === "/api/avatar/upload" && req.method === "POST") || (p === "/api/avatar/remove" && req.method === "POST") || (p === "/api/avatar/list" && req.method === "GET") || (/^\/avatars\/([^/]+)$/.test(p)), handler: h_route_avatars },
+  { test: (p, req) => (p === "/api/avatar/upload" && req.method === "POST") || (p === "/api/avatar/generate" && req.method === "POST") || (p === "/api/avatar/remove" && req.method === "POST") || (p === "/api/avatar/list" && req.method === "GET") || (/^\/avatars\/([^/]+)$/.test(p)), handler: h_route_avatars },
   { test: (p, req) => (/^\/api\/scenes(?:\/([^/]+))?$/).test(p), handler: h_route_23 },
   { test: (p, req) => (p === '/api/expressions/config' && req.method === 'POST'), handler: h_api_expressions_config_24 },
   { test: (p, req) => (/^\/api\/expressions(?:\/([^/]+))?$/).test(p), handler: h_route_25 },

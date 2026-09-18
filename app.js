@@ -3347,6 +3347,7 @@ function openAvatarWin(name) {
     '<input type="file" accept="image/*" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--text)">' +
     '<div style="display:flex;gap:8px;margin-top:10px;justify-content:flex-end">' +
     '<button id="av-del" style="padding:6px 14px;font-size:12px;background:transparent;border:1px solid var(--border);color:var(--danger,#e66);border-radius:6px;cursor:pointer">删除</button>' +
+    '<button id="av-gen" style="padding:6px 14px;font-size:12px;background:transparent;border:1px solid var(--border);color:var(--text);border-radius:6px;cursor:pointer">🎨 生成头像</button>' +
     '<button id="av-cancel" style="padding:6px 14px;font-size:12px;background:transparent;border:1px solid var(--border);color:var(--text);border-radius:6px;cursor:pointer">取消</button>' +
     '<button id="av-save" style="padding:6px 14px;font-size:12px;background:var(--accent);color:var(--bg);border:none;border-radius:6px;cursor:pointer">上传</button>' +
     '</div>';
@@ -3372,6 +3373,24 @@ function openAvatarWin(name) {
         .then((r) => r.json()).then((d) => { if (d.ok) { toast('头像已更新'); close(); loadAvatarCache(); } else toast(d.error || '上传失败'); })
         .catch(() => toast('上传失败'));
     };
+    rd.readAsDataURL(f);
+  });
+  box.querySelector('#av-gen').addEventListener('click', () => {
+    const f = fileInp.files && fileInp.files[0];
+    if (!f) { toast('先选一张参考图，再据它生成头像'); return; }
+    const genBtn = box.querySelector('#av-gen');
+    genBtn.disabled = true; genBtn.textContent = '生成中…';
+    const rd = new FileReader();
+    rd.onload = () => {
+      fetch('/api/avatar/generate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: name, imageData: rd.result }) })
+        .then((r) => r.json()).then((d) => {
+          if (d.ok) { toast('头像已生成'); close(); loadAvatarCache(); }
+          else toast(d.error || '生成失败');
+        })
+        .catch(() => toast('生成失败'))
+        .finally(() => { genBtn.disabled = false; genBtn.textContent = '🎨 生成头像'; });
+    };
+    rd.onerror = () => { toast('读取图片失败'); genBtn.disabled = false; genBtn.textContent = '🎨 生成头像'; };
     rd.readAsDataURL(f);
   });
   box.querySelector('#av-del').addEventListener('click', () => {
