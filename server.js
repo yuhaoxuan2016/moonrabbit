@@ -295,6 +295,16 @@ item-: 物品名</items>
 // ---------- 回合记账数据层（按会话隔离） ----------
 const DATA_DIR = path.join(WWW, 'data');
 const TURNS_DIR = path.join(DATA_DIR, 'turns');
+// ---------- 最后打开的会话（服务端记忆 · 桌面壳 WebView2 里 localStorage 可能不落盘 · 2026-09-18 同步自正式版） ----------
+const LAST_CHAT_FILE = path.join(DATA_DIR, 'last-chat.json');
+function recordLastChat(cid) {
+  const raw = String(cid || '').trim();
+  if (!raw) return;   // 空 id 不记（sanitizeId('') 会回退成 'default'，写进去就成了假会话）
+  try { fs.writeFileSync(LAST_CHAT_FILE, JSON.stringify({ chatId: sanitizeId(raw), ts: Date.now() }), 'utf8'); } catch (e) { /* 忽略 */ }
+}
+function readLastChat() {
+  try { return JSON.parse(fs.readFileSync(LAST_CHAT_FILE, 'utf8')).chatId || ''; } catch (e) { return ''; }
+}
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(TURNS_DIR, { recursive: true });
 
@@ -2526,7 +2536,8 @@ async function h_route_8(req, res, url, p) {
       const file = chatFilePath(id);
       if (req.method === 'GET') {
         if (RW_ASYNC_IO) {
-          if (!(await fs.promises.stat(file).catch(() => null))) { sendJson({ error: 'not found' }, 404); return true; };
+          if (!(await fs.promises.stat(file).catch(() => null))) { sendJson({ error: 'not found' }, 404); return true; }
+          recordLastChat(id);   // 只在确认会话存在后才记：否则删掉会话后每次刷新都会把死 id 记回去
           try {
             const chat = JSON.parse(await fs.promises.readFile(file, 'utf8'));   // 损坏 → 500（与原同步路径一致）
             if (Array.isArray(chat.messages)) chat.messages = cleanMsgs(chat.messages);   // 展示前清理「方块」乱码（不写盘）
@@ -2534,6 +2545,7 @@ async function h_route_8(req, res, url, p) {
           } catch (e) { { sendJson({ error: 'failed to load chat' }, 500); return true; }; }
         }
         if (!fs.existsSync(file)) { sendJson({ error: 'not found' }, 404); return true; };
+        recordLastChat(id);
         try {
           const chat = JSON.parse(fs.readFileSync(file, 'utf8'));
           if (Array.isArray(chat.messages)) chat.messages = cleanMsgs(chat.messages);   // 展示前清理「方块」乱码（不写盘）
@@ -4344,6 +4356,16 @@ async function h_api_fork_turns(req, res, url, p) {
   return true;
 }
 
+// ---------- 最后打开的会话：只读端点（前端在 localStorage 取不到时回落到这里） ----------
+async function h_api_last_chat(req, res, url, p) {
+  if (p === '/api/last-chat' && req.method === 'GET') {
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ chatId: readLastChat() }));
+    return true;
+  }
+  return false;
+}
+
 // 声明式保序路由表：数组顺序 = 匹配优先级（与原 if 链顺序严格一致）
 const ROUTES = [
   { test: (p, req) => (p === '/' || p === '/index.html'), handler: h_route_0 },
@@ -4405,6 +4427,7 @@ const ROUTES = [
   { test: (p, req) => (p === '/api/tts/synthesize' && req.method === 'POST'), handler: h_api_tts_synthesize_53 },
   { test: (p, req) => (/^\/api\/annotations(?:\/([^/]+))?$/).test(p), handler: h_route_54 },
   { test: (p, req) => (p === '/api/fork/turns' && req.method === 'POST'), handler: h_api_fork_turns },
+  { test: (p, req) => (p === '/api/last-chat' && req.method === 'GET'), handler: h_api_last_chat },
   { test: (p, req) => (p === '/api/op/note' && req.method === 'POST'), handler: h_api_op_note_55 },
   { test: (p, req) => (p === '/api/op/inject' && req.method === 'GET'), handler: h_api_op_inject_56 },
   { test: (p, req) => (p === '/api/op/inject' && req.method === 'POST'), handler: h_api_op_inject_57 },

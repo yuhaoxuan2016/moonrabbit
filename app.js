@@ -4464,9 +4464,10 @@ initMsgSearch();
 // 多标签页同步：另一 tab 切换会话/改偏好时本页跟随（避免互相覆盖）
 window.addEventListener('storage', (e) => {
   if (!e.newValue) return;
+  if (App.streaming) return; // 流式生成期间不响应跨标签页切换，防止数据写错会话
   if (e.key === CUR_CHAT_KEY && e.newValue !== App.chatId) {
     fetch('/api/chats/' + e.newValue).then((r) => r.json()).then((c) => {
-      if (c && !c.error && (c.messages || []).length) openChat(e.newValue);
+      if (c && !c.error) openChat(e.newValue);   // 不再跳过空会话
     }).catch(() => {});
   } else if (e.key === PREFS_KEY || e.key === 'mr-custom-skin') {
     location.reload();   // 主题/背景/侧栏偏好：刷新应用
@@ -4475,13 +4476,17 @@ window.addEventListener('storage', (e) => {
 maybeStartTour();
 setInterval(loadStats, 15000);
 
-// 会话恢复：有当前会话则打开，否则新建
+// 会话恢复：有当前会话则打开（包括空会话），否则新建
 (async () => {
-  const saved = localStorage.getItem(CUR_CHAT_KEY);
+  let saved = localStorage.getItem(CUR_CHAT_KEY);
+  // 桌面壳（WebView2）里 localStorage 可能不落盘 → 回落到服务端记住的最后会话
+  if (!saved) {
+    try { saved = (await (await fetch('/api/last-chat')).json()).chatId || ''; } catch (e) { saved = ''; }
+  }
   if (saved) {
     try {
       const c = await (await fetch('/api/chats/' + saved)).json();
-      if (c && !c.error && (c.messages || []).length) { await openChat(saved); return; }
+      if (c && !c.error) { await openChat(saved); return; }   // 修复：不再跳过空会话
     } catch (e) { /* 继续新建 */ }
   }
   await newChat();
