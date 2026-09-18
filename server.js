@@ -4313,6 +4313,37 @@ merged = [{ role: 'user', content: `【历史摘要（${compressCount} 条旧消
   return false;
 }
 
+// ---------- 分支同步：把 fromChatId 的回合记录（seq <= upToSeq）复制到 toChatId ----------
+//   用途：「⤵ 从这条消息分叉」出的新会话应继承分叉点之前的剧情记忆（时间线/物品栏/情绪等都从 turns 读）。
+//   2026-09-18 同步自正式版 h_api_fork_turns（去 RW 化：本版 turns 结构相同，无需改字段）。
+async function h_api_fork_turns(req, res, url, p) {
+  const sendJson = (obj, code = 200) => { res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
+  try {
+    const bodyRaw = await readBody(req);
+    let body = {};
+    try { body = JSON.parse(bodyRaw || '{}'); } catch (e) { body = {}; }
+    // ⚠️ 必须校验「原始入参」而不是 sanitizeId 的返回值：sanitizeId('') 会回退成 'default'，
+    //   只校验返回值会让空 chatId 通过，进而读写到名为 default 的会话（落盘到 default.jsonl）。
+    const rawFrom = String(body.fromChatId || '').trim();
+    const rawTo = String(body.toChatId || '').trim();
+    if (!rawFrom || !rawTo) { sendJson({ ok: false, error: '缺少 fromChatId/toChatId' }, 400); return true; }
+    const from = sanitizeId(rawFrom);
+    const to = sanitizeId(rawTo);
+    // 非法字符被全部剥掉后 sanitizeId 会给出 'default'——那不是用户指定的会话，一律拒
+    if (from !== rawFrom || to !== rawTo) { sendJson({ ok: false, error: '会话 id 含非法字符（仅允许字母/数字/_/-，最长 60）' }, 400); return true; }
+    const upToSeq = Number(body.upToSeq || 0);
+    if (from === to) { sendJson({ ok: false, error: '源会话与目标会话相同，已拒绝（防自我覆盖）' }, 400); return true; }
+    const recs = readTurns(from).filter((r) => (r.seq == null || Number(r.seq) <= upToSeq));
+    if (!recs.length) { sendJson({ ok: true, copied: 0, note: '无回合记录可复制' }); return true; }
+    const lines = recs.map((r) => JSON.stringify(r));
+    writeFileAtomicSync(turnsFile(to), lines.join('\n') + '\n');
+    sendJson({ ok: true, copied: recs.length, note: `已复制 ${recs.length} 条回合记录` });
+  } catch (e) {
+    sendJson({ ok: false, error: e.message }, 500);
+  }
+  return true;
+}
+
 // 声明式保序路由表：数组顺序 = 匹配优先级（与原 if 链顺序严格一致）
 const ROUTES = [
   { test: (p, req) => (p === '/' || p === '/index.html'), handler: h_route_0 },
@@ -4373,6 +4404,7 @@ const ROUTES = [
   { test: (p, req) => (p === '/api/tts/config' && req.method === 'GET'), handler: h_api_tts_config_52 },
   { test: (p, req) => (p === '/api/tts/synthesize' && req.method === 'POST'), handler: h_api_tts_synthesize_53 },
   { test: (p, req) => (/^\/api\/annotations(?:\/([^/]+))?$/).test(p), handler: h_route_54 },
+  { test: (p, req) => (p === '/api/fork/turns' && req.method === 'POST'), handler: h_api_fork_turns },
   { test: (p, req) => (p === '/api/op/note' && req.method === 'POST'), handler: h_api_op_note_55 },
   { test: (p, req) => (p === '/api/op/inject' && req.method === 'GET'), handler: h_api_op_inject_56 },
   { test: (p, req) => (p === '/api/op/inject' && req.method === 'POST'), handler: h_api_op_inject_57 },

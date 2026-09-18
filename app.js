@@ -4530,6 +4530,26 @@ async function forkFromSeq(seq) {
         });
       } catch (e) { /* 不阻断 */ }
     }
+    // ⭐ 同步常驻设定四槽（分支应继承分叉点前的设定；2026-09-18 同步自正式版）
+    try {
+      const oldNote = await (await fetch('/api/op/note', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ chatId: App.chatId, get: true }),
+      })).json();
+      if (oldNote && oldNote.slots && Object.keys(oldNote.slots).length) {
+        await fetch('/api/op/note', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ chatId: id, slots: oldNote.slots }),
+        });
+      }
+    } catch (e) { /* 常驻设定同步失败不阻断分叉 */ }
+    // ⭐ 同步剧情记忆 turns（分叉点之前的回合记录；时间线/物品栏/情绪都由它派生）
+    try {
+      await fetch('/api/fork/turns', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ fromChatId: App.chatId, toChatId: id, upToSeq: seq }),
+      });
+    } catch (e) { /* 剧情记忆同步失败不阻断分叉 */ }
     toast(`✅ 已创建分支（${keep.length} 条）：${forkTitle}`);
     await loadChatList();
     const goNow = await confirmDialog('分支已创建。现在切换过去吗？', { okText: '切换到分支', cancelText: '留在当前' });
