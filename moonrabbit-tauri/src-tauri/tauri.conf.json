@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "cn.moonrabbit.desktop",
   "build": {
-    "frontendDist": "../../rabbit-web-generic",
+    "frontendDist": "../../moonrabbit",
     "devUrl": "http://127.0.0.1:3081"
   },
   "app": {

@@ -1,7 +1,7 @@
 [package]
 name = "moonrabbit"
 version = "0.1.0"
-description = "Moonrabbit 桌面客户端（rabbit-web-generic 封装，零依赖 Node 后端）"
+description = "Moonrabbit 桌面客户端（moonrabbit 封装，零依赖 Node 后端）"
 authors = ["moonrabbit"]
 edition = "2021"
 

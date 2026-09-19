@@ -1,6 +1,6 @@
 // Moonrabbit 桌面客户端（Tauri 2 · 方案A：spawn Node 后端 + WebView 加载 localhost）
 // 启动流程：
-//   1. spawn `node start.js`（cwd = rabbit-web-generic 目录），设 MOONRABBIT_PORT=3081
+//   1. spawn `node start.js`（cwd = moonrabbit 目录），设 MOONRABBIT_PORT=3081
 //   2. 轮询 http://127.0.0.1:3081 直到服务就绪
 //   3. WebView 加载该地址
 //   4. 退出时 kill 子进程
@@ -29,9 +29,9 @@ fn wait_for_port(port: u16, timeout_secs: u64) -> bool {
 fn main() {
     let port: u16 = 3081;
 
-    // moonrabbit 目录（moonrabbit-tauri/src-tauri/.. = moonrabbit-tauri 根；moonrabbit 代码在 ../rabbit-web-generic）
-    // 开发环境：src-tauri 在 moonrabbit-tauri 下，rabbit-web-generic 在 rp2.0 根下
-    let web_dir = std::path::Path::new("../../").join("rabbit-web-generic");
+    // moonrabbit 目录（moonrabbit-tauri/src-tauri/.. = moonrabbit-tauri 根；moonrabbit 代码在 ../moonrabbit）
+    // 开发环境：src-tauri 在 moonrabbit-tauri 下，moonrabbit 在 rp2.0 根下
+    let web_dir = std::path::Path::new("../../").join("moonrabbit");
 
     let mut child: Option<Child> = None;
 
