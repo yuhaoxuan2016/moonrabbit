@@ -246,7 +246,7 @@
       <button id="tm-tab-em" class="tm-tab">情绪</button>
       <button id="tm-tab-auto" class="tm-tab" title="从 <storyevent> 自动提取的角色简介/关系/场景（注入 system）">自动提取</button>
       <button id="tm-tab-loc" class="tm-tab" title="地点详细档案（location_detail），可导出为知识库格式">地点档案</button>
-      <button id="tm-tab-vec" class="tm-tab" title="向量语义检索：按意思找旧剧情（不用记得原话）">🔍 语义</button>
+      <button id="tm-tab-vec" class="tm-tab" title="向量语义检索（未经测试 · 实验性）：按意思找旧剧情（不用记得原话）">🔍 语义（未经测试）</button>
       </div>
       <div id="tm-timeline" class="tm-body">加载中…</div>
       <div class="tm-edit" id="tm-edit-tl">
@@ -321,6 +321,7 @@
       <div class="em-hint">AI 输出 <code>&lt;storyevent&gt;location_detail: 分组| 地点名：详细描写&lt;/storyevent&gt;</code> 自动建档（新地点首次造访时）；此面板为知识库格式预览，可导出 markdown 供其他知识库复用。</div>
       </div>
       <div id="tm-vec" class="tm-body hidden">
+      <div class="untested-note">⚠️ 未经测试 · 实验性：功能按设计实现，但尚未充分测试，行为与接口可能变化。默认关闭，需先在「⚙️ 设置」里配置 embedding 端点与 Key。</div>
       <div id="vec-status" style="padding:8px;background:var(--bg2);border-radius:6px;font-size:12px;margin-bottom:8px">加载中…</div>
       <div style="display:flex;gap:6px;margin-bottom:8px">
       <input id="vec-query" type="text" placeholder="按意思搜索旧剧情（如：那次争执 / 关于远行的争论）" style="flex:1;min-width:0;padding:4px 8px;border-radius:6px;background:var(--bg2);color:var(--text);border:1px solid var(--border);font-size:12px">

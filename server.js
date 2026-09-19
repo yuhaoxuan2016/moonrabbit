@@ -93,8 +93,8 @@ function safeParse(s) {
 
 // ===== 分区：数据访问层（store）=====
 // P-1 同步 I/O 异步化（方案 A）：热路径文件读写经此层走 fs.promises 异步 + 按文件键串行写队列；
-// 冷路径（启动加载/低频配置保存）保持同步不动。RW_ASYNC_IO=0 → 调用点回退原同步路径（应急回退）。
-const RW_ASYNC_IO = process.env.RW_ASYNC_IO !== '0';
+// 冷路径（启动加载/低频配置保存）保持同步不动。MOONRABBIT_ASYNC_IO=0 → 调用点回退原同步路径（应急回退）。
+const ASYNC_IO = process.env.MOONRABBIT_ASYNC_IO !== '0';
 // 读 JSON：失败（不存在/损坏）返回 null，不抛
 async function readJson(file) {
   try {
@@ -178,7 +178,7 @@ function loadApiKey() {
 const API_KEY = loadApiKey();
 State.endpoint.apiKey = State.endpoint.apiKey || API_KEY;
 
-// ---------- system prompt 组装（通用版：世界设定 / 角色卡 / 规则 由用户自填，三段分别注入） ----------
+// ---------- system prompt 组装（世界设定 / 角色卡 / 规则 由用户自填，三段分别注入） ----------
 function buildSystemPrompt(setting, chatId) {
   const parts = [];
   const inj = customInjections(chatId || '');
@@ -309,7 +309,7 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(TURNS_DIR, { recursive: true });
 
 // ---------- 名称替换规则（可选，2026-09-03 脱敏改造） ----------
-// 通用版不预设任何真名表；用户如需「记账时把某些名字替换掉」，自建
+// 不预设任何真名表；用户如需「记账时把某些名字替换掉」，自建
 // data/name-redact.json = { "enabled": true, "map": { "原名": "替换名" } }。
 // 文件不存在 / enabled!==true / map 为空 → 返回 null＝完全不替换。
 // 带 mtime 缓存：记账会对每个字段调用，避免每次读盘。
@@ -348,11 +348,11 @@ function saveBookmarks(chatId, data) {
 
 // ---------- 世界书导入目录解析（2026-09-03 修复 M-2 + 脱敏） ----------
 // 原代码引用未定义的 ROOT（声明数=0）→ list/import-worldbook 必抛 ReferenceError 且以 200 返回。
-// 通用版不应默认指向开源的内部资产路径（脱敏要求），
+// 不应默认指向特定仓库的内部资产路径，
 // 故改为：必须由用户显式传入目录；仅允许绝对路径或相对 WWW 的路径，并禁止穿越到 WWW 之外。
 function resolveWorldbookDir(rawPath) {
   const s = String(rawPath || '').trim();
-  if (!s) { const e = new Error('请填写世界书目录（通用版不预设默认路径）'); e.statusCode = 400; throw e; }
+  if (!s) { const e = new Error('请填写世界书目录'); e.statusCode = 400; throw e; }
   const abs = path.isAbsolute(s) ? path.resolve(s) : path.resolve(WWW, s);
   // 允许绝对路径（用户自有资料库），但相对路径不得穿越出 WWW
   if (!path.isAbsolute(s)) {
@@ -507,7 +507,7 @@ function scanLorebook(messages, userInput, maxContext) {
 // ---------- 世界书（多本 · 按会话作用域） ----------
 // 与上方「设定触发器」并存：世界书是更结构化的一套（多本／每本一文件／可按会话启用或停用／书级总开关）。
 // 注入时两者合并为一条扫描链——设定触发器的扁平条目作为最前面的「全局」层入池，再叠 scope=global 的书，
-// 再叠本会话启用的书。通用版不预置任何书：data/worldbooks/ 为空（或不存在）时本段完全不产生注入。
+// 再叠本会话启用的书。本版不预置任何书：data/worldbooks/ 为空（或不存在）时本段完全不产生注入。
 const WORLDBOOKS_DIR = path.join(DATA_DIR, 'worldbooks');
 State.worldbooks = {};   // {bookId: {book, settings, entries}}
 function loadWorldbooks() {
@@ -651,7 +651,7 @@ function recordPrompt(chatId, system, historyCount) {
   State.lastPrompt = { chatId: sanitizeId(chatId), ts: new Date().toISOString(), system, historyCount: historyCount || 0, tools: toolsEnabled(chatId) };
   const file = path.join(PROMPT_DIR, `${State.lastPrompt.chatId}.jsonl`);
   const line = JSON.stringify({ ts: State.lastPrompt.ts, historyCount: State.lastPrompt.historyCount, tools: State.lastPrompt.tools, system });
-  if (RW_ASYNC_IO) {
+  if (ASYNC_IO) {
     return writeQueued(file, async () => {
       try {
         await appendLine(file, line + '\n');
@@ -670,7 +670,7 @@ function recordPrompt(chatId, system, historyCount) {
 function sanitizeId(id) { return String(id || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 60) || 'default'; }
 // ---------- 上游端点校验（2026-09-03 安全修复 C-2：防 SSRF + API Key 外发） ----------
 // 背景：baseURL 原本只 trim，任意地址都会被「带着 Key 探测 + 落盘」→ 内网探测与凭证外泄。
-// 策略：仅允许 http/https；拒绝本机/内网/云元数据地址。通用版无本地检索服务，故不设本地白名单。
+// 策略：仅允许 http/https；拒绝本机/内网/云元数据地址。本版无本地检索服务，故不设本地白名单。
 function assertSafeEndpoint(raw) {
   const s = String(raw || '').trim();
   let u;
@@ -1030,7 +1030,7 @@ function parseTurnTags(content) {
   while ((m = upRe.exec(content))) rec.updates.push({ entry: m[1].trim(), content: m[2].trim() });
   // 名称替换规则（2026-09-03 脱敏改造）：
   // 原为硬编码的真名替换表，会把用户角色卡里的特定词**静默改写**成指定别名
-  // ——通用版用户完全不知情、也无法关闭，属于篡改用户数据（E-13 脱敏：去内部口径与真名示例）。
+  // ——用户完全不知情、也无法关闭，属于篡改用户数据。
   // 改为：可选配置 data/name-redact.json = { "enabled": true, "map": { "原名": "替换名" } }，
   // 默认不存在即**完全不替换**（保持用户数据原样）。
   const sanitizeSecret = (s) => {
@@ -1077,7 +1077,7 @@ async function appendTurnRecord(content, chatId, seq) {
     rec.chatId = sanitizeId(chatId);
     if (seq) rec.seq = seq;   // 关联消息序号（重roll/删除时按 seq 清理）
     const line = JSON.stringify(rec) + '\n';
-    if (RW_ASYNC_IO) { await writeQueued(turnsFile(chatId), () => appendLine(turnsFile(chatId), line)); return; }
+    if (ASYNC_IO) { await writeQueued(turnsFile(chatId), () => appendLine(turnsFile(chatId), line)); return; }
     fs.appendFileSync(turnsFile(chatId), line, 'utf8');
   } catch (e) { console.error('[turn-record] 失败:', e.message); }
 }
@@ -1086,7 +1086,7 @@ async function appendTurnRecord(content, chatId, seq) {
 // 只删带 seq 的记录（手动补记/操作记录无 seq，不受影响）
 async function truncateTurnsBySeq(chatId, seq, mode) {
   const file = turnsFile(chatId);
-  if (RW_ASYNC_IO) {
+  if (ASYNC_IO) {
     return writeQueued(file, async () => {
       if (!(await fs.promises.stat(file).catch(() => null))) return 0;
       const lines = (await fs.promises.readFile(file, 'utf8')).split('\n').filter(Boolean);
@@ -1748,7 +1748,7 @@ function bucket(model) {
   return stats.byModel[model];
 }
 function saveStats() {
-  if (RW_ASYNC_IO) { return writeQueued(STATS_FILE, () => writeJson(STATS_FILE, stats)); }
+  if (ASYNC_IO) { return writeQueued(STATS_FILE, () => writeJson(STATS_FILE, stats)); }
   try { writeFileAtomicSync(STATS_FILE, JSON.stringify(stats), 'utf8'); } catch (e) { console.error('保存统计数据失败:', e.message); }
 }
 function summarize(b) {
@@ -1807,7 +1807,7 @@ function saveOpState() {
         console.error('[op.json] 警告：盘上有 ' + diskNotes + ' 个会话速记但内存为空——已留档 .preoverwrite_*，本次仍按内存写盘');
       }
     }
-    if (RW_ASYNC_IO) { return writeQueued(OP_FILE, () => writeJson(OP_FILE, State.opState)); }
+    if (ASYNC_IO) { return writeQueued(OP_FILE, () => writeJson(OP_FILE, State.opState)); }
     writeFileAtomicSync(OP_FILE, snapshot, 'utf8');
   } catch (e) { console.error('保存操作状态失败:', e.message); }
 }
@@ -1863,7 +1863,7 @@ async function appendOpRecord(chatId, entry, content) {
     rec.ts = new Date().toISOString();
     rec.chatId = sanitizeId(chatId);
     const line = JSON.stringify(rec) + '\n';
-    if (RW_ASYNC_IO) { await writeQueued(turnsFile(chatId), () => appendLine(turnsFile(chatId), line)); return; }
+    if (ASYNC_IO) { await writeQueued(turnsFile(chatId), () => appendLine(turnsFile(chatId), line)); return; }
     fs.appendFileSync(turnsFile(chatId), line, 'utf8');
   } catch (e) { console.error('[op-record] 失败:', e.message); }
 }
@@ -1879,7 +1879,7 @@ async function appendItemRecord(chatId, action, name, holder) {
     if (action === 'gain') rec.items_gain.push({ name, holder: holder || '' });
     else rec.items_loss.push(name);
     const line = JSON.stringify(rec) + '\n';
-    if (RW_ASYNC_IO) { await writeQueued(turnsFile(chatId), () => appendLine(turnsFile(chatId), line)); return; }
+    if (ASYNC_IO) { await writeQueued(turnsFile(chatId), () => appendLine(turnsFile(chatId), line)); return; }
     fs.appendFileSync(turnsFile(chatId), line, 'utf8');
   } catch (e) { console.error('[item-record] 失败:', e.message); }
 }
@@ -1914,7 +1914,7 @@ async function appendManualTurn(chatId, fields) {
     rec.ts = new Date().toISOString();
     rec.chatId = sanitizeId(chatId);
     const line = JSON.stringify(rec) + '\n';
-    if (RW_ASYNC_IO) { await writeQueued(turnsFile(chatId), () => appendLine(turnsFile(chatId), line)); return rec; }
+    if (ASYNC_IO) { await writeQueued(turnsFile(chatId), () => appendLine(turnsFile(chatId), line)); return rec; }
     fs.appendFileSync(turnsFile(chatId), line, 'utf8');
     return rec;
   } catch (e) { console.error('[manual-turn] 失败:', e.message); return null; }
@@ -1945,7 +1945,7 @@ async function updateTurnRecord(chatId, id, fields) {
     if (!updated) return null;
     return { out, updated };
   };
-  if (RW_ASYNC_IO) {
+  if (ASYNC_IO) {
     return writeQueued(file, async () => {
       if (!(await fs.promises.stat(file).catch(() => null))) return null;
       const lines = (await fs.promises.readFile(file, 'utf8')).split('\n').filter(Boolean);
@@ -1973,7 +1973,7 @@ async function insertTurnRecord(chatId, afterId, fields) {
   rec.ts = new Date().toISOString();
   rec.chatId = sanitizeId(chatId);
   const line = JSON.stringify(rec);
-  if (RW_ASYNC_IO) {
+  if (ASYNC_IO) {
     return writeQueued(file, async () => {
       const stat = await fs.promises.stat(file).catch(() => null);
       if (!afterId || !stat) { await appendLine(file, line + '\n'); return rec; }
@@ -2003,7 +2003,7 @@ async function insertTurnRecord(chatId, afterId, fields) {
 // 删除单条回合记录（按 id 重写 jsonl）
 async function deleteTurnRecord(chatId, id) {
   const file = turnsFile(chatId);
-  if (RW_ASYNC_IO) {
+  if (ASYNC_IO) {
     return writeQueued(file, async () => {
       if (!(await fs.promises.stat(file).catch(() => null))) return false;
       const lines = (await fs.promises.readFile(file, 'utf8')).split('\n').filter(Boolean);
@@ -2477,7 +2477,7 @@ function handleHistorySearch(url, res) {
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.svg': 'image/svg+xml' };
 function sendFile(res, file, type) {
   const mime = type || MIME[path.extname(file)] || 'application/octet-stream';
-  if (RW_ASYNC_IO) {
+  if (ASYNC_IO) {
     // 流式发送：大文件不再整块读入内存，事件循环不被静态资源突发读取阻塞
     fs.stat(file, (err, st) => {
       if (err || !st.isFile()) {
@@ -2759,7 +2759,7 @@ async function h_route_8(req, res, url, p) {
           const safeChatId = sanitizeId(chatId);
           if (safeChatId !== String(chatId)) { sendJson({ error: 'invalid chatId' }, 400); return true; };
           const file = chatFilePath(safeChatId);
-          if (RW_ASYNC_IO) {
+          if (ASYNC_IO) {
             if (!(await fs.promises.stat(file).catch(() => null))) { sendJson({ error: 'chat not found' }, 404); return true; };
             await writeQueued(file, async () => {
               const chat = JSON.parse(await fs.promises.readFile(file, 'utf8'));   // 损坏 → 抛出 → 400（与原同步路径一致）
@@ -2782,7 +2782,7 @@ async function h_route_8(req, res, url, p) {
         if (req.method === 'GET') {
           const urlObj = new URL(req.url, 'http://localhost');
           const showArchived = urlObj.searchParams.get('archived') === 'true';
-          if (RW_ASYNC_IO) {
+          if (ASYNC_IO) {
             // 元数据缓存（文件签名未变不重新 parse）；排序在过滤前完成，语义与 readChats 一致
             const metas = await loadChatMetas();
             { sendJson({ chats: metas.filter((c) => showArchived ? c.hidden : !c.hidden) }); return true; };
@@ -2798,14 +2798,14 @@ async function h_route_8(req, res, url, p) {
         if (req.method === 'POST') {
           const cid = Date.now() + '-' + Math.random().toString(36).slice(2, 7);
           const chat = { id: cid, title: '新对话', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), messages: [] };
-          if (RW_ASYNC_IO) await writeQueued(chatFilePath(cid), () => writeJson(chatFilePath(cid), chat));
+          if (ASYNC_IO) await writeQueued(chatFilePath(cid), () => writeJson(chatFilePath(cid), chat));
           else writeFileAtomicSync(chatFilePath(cid), JSON.stringify(chat), 'utf8');
           { sendJson({ id: cid }); return true; };
         }
       }
       const file = chatFilePath(id);
       if (req.method === 'GET') {
-        if (RW_ASYNC_IO) {
+        if (ASYNC_IO) {
           if (!(await fs.promises.stat(file).catch(() => null))) { sendJson({ error: 'not found' }, 404); return true; }
           recordLastChat(id);   // 只在确认会话存在后才记：否则删掉会话后每次刷新都会把死 id 记回去
           try {
@@ -2827,7 +2827,7 @@ async function h_route_8(req, res, url, p) {
         try {
           const { title, messages, pinned, hidden, versions, chatProfile } = JSON.parse(body);
           // 读-改-写整体进写队列：与并发保存（前端自动保存/其他页签）串行，消除交错写
-          if (RW_ASYNC_IO) {
+          if (ASYNC_IO) {
             await writeQueued(file, async () => {
               let chat;
               if (await fs.promises.stat(file).catch(() => null)) chat = JSON.parse(await fs.promises.readFile(file, 'utf8'));   // 损坏 → 抛出 → 400
@@ -2861,7 +2861,7 @@ async function h_route_8(req, res, url, p) {
         } catch (e) { { sendJson({ error: String(e) }, 400); return true; }; }
       }
       if (req.method === 'DELETE') {
-        if (RW_ASYNC_IO) {
+        if (ASYNC_IO) {
           await writeQueued(file, () => fs.promises.unlink(file).catch(() => {}));   // 与同文件写串行
           await writeQueued(turnsFile(id), () => fs.promises.unlink(turnsFile(id)).catch(() => {}));
           { sendJson({ ok: true }); return true; };
@@ -4045,7 +4045,7 @@ async function h_api_tts_synthesize_53(req, res, url, p) {
                 if (charConfig['参考音频']) {
                   // 2026-09-03 修复 M-3：原引用未定义的 CHARACTERS_DIR（声明数=0）→ 必抛
                   // ReferenceError 被下方 catch 吞掉，角色音色克隆永久静默失效。
-                  // 通用版无内置角色目录，参考音频与 character-voices.json 同放 data/。
+                  // 无内置角色目录，参考音频与 character-voices.json 同放 data/。
                   const refPath = path.join(DATA_DIR, '参考音频', charConfig['参考音频']);
                   if (fs.existsSync(refPath)) {
                     characterRefAudio = { mime: 'audio/mpeg', data: fs.readFileSync(refPath).toString('base64') };

@@ -537,7 +537,7 @@ footer textarea {
 footer textarea:focus { border-color: var(--accent); }
 #send { padding: 0 28px; font-size: 15px; }
 
-/* 首字徽章头像（通用版无立绘） */
+/* 首字徽章头像（无立绘时） */
 .avatar-badge {
   width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
   color: #fff; font-size: 18px; font-weight: 700; border-radius: 50%; text-shadow: 0 1px 3px rgba(0,0,0,0.4);
@@ -913,12 +913,12 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 /* G-B4：弹窗/列表小按钮底样式 */
 .btn-sm { background: var(--card); border: 1px solid var(--border); color: var(--text); border-radius: var(--r-md); font-size: var(--fs-sm); font-weight: 600; cursor: pointer; transition: border-color .15s, color .15s; line-height: 1.4; }
 .btn-sm:hover { border-color: var(--accent); color: var(--accent); }
-/* ⚠️ 顺序守卫：.sb-panel 的 display:flex 必须能让 .hidden 覆盖（通用版面板显隐走 .hidden 类） */
+/* ⚠️ 顺序守卫：.sb-panel 的 display:flex 必须能让 .hidden 覆盖（面板显隐走 .hidden 类） */
 .sb-panel.hidden { display: none; }
 
 /* ── 群聊模式（未经测试 · 实验性） ────────────────────────── */
 .group-body { font-size: 12px; }
-.group-untested { font-size: 11px; line-height: 1.6; color: #d8a657; background: rgba(216,166,87,.12);
+.group-untested, .untested-note { font-size: 11px; line-height: 1.6; color: #d8a657; background: rgba(216,166,87,.12);
   border: 1px solid rgba(216,166,87,.35); border-radius: 5px; padding: 5px 7px; margin-bottom: 8px; }
 .group-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; cursor: pointer; }
 .group-hint { color: var(--muted, #888); font-size: 11px; line-height: 1.6; margin-bottom: 8px; }

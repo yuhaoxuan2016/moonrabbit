@@ -253,7 +253,7 @@ App.msgSeq = 0;            // 消息序号（重roll/删除定位用）
 App.streaming = false;
 
 // ---------- 渲染 ----------
-// 无立绘：一律首字徽章（通用版无任何角色图片素材）
+// 无立绘：一律首字徽章（本版无任何角色图片素材）
 function avatarHtml(name) {
   const ch = String(name || '?').slice(0, 1).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   /* ⭐ S5（2026-09-06）：有自定义头像的角色显示图片（启动/上传后由 loadAvatarCache 刷新映射） */
@@ -834,7 +834,7 @@ function pushVersionToChain(anchorSeq, content) {
 }
 
 // ===== 分段渲染（2026-09-02 FN-1：长对话不再全量渲染）=====
-// 通用版适配：无摘要压缩/旁注/书签/时间轴机制，故移除相应调用（只保留本函数核心）。
+// 适配：无摘要压缩/旁注/书签/时间轴机制，故移除相应调用（只保留本函数核心）。
 const RENDER_BATCH = 80;
 
 function renderHistorySlice(count) {
@@ -861,7 +861,7 @@ function renderHistorySlice(count) {
       const m = App.history[i];
       if (!m) continue;
       if (hiddenSet.has(m.seq)) { skippedCount++; continue; }
-      if (skippedCount > 0) { skippedCount = 0; }   // 通用版无摘要折叠，仅重置计数
+      if (skippedCount > 0) { skippedCount = 0; }   // 无摘要折叠，仅重置计数
       if (m.role === 'user') renderUser(m.content, m.seq);
       else if (m.role === 'assistant') {
         if (m.thinking && App.prefs.showThinking !== false) renderThinking(m.thinking);
@@ -1404,7 +1404,7 @@ async function newChat() {
     els.messages.innerHTML = '';
     App.history = [];
     for (const k in rerollVersions) delete rerollVersions[k];   // F-2 修复：新建会话清空版本缓存（防旧链残留跨会话注入）
-    // 通用版无内置世界书目录，firstMsg 模板加载不适用（已移除 /api/file 调用）
+    // 无内置世界书目录，firstMsg 模板加载不适用（已移除 /api/file 调用）
     renderAssistant('（新对话开始。在右侧「世界设定」里填写你的世界观/角色/规则（可选），然后直接开始对话。多角色场景按「角色名：台词」分段显示头像。）');
     loadChatList();
     loadChatProfileManage();   // 配置档按会话刷新（新会话标记跟随）
@@ -2497,7 +2497,7 @@ if (moreToolsBtn && moreToolsMenu) {
   });
 }
 
-// 工具桥：自由勾选工具（通用版 = 仅联网）
+// 工具桥：自由勾选工具（本版 = 仅联网）
 const toolNames = () => els.toolChips.filter((c) => c.classList.contains('on')).map((c) => c.dataset.tool);
 const setTools = (names) => els.toolChips.forEach((c) => c.classList.toggle('on', names.includes(c.dataset.tool)));
 try { setTools(JSON.parse(localStorage.getItem('mr-op-tools') || '[]')); } catch (e) { setTools([]); }
@@ -3040,7 +3040,7 @@ window.addEventListener('beforeunload', () => {
     }).catch(() => {});
   } catch (e) { /* best effort */ }
 });
-// 全局快捷键：Ctrl+Shift+F 聚焦世界设定（通用版无检索框）
+// 全局快捷键：Ctrl+Shift+F 聚焦世界设定（本版无检索框）
 
 // ===== 快捷键速查面板（2026-09-02 F4）=====
 const SHORTCUT_LIST = [
@@ -3532,7 +3532,7 @@ loadSceneProfiles();
 // ---------- 表情系统管理 UI ----------
 App.expressionsCache = {};
 App.expressionConfigCache = { emotionMap: {}, enableAutoSwitch: true };
-// 通用版不预置角色名（脱敏，2026-09-03）：角色列表完全来自用户已建的表情目录
+// 不预置角色名（脱敏，2026-09-03）：角色列表完全来自用户已建的表情目录
 async function loadExpressions() {
   try {
     const r = await fetch('/api/expressions'); const d = await r.json();
@@ -3541,7 +3541,7 @@ async function loadExpressions() {
     const dropdown = document.getElementById('expr-char-dropdown');
     if (dropdown) {
       // 2026-09-03 脱敏：原为硬编码角色名常量（已按中性规则清理），
-      // 通用版角色完全由用户自定义 → 直接用已有表情目录的角色，无则提示空。
+      // 角色完全由用户自定义 → 直接用已有表情目录的角色，无则提示空。
       const chars = Object.keys(App.expressionsCache);
       dropdown.innerHTML = chars.map(c => `<option value="${safeHtml(c)}">${safeHtml(c)}</option>`).join('') || '<option value="">暂无角色</option>';
       renderExpressionGrid(chars[0] || '');
@@ -3702,7 +3702,7 @@ function editLorebookEntry(id, entry) {
 document.getElementById('lb-add-btn')?.addEventListener('click', () => editLorebookEntry(null));
 // 从世界书导入设定触发器（支持自定义路径）
 document.getElementById('lb-wb-btn')?.addEventListener('click', async () => {
-  const defaultPath = '';   // G-F1 脱敏（2026-09-05）：不再预填内部仓库路径（通用版无此目录，按预填导入必报错）
+  const defaultPath = '';   // G-F1 脱敏（2026-09-05）：不再预填内部仓库路径（本版无此目录，按预填导入必报错）
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `<div class="modal-box" style="max-width:520px;max-height:85vh;display:flex;flex-direction:column">
@@ -4647,7 +4647,7 @@ document.querySelectorAll('#sidebar .card.collapsible .card-title').forEach(titl
     return t ? t.textContent.replace(/[\u25be\u25b4]/g, '').trim().toLowerCase() : '';
   };
   const allPanels = () => [...sidebar.querySelectorAll('.sb-panel')];
-  const panelShown = (p) => !p.classList.contains('hidden');   // 通用版面板显隐走 .hidden 类
+  const panelShown = (p) => !p.classList.contains('hidden');   // 面板显隐走 .hidden 类
 
   function resetFilter() {
     sidebar.querySelectorAll('.card').forEach(c => c.classList.remove('search-hit', 'search-miss'));
