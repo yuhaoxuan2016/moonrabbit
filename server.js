@@ -2758,9 +2758,9 @@ function pngCreateWithTextChunk(imageBuffer, keyword, text) {
 
 // 场景插图：AI 图片生成（OpenAI 兼容 /images/generations；端点可配）
   // Kolors 免费；Z-Image/Qwen-Image/ERNIE 等按张计费（¥0.10-0.30/张，共用同一 key）
-  const SILICON_BASE = 'https://api.siliconflow.cn/v1';
+  // 生图端点/模型/Key 一律由用户在「🎨 插图 → 配置」里填（本版不内置任何厂商端点，也不读本机任何配置文件）
 
-const SILICON_IMG_MODELS = {
+const IMG_MODEL_PRESETS = {   // 仅作“模型 id 填什么”的示例提示；实际用哪个由用户填
     kolors:  { id: 'Kwai-Kolors/Kolors',               label: 'Kolors（免费）',       price: '免费' },
     zimage:  { id: 'Tongyi-MAI/Z-Image',               label: 'Z-Image（高质量）',     price: '¥0.30/张' },
     zturb:   { id: 'Tongyi-MAI/Z-Image-Turbo',         label: 'Z-Image-Turbo（快速）', price: '¥0.10/张' },
@@ -2768,51 +2768,18 @@ const SILICON_IMG_MODELS = {
     ernie:   { id: 'baidu/ERNIE-Image-Turbo',          label: 'ERNIE-Image（快速）',   price: '¥0.11/张' }
   };
 
-function getSiliconImgKey() {
-    try {
-      const cfgPath = path.join(process.env.USERPROFILE || process.env.HOME || '', '.workbuddy', 'models.json');
-      if (!fs.existsSync(cfgPath)) return '';
-      const arr = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
-      const entry = (Array.isArray(arr) ? arr : []).find((m) => /siliconflow/i.test((m.url || '') + (m.id || '') + (m.name || '')));
-      return (entry && entry.apiKey) || '';
-    } catch (e) { return ''; }
-  }
-
 // 提示词优化：把中文场景描述润色成高质量英文生图提示词。
   // 独立用本机模型配置里可用的对话端点（生图同款 key 可通用于 chat），不依赖主端点(可能失效的 key)
-  function getSiliconChatCfg() {
-    try {
-      const cfgPath = path.join(process.env.USERPROFILE || process.env.HOME || '', '.workbuddy', 'models.json');
-      if (!fs.existsSync(cfgPath)) return null;
-      const arr = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
-      const entry = (Array.isArray(arr) ? arr : []).find((m) => /siliconflow/i.test((m.url || '') + (m.id || '') + (m.name || '')));
-      if (!entry || !entry.apiKey) return null;
-      const url = (entry.url || '').replace(/\/+$/, '');
-      const chatUrl = /\/chat\/completions$/.test(url) ? url : (url.includes('/chat/completions') ? url : `${url}/chat/completions`);
-      return { chatUrl, key: entry.apiKey, model: entry.id || entry.name || 'deepseek-ai/DeepSeek-V4-Flash' };
-    } catch (e) { return null; }
-  }
 
 // 语音朗读：TTS 配置和合成
   // TTS（OpenAI 兼容 chat/completions + audio；引擎键名沿用 mimo，可换成任意兼容端点）
   const MIMO_TTS_MODEL = 'mimo-v2.5-tts';
 
-const MIMO_TTS_BASE = 'https://token-plan-cn.xiaomimimo.com/v1';
-
 const MIMO_TTS_VOICES = ['mimo_default', 'default_zh', 'default_en', 'Mia', 'Chloe', 'Milo', 'Dean'];
 
-function getMimoTtsKey() {
-    // 复用本机模型配置里匹配该引擎的 key（找不到就回落到界面里手填）
-    try {
-      const cfgPath = path.join(process.env.USERPROFILE || process.env.HOME || '', '.workbuddy', 'models.json');
-      if (!fs.existsSync(cfgPath)) return '';
-      const arr = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
-      const entry = (Array.isArray(arr) ? arr : []).find((m) => /mimo/i.test(m.id || m.name || '') && /^tp-/.test(m.apiKey || ''));
-      return (entry && entry.apiKey) || '';
-    } catch (e) { return ''; }
-  }
 
-const defaultTtsConfig = () => ({ engine: 'mimo', apiKey: '', voice: 'mimo_default', rate: '1.0', baseURL: MIMO_TTS_BASE });
+// TTS 端点/Key 一律由用户在「🔊 朗读 → 配置」里填（不内置厂商端点、不读本机任何配置文件）
+const defaultTtsConfig = () => ({ engine: 'mimo', apiKey: '', voice: 'mimo_default', rate: '1.0', baseURL: '', model: MIMO_TTS_MODEL });
 
 async function h_route_0(req, res, url, p) {
   if (p === '/' || p === '/index.html') { sendFile(res, path.join(WWW, 'index.html')); return true; };
@@ -3420,9 +3387,9 @@ const am = p.match(/^\/avatars\/([^/]+)$/);
       if (!imgMatch) { sendJson({ error: '示例图格式不支持（需 base64 data URL）' }, 400); return true; }
       const ext = imgMatch[1] === 'jpeg' ? 'jpg' : imgMatch[1];
       const illustConfigFile = path.join(DATA_DIR, 'illustration-config.json');
-      let config = { engine: 'kolors', apiKey: '', baseURL: SILICON_BASE };
-      try { if (fs.existsSync(illustConfigFile)) config = Object.assign({ engine: 'kolors', apiKey: '', baseURL: SILICON_BASE }, JSON.parse(fs.readFileSync(illustConfigFile, 'utf8'))); } catch (e) {}
-      const key = config.apiKey || getSiliconImgKey();
+      let config = { engine: '', apiKey: '', baseURL: '', model: '', chatModel: '' };
+      try { if (fs.existsSync(illustConfigFile)) config = Object.assign({ engine: '', apiKey: '', baseURL: '', model: '', chatModel: '' }, JSON.parse(fs.readFileSync(illustConfigFile, 'utf8'))); } catch (e) {}
+      const key = config.apiKey || '';
       if (!key) { sendJson({ error: '图片生成功能未配置。请先在设置里填写生图 API Key。', needConfig: true }, 400); return true; }
       // Authorization 头只能放 Latin1 字符：粘进中文/全角括号会让 fetch 直接抛 TypeError（报错看不懂），
       // 所以在入口就拒掉并说清是哪的问题（key 本身没被送到任何远端）。
@@ -3431,10 +3398,10 @@ const am = p.match(/^\/avatars\/([^/]+)$/);
       const appearance = prof && prof.appearance ? String(prof.appearance).slice(0, 300) : '';
       const prompt = '根据这张图片中的人物，生成一张头像（脸部特写为主，白色背景，动漫风格）' +
         (appearance ? '。角色外观特征：' + appearance + '。必须严格保持上述外观（发色/瞳色/发型/服装），不得改变' : '。保持人物外观一致');
-      const baseURL = (config.baseURL || SILICON_BASE).replace(/\/+$/, '');
-      const modelKey = String(config.engine || 'kolors');
-      const modelCfg = SILICON_IMG_MODELS[modelKey] || SILICON_IMG_MODELS.kolors;
-      const model = typeof modelCfg === 'string' ? modelCfg : modelCfg.id;
+      const baseURL = String(config.baseURL || '').replace(/\/+$/, '');
+      if (!baseURL) { sendJson({ error: '图片生成未配置：请填「生图端点（Base URL）」。', needConfig: true }, 501); return true; }
+      const model = String(config.model || (IMG_MODEL_PRESETS[String(config.engine || '')] || {}).id || '').trim();
+      if (!model) { sendJson({ error: '图片生成未配置：请填「模型 id」。', needConfig: true }, 501); return true; }
       const r = await fetch(baseURL + '/images/generations', {
         method: 'POST',
         headers: { 'authorization': 'Bearer ' + key, 'content-type': 'application/json' },
@@ -4083,17 +4050,17 @@ async function h_api_illustration_generate_48(req, res, url, p) {
         const { prompt, style, chatId, sceneryOnly } = JSON.parse(body);
         if (!prompt || !String(prompt).trim()) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '缺少场景描述' })); return true; }; }
         const illustConfigFile = path.join(DATA_DIR, 'illustration-config.json');
-        let config = { engine: 'kolors', apiKey: '', baseURL: SILICON_BASE };
-        try { if (fs.existsSync(illustConfigFile)) config = Object.assign({ engine: 'kolors', apiKey: '', baseURL: SILICON_BASE }, JSON.parse(fs.readFileSync(illustConfigFile, 'utf8'))); } catch (e) {}
-        const key = config.apiKey || getSiliconImgKey();
+        let config = { engine: '', apiKey: '', baseURL: '', model: '', chatModel: '' };
+        try { if (fs.existsSync(illustConfigFile)) config = Object.assign({ engine: '', apiKey: '', baseURL: '', model: '', chatModel: '' }, JSON.parse(fs.readFileSync(illustConfigFile, 'utf8'))); } catch (e) {}
+        const key = config.apiKey || '';
         if (!key) {
           res.writeHead(501, { 'content-type': 'application/json; charset=utf-8' });   // MINOR-1：需配置
           { res.end(JSON.stringify({ error: '图片生成功能未配置。请在设置中填入图片生成 API Key，或确认本机模型配置里有可用端点。', needConfig: true })); return true; };
         }
-        const baseURL = (config.baseURL || SILICON_BASE).replace(/\/+$/, '');
-        const modelKey = String(config.engine || 'kolors');
-        const modelCfg = SILICON_IMG_MODELS[modelKey] || SILICON_IMG_MODELS.kolors;
-        const model = typeof modelCfg === 'string' ? modelCfg : modelCfg.id;
+        const baseURL = String(config.baseURL || '').replace(/\/+$/, '');
+        if (!baseURL) { res.writeHead(501, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '图片生成未配置：请填「生图端点（Base URL）」。', needConfig: true })); return true; }; }
+        const model = String(config.model || (IMG_MODEL_PRESETS[String(config.engine || '')] || {}).id || '').trim();
+        if (!model) { res.writeHead(501, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '图片生成未配置：请填「模型 id」（示例：' + Object.keys(IMG_MODEL_PRESETS).map((k) => IMG_MODEL_PRESETS[k].id).slice(0, 2).join(' / ') + '）。', needConfig: true })); return true; }; }
         const body_s = { model, prompt: String(prompt).trim(), image_size: '1024x1024', batch_size: 1, num_inference_steps: 24, guidance_scale: 7.5 };
         // 纯场景模式：用 negative_prompt 排除人物，让图片只出场景/环境
         if (sceneryOnly) {
@@ -4127,13 +4094,15 @@ async function h_api_illustration_config_49(req, res, url, p) {
   if (p === '/api/illustration/config' && req.method === 'POST') {
       let body = await readBody(req);
       try {
-        const { engine, apiKey, baseURL } = JSON.parse(body);
+        const { engine, apiKey, baseURL, model, chatModel } = JSON.parse(body);
         const illustConfigFile = path.join(DATA_DIR, 'illustration-config.json');
-        let config = { engine: 'kolors', apiKey: '', baseURL: SILICON_BASE };
+        let config = { engine: '', apiKey: '', baseURL: '', model: '', chatModel: '' };
         try { if (fs.existsSync(illustConfigFile)) config = Object.assign(config, JSON.parse(fs.readFileSync(illustConfigFile, 'utf8'))); } catch (e) {}
-        if (engine) config.engine = String(engine).slice(0, 20);
+        if (engine) config.engine = String(engine).slice(0, 60);
         if (apiKey) config.apiKey = String(apiKey).slice(0, 200);
         if (baseURL) config.baseURL = String(baseURL).slice(0, 300);
+        if (model) config.model = String(model).slice(0, 120);
+        if (chatModel) config.chatModel = String(chatModel).slice(0, 120);
         writeFileAtomicSync(illustConfigFile, JSON.stringify(config, null, 2), 'utf8');
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
         { res.end(JSON.stringify({ ok: true, config: { engine: config.engine, configured: !!config.apiKey } })); return true; };
@@ -4148,8 +4117,12 @@ async function h_api_illustration_enhance_50(req, res, url, p) {
       try {
         const { prompt, style } = JSON.parse(body);
         if (!prompt || !String(prompt).trim()) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '缺少场景描述' })); return true; }; }
-        const cfg = getSiliconChatCfg();
-        if (!cfg) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '未能从本机模型配置读取可用的对话端点，无法优化提示词', status: 503 })); return true; }; }
+        let ic = { apiKey: '', baseURL: '', model: '', chatModel: '' };
+        try { const f = path.join(DATA_DIR, 'illustration-config.json'); if (fs.existsSync(f)) ic = Object.assign(ic, JSON.parse(fs.readFileSync(f, 'utf8'))); } catch (e) { /* 未配置 */ }
+        const icBase = String(ic.baseURL || '').replace(/\/+$/, '');
+        if (!icBase || !ic.apiKey) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '未配置生图端点/Key，无法优化提示词（先在「🎨 插图 → 配置」里填）', status: 503 })); return true; }; }
+        const cfg = { chatUrl: /\/chat\/completions$/.test(icBase) ? icBase : icBase + '/chat/completions', key: ic.apiKey, model: String(ic.chatModel || ic.model || '').trim() };
+        if (!cfg.model) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '未配置「模型 id」，无法优化提示词', status: 503 })); return true; }; }
         const styleHint = style ? `（风格：${style}）` : '';
         const sys = '你是专业 AI 绘画提示词工程师。请把用户的中文场景描述改写成一段高质量、可直接用于文生图模型的英文提示词。要求：只输出英文提示词正文，不要任何解释、编号、引号或多余文字；用逗号分隔的关键词短语，包含场景环境、光线、氛围、主体、材质/风格关键词；控制在 6-12 个短语内。';
         const callR = await fetch(cfg.chatUrl, {
@@ -4182,7 +4155,7 @@ async function h_api_tts_config_51(req, res, url, p) {
         if (voice) config.voice = String(voice).slice(0, 50);
         if (rate) config.rate = String(rate).slice(0, 10);
         if (baseURL) config.baseURL = String(baseURL).slice(0, 300);
-        if (model) config.model = String(model).slice(0, 40);
+        if (model) config.model = String(model).slice(0, 60);
         writeFileAtomicSync(ttsConfigFile, JSON.stringify(config, null, 2), 'utf8');
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
         { res.end(JSON.stringify({ ok: true, config: { engine: config.engine, voice: config.voice, rate: config.rate, configured: config.engine !== 'none' } })); return true; };
@@ -4261,10 +4234,15 @@ async function h_api_tts_synthesize_53(req, res, url, p) {
         if (config.engine === 'mimo') {
           // TTS：文本放 assistant 消息，audio 参数指定音色
           // 三个模型 id：mimo-v2.5-tts（内置音色）/ -voicedesign（文字设计声线）/ -voiceclone（参考音频克隆）
-          const mimoKey = config.apiKey || getMimoTtsKey();
+          const mimoKey = config.apiKey || '';
+          const ttsBase = String(config.baseURL || '').replace(/\/+$/, '');
+          if (!ttsBase) {
+            res.writeHead(501, { 'content-type': 'application/json; charset=utf-8' });
+            { res.end(JSON.stringify({ error: 'TTS 未配置：请填「端点（Base URL）」。', needConfig: true })); return true; };
+          }
           if (!mimoKey) {
-            res.writeHead(501, { 'content-type': 'application/json; charset=utf-8' });   // MINOR-1：需配置
-            { res.end(JSON.stringify({ error: '未找到该引擎的 API Key。请在 TTS 设置里填入，或确认本机模型配置里有对应条目。', needConfig: true })); return true; };
+            res.writeHead(501, { 'content-type': 'application/json; charset=utf-8' });
+            { res.end(JSON.stringify({ error: 'TTS 未配置：请填「API Key」。', needConfig: true })); return true; };
           }
           const useModel = String(model || characterModel || config.model || MIMO_TTS_MODEL).slice(0, 40);
           if (!/^mimo-v2\.5-tts/.test(useModel)) {
@@ -4296,7 +4274,7 @@ async function h_api_tts_synthesize_53(req, res, url, p) {
             voiceLabel = character ? `${character}的声音` : '克隆音色';
           }
           // voicedesign：不传 audio.voice（由风格描述生成声线）
-          const base = (config.baseURL || MIMO_TTS_BASE).replace(/\/+$/, '');
+          const base = ttsBase;
           const audioResp = await fetch(base + '/chat/completions', {
             method: 'POST',
             headers: { 'content-type': 'application/json', 'authorization': 'Bearer ' + mimoKey },

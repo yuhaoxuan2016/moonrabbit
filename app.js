@@ -2864,12 +2864,15 @@ function openIllustration(prefillText) {
     } catch (e) { resBox.textContent = '请求失败：' + e.message; }
   };
   overlay.querySelector('#ill-config').onclick = async () => {
-    const engine = prompt('引擎（kolors/schnell/dev）：', 'kolors');
-    if (!engine) return;
-    const apiKey = prompt('API Key（留空则尝试读本机模型配置）：');
-    const baseURL = prompt('Base URL（留空用内置默认端点）：', '');
+    const baseURL = prompt('生图端点 Base URL（你自己的 OpenAI 兼容服务，例：https://<你的服务>/v1）：', '');
+    if (!baseURL) return;
+    const apiKey = prompt('API Key（该端点的 Key，必填）：');
+    if (!apiKey) return;
+    const model = prompt('模型 id（必填。示例：Kwai-Kolors/Kolors、Tongyi-MAI/Z-Image、Qwen/Qwen-Image）：', '');
+    if (!model) return;
+    const chatModel = prompt('提示词优化用的对话模型 id（可留空＝用上面的模型）：', '');
     try {
-      await fetch('/api/illustration/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ engine, apiKey, baseURL }) });
+      await fetch('/api/illustration/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ baseURL, apiKey, model, chatModel }) });
       toast('✅ 配置已保存');
     } catch (e) { toast('保存失败：' + e.message); }
   };
@@ -2978,13 +2981,15 @@ function openTts(text) {
     } catch (e) { resBox.textContent = '请求失败：' + e.message; }
   };
   overlay.querySelector('#tts-config').onclick = async () => {
-    const engine = prompt('TTS 引擎（mimo / edge / openai）：', 'mimo');
-    if (!engine) return;
-    const apiKey = prompt('API Key（可留空，将尝试读本机模型配置）：', '');
-    const voice = prompt('语音（内置音色 id：mimo_default / default_zh / default_en / Mia / Chloe / Milo / Dean）：', 'mimo_default');
+    const baseURL = prompt('TTS 端点 Base URL（你自己的 OpenAI 兼容服务，例：https://<你的服务>/v1）：', '');
+    if (!baseURL) return;
+    const apiKey = prompt('API Key（该端点的 Key，必填）：');
+    if (!apiKey) return;
+    const model = prompt('模型 id（必填，例：mimo-v2.5-tts / -voicedesign / -voiceclone，或你服务商提供的语音模型）：', 'mimo-v2.5-tts');
+    const voice = prompt('音色 id（由你的服务商定义，例：mimo_default / Mia）：', 'mimo_default');
     const rate = prompt('语速（0.5-2.0）：', '1.0');
     try {
-      await fetch('/api/tts/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ engine, apiKey, voice, rate }) });
+      await fetch('/api/tts/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ baseURL, apiKey, model, voice, rate }) });
       toast('✅ TTS 配置已保存');
     } catch (e) { toast('保存失败：' + e.message); }
   };
