@@ -99,5 +99,5 @@ data/vec-config.json          语义检索配置（含 embedding 端点/模型/K
 
 ## 相关项目
 
-- 🤖 本项目的开发、测试与文档由 **AI 多智能体协作**完成——运行在 **DeepSeek Harness**（[deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)，"一切皆插件"的开源 Agent 框架）中的 AI 代理，与 **WorkBuddy**、**CodeBuddy**（腾讯）、**zcode** 等 AI 编程助手分工协作（功能开发 / 全量代码审查 / 回归测试 / 文档撰写），人类监督把关
+- 🤖 本项目的开发、测试与文档由 **AI 多智能体协作**完成——运行在 **DeepSeek Harness**（[deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)，"一切皆插件"的开源 Agent 框架）中的 AI 代理，与 **WorkBuddy**、**Qoder CN** 等 AI 编程助手分工协作（功能开发 / 全量代码审查 / 回归测试 / 文档撰写），人类监督把关
 - 界面接入任意 OpenAI / Anthropic 兼容端点，包括 DeepSeek API
