@@ -308,7 +308,7 @@ function readLastChat() {
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(TURNS_DIR, { recursive: true });
 
-// ---------- 名称替换规则（可选，2026-09-03 脱敏改造） ----------
+// ---------- 名称替换规则（可选，2026-09-03） ----------
 // 不预设任何真名表；用户如需「记账时把某些名字替换掉」，自建
 // data/name-redact.json = { "enabled": true, "map": { "原名": "替换名" } }。
 // 文件不存在 / enabled!==true / map 为空 → 返回 null＝完全不替换。
@@ -323,7 +323,7 @@ function loadNameRedact() {
     const cfg = JSON.parse(fs.readFileSync(NAME_REDACT_FILE, 'utf8'));
     let rules = null;
     if (cfg && cfg.enabled === true && cfg.map && typeof cfg.map === 'object') {
-      // 长键优先，避免 '原名A' 先替换掉 '原名A·全名' 的前缀（E-13 脱敏：示例中性化）
+      // 长键优先，避免 '原名A' 先替换掉 '原名A·全名' 的前缀
       const list = Object.entries(cfg.map)
         .filter(([k, v]) => k && typeof v === 'string')
         .sort((a, b) => b[0].length - a[0].length);
@@ -346,7 +346,7 @@ function saveBookmarks(chatId, data) {
   try { writeFileAtomicSync(path.join(BOOKMARKS_DIR, `${chatId}.json`), JSON.stringify(data, null, 2), 'utf8'); } catch (e) { console.error('保存书签失败:', chatId, e.message); }
 }
 
-// ---------- 世界书导入目录解析（2026-09-03 修复 M-2 + 脱敏） ----------
+// ---------- 世界书导入目录解析（2026-09-03 修复 M-2） ----------
 // 原代码引用未定义的 ROOT（声明数=0）→ list/import-worldbook 必抛 ReferenceError 且以 200 返回。
 // 不应默认指向特定仓库的内部资产路径，
 // 故改为：必须由用户显式传入目录；仅允许绝对路径或相对 WWW 的路径，并禁止穿越到 WWW 之外。
@@ -1028,7 +1028,7 @@ function parseTurnTags(content) {
   }
   const upRe = /【更新】([^：:]+)[：:]\s*(.+)/g;
   while ((m = upRe.exec(content))) rec.updates.push({ entry: m[1].trim(), content: m[2].trim() });
-  // 名称替换规则（2026-09-03 脱敏改造）：
+  // 名称替换规则（2026-09-03）：
   // 原为硬编码的真名替换表，会把用户角色卡里的特定词**静默改写**成指定别名
   // ——用户完全不知情、也无法关闭，属于篡改用户数据。
   // 改为：可选配置 data/name-redact.json = { "enabled": true, "map": { "原名": "替换名" } }，
@@ -1142,7 +1142,7 @@ function saveStoryMemoryConfig() {
 loadStoryMemoryConfig();
 
 // ---------- 向量语义检索配置（批E · 2026-09-18）----------
-// 移植时的改造（脱敏 + 可移植）：embedding 端点不写死，baseURL/model 均可在
+// 本版实现（保持可移植）：embedding 端点不写死，baseURL/model 均可在
 // 「🔍 语义」面板配置（便于接任意 OpenAI 兼容 embedding 服务或本地端点）；
 // autoInject 默认关闭，未配置 Key 时所有路径明确降级。
 State.vecConfig = {
@@ -3209,10 +3209,10 @@ const am = p.match(/^\/avatars\/([^/]+)$/);
     sendJson({ ok: true, files });
     return true;
   }
-  // 图生图产头像（2026-09-18 移植，脱敏）：
+  // 图生图产头像（2026-09-18）：
   //   引擎/端点/模型一律跟随已有的场景插图配置（illustration-config.json），不新增配置口；
-  //   移植时改了三处——①不搬 Ark 分支（本版的生图层也没有 Ark）
-  //   ②外观锚不读真值源文件，改读本版的本地 NPC 档案 appearance（无档案则退回通用兜底句）
+  //   实现上刻意避开了三处——①不做 Ark 分支（本版的生图层也没有 Ark）
+  //   ②外观锚不读内置设定文件，改读本版的本地 NPC 档案 appearance（无档案则退回兜底句）
   //   ③必须显式传示例图（本版没有「角色立绘库」可回落）。
   if (p === '/api/avatar/generate' && req.method === 'POST') {
     let body = await readBody(req);
@@ -4001,7 +4001,7 @@ async function h_api_tts_config_52(req, res, url, p) {
       const ttsConfigFile = path.join(DATA_DIR, 'tts-config.json');
       let config = defaultTtsConfig();
       try { if (fs.existsSync(ttsConfigFile)) config = JSON.parse(fs.readFileSync(ttsConfigFile, 'utf8')); } catch (e) {}
-      // 2026-09-03 脱敏：角色音色下拉原为硬编码角色名，改为回传用户自建映射的键
+      // 2026-09-03：角色音色下拉原为硬编码角色名，改为回传用户自建映射的键
       let characters = [];
       try {
         const cvf = path.join(DATA_DIR, 'character-voices.json');
@@ -4923,7 +4923,7 @@ merged = [{ role: 'user', content: `【历史摘要（${compressCount} 条旧消
 
 // ---------- 分支同步：把 fromChatId 的回合记录（seq <= upToSeq）复制到 toChatId ----------
 //   用途：「⤵ 从这条消息分叉」出的新会话应继承分叉点之前的剧情记忆（时间线/物品栏/情绪等都从 turns 读）。
-//   2026-09-18  h_api_fork_turns（脱敏：本版 turns 结构相同，无需改字段）。
+//   2026-09-18  h_api_fork_turns（本版 turns 结构相同，无需改字段）。
 async function h_api_fork_turns(req, res, url, p) {
   const sendJson = (obj, code = 200) => { res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
   try {

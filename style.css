@@ -944,7 +944,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .gat-item { padding: 5px 10px; font-size: 12px; cursor: pointer; }
 .gat-item.active, .gat-item:hover { background: rgba(90,140,255,.25); }
 
-/* ---------- 命令面板（Ctrl+K / ⌘K）— 2026-09-04 设计，2026-09-19 移植 ---------- */
+/* ---------- 命令面板（Ctrl+K / ⌘K） ---------- */
 .cmdk {
   position: fixed; inset: 0; background: var(--scrim); backdrop-filter: blur(6px);
   z-index: 120; display: none; align-items: flex-start; justify-content: center; padding-top: 12vh;

@@ -198,7 +198,7 @@ const els = {
 const App = {};  // 原 let 全局变量统一收口，详见 AGENTS.md 变更日志
 App.pendingContext = '';   // 手动附加资料 → 下一条消息附带（不进对话历史）
 
-// 通用模式：不注入任何预设真值源，世界设定由用户自填
+// 通用模式：不注入任何内置设定，世界设定由用户自填
 const GENERIC = true;
 const WORLD_KEY = 'genericWorldSetting';
 const CHARS_KEY = 'genericCharsSetting';
@@ -2905,7 +2905,7 @@ function openTts(text) {
     </div>
   </div>`;
   document.body.appendChild(overlay);
-  // 2026-09-03 脱敏：角色音色下拉改为动态填充（来自 data/character-voices.json 的映射键），
+  // 2026-09-03：角色音色下拉改为动态填充（来自 data/character-voices.json 的映射键），
   // 不再硬编码角色名。拉取失败/无配置 → 只剩「（不绑定角色）」。
   (async () => {
     try {
@@ -3532,7 +3532,7 @@ loadSceneProfiles();
 // ---------- 表情系统管理 UI ----------
 App.expressionsCache = {};
 App.expressionConfigCache = { emotionMap: {}, enableAutoSwitch: true };
-// 不预置角色名（脱敏，2026-09-03）：角色列表完全来自用户已建的表情目录
+// 不预置角色名（2026-09-03）：角色列表完全来自用户已建的表情目录
 async function loadExpressions() {
   try {
     const r = await fetch('/api/expressions'); const d = await r.json();
@@ -3540,7 +3540,7 @@ async function loadExpressions() {
     App.expressionConfigCache = d.config || { emotionMap: {}, enableAutoSwitch: true };
     const dropdown = document.getElementById('expr-char-dropdown');
     if (dropdown) {
-      // 2026-09-03 脱敏：原为硬编码角色名常量（已按中性规则清理），
+      // 2026-09-03：原为硬编码角色名常量（已改为中性规则），
       // 角色完全由用户自定义 → 直接用已有表情目录的角色，无则提示空。
       const chars = Object.keys(App.expressionsCache);
       dropdown.innerHTML = chars.map(c => `<option value="${safeHtml(c)}">${safeHtml(c)}</option>`).join('') || '<option value="">暂无角色</option>';
@@ -3702,7 +3702,7 @@ function editLorebookEntry(id, entry) {
 document.getElementById('lb-add-btn')?.addEventListener('click', () => editLorebookEntry(null));
 // 从世界书导入设定触发器（支持自定义路径）
 document.getElementById('lb-wb-btn')?.addEventListener('click', async () => {
-  const defaultPath = '';   // G-F1 脱敏（2026-09-05）：不再预填内部仓库路径（本版无此目录，按预填导入必报错）
+  const defaultPath = '';   // G-F1（2026-09-05）：不再预填路径（本版无此目录，按预填导入必报错）
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `<div class="modal-box" style="max-width:520px;max-height:85vh;display:flex;flex-direction:column">
@@ -4702,7 +4702,7 @@ document.querySelectorAll('#sidebar .card.collapsible .card-title').forEach(titl
   clearBtn?.addEventListener('click', () => { input.value = ''; resetFilter(); input.focus(); });
 })();
 
-// ---------- 命令面板（Ctrl+K / ⌘K）— 2026-09-04 设计，2026-09-19 移植 ----------
+// ---------- 命令面板（Ctrl+K / ⌘K） ----------
 // 与侧栏「🔍 搜功能」是两条路径：那个在原地筛卡片，这个是弹层直达 + 跨面板跳转 + 键盘流。
 (function initCmdK() {
   const cmdk = document.getElementById('cmdk');
