@@ -77,6 +77,15 @@
     <label class="api-field">摘要触发阈值（历史字符数）
       <input id="api-sumthreshold" type="number" min="2000" max="100000" step="1000" value="12000">
     </label>
+    <div class="set-group-title">🎬 agent 助手（未经测试 · 实验性）</div>
+    <label class="api-field" style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="agent-global"> 总开关（关闭＝逐字节退回现状）（未经测试 · 实验性）</label>
+    <label class="api-field">按会话模式
+      <select id="agent-perchat">
+        <option value="inherit">跟随总开关</option>
+        <option value="on">本会话开启</option>
+        <option value="off">本会话关闭</option>
+      </select>
+    </label>
     <div class="set-group-title">🎛 采样预设（命名预设 · 一键切换）</div>
     <div class="api-field">预设
       <span style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
@@ -489,6 +498,23 @@
       </div>
     </div>
     <div class="sb-panel hidden" id="panel-system">
+      <div class="card collapsible" id="card-meta">
+      <div class="card-title">🎬 导演台（未经测试）<span id="meta-badge" class="badge off">agent 未开启</span><span class="fold-arrow">▾</span></div>
+      <div class="meta-body">
+        <div class="untested-note">⚠️ 未经测试 · 实验性：功能按设计实现，但尚未充分测试，行为与接口可能变化。默认关闭，需先在「⚙ API → agent 助手」里打开总开关。</div>
+        <div class="meta-input-row">
+          <input id="meta-input" placeholder="例：她的眼睛是灰蓝色的／这段让她先哭后笑">
+          <button id="meta-send-btn" class="head-btn">发送</button>
+        </div>
+        <div id="meta-msg" class="group-msg"></div>
+        <div class="meta-sub-title">认知包 <span class="group-hint-inline">（三段式：角色可知／导演意图）</span></div>
+        <div id="meta-cogpack" class="meta-cogpack">（未加载）</div>
+        <div class="meta-sub-title">Meta 历史 <span class="group-hint-inline">（最近 50 条）</span></div>
+        <div id="meta-history" class="meta-history">（未加载）</div>
+        <div class="meta-sub-title">禁忌 <span class="group-hint-inline">（确认后才生效；先生效的会进每轮 system）</span></div>
+        <div id="meta-taboo-area"></div>
+      </div>
+      </div>
       <div class="card collapsible" id="card-skin">
       <div class="card-title">🎨 皮肤 & 背景 <span class="fold-arrow">▾</span></div>
       <label class="api-field">主题

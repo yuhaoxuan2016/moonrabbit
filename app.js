@@ -4797,6 +4797,94 @@ document.querySelectorAll('#sidebar .card.collapsible .card-title').forEach(titl
   });
 })();
 
+// ---------- agent 导演台（未经测试 · 实验性；默认关闭）----------
+// 开关在「⚙ API → agent 助手」；本卡片负责与 agent 对话（Meta）、看认知包与禁忌。
+(function initMetaUI() {
+  const badge = document.getElementById('meta-badge');
+  const input = document.getElementById('meta-input');
+  const sendBtn = document.getElementById('meta-send-btn');
+  const msgEl = document.getElementById('meta-msg');
+  const histEl = document.getElementById('meta-history');
+  const packEl = document.getElementById('meta-cogpack');
+  const tabooEl = document.getElementById('meta-taboo-area');
+  const gCb = document.getElementById('agent-global');
+  const pcSel = document.getElementById('agent-perchat');
+  if (!input || !sendBtn) return;
+
+  const setMsg = (t, ok) => { if (msgEl) { msgEl.textContent = t || ''; msgEl.className = 'group-msg ' + (ok ? 'ok' : 'err'); } };
+  function paintMode(d) {
+    const on = !!(d && d.global);
+    if (gCb) gCb.checked = on;
+    if (pcSel) pcSel.value = (d && d.perChat && d.perChat[App.chatId]) || 'inherit';
+    if (badge) { badge.textContent = on ? '开' : 'agent 未开启'; badge.className = 'badge ' + (on ? 'on' : 'off'); }
+  }
+  async function loadMode() {
+    try { paintMode(await (await fetch('/api/agent-mode')).json()); } catch (e) { /* 忽略 */ }
+  }
+  async function postMode(body) {
+    try {
+      const d = await (await fetch('/api/agent-mode', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).json();
+      paintMode(d);
+      setMsg(d && d.ok ? '已保存' : ('保存失败：' + ((d && d.error) || '')), !!(d && d.ok));
+    } catch (e) { setMsg('保存失败：' + e.message, false); }
+  }
+  gCb?.addEventListener('change', (e) => postMode({ global: !!e.target.checked }));
+  pcSel?.addEventListener('change', (e) => postMode({ chatId: App.chatId, mode: e.target.value }));
+
+  async function loadMeta() {
+    if (!App.chatId) return;
+    try {
+      const d = await (await fetch('/api/meta?chatId=' + encodeURIComponent(App.chatId))).json();
+      if (!d || !d.ok) return;
+      const rows = (d.entries || []).slice().reverse().slice(0, 20).map((e) => {
+        const who = e.role === 'user' ? '你' : 'agent';
+        const cls = e.cls ? `[${escapeHtml(e.cls)}]` : '';
+        const txt = escapeHtml(String(e.summary || e.raw || '').slice(0, 120));
+        return `<div class="mh-row"><span class="mh-who">${who}</span>${cls} ${txt}</div>`;
+      });
+      if (histEl) histEl.innerHTML = rows.length ? rows.join('') : '（暂无）';
+      if (packEl) {
+        const cp = d.cogpack || {};
+        const cand = (d.candidates || []).length;
+        packEl.innerHTML = `角色可知 ${cp.knowledge || 0} 条 · 导演意图 ${cp.direction || 0} 条` + (cand ? ` · 未采纳候选 ${cand} 条` : '');
+      }
+    } catch (e) { /* 忽略 */ }
+  }
+  async function loadTaboos() {
+    if (!tabooEl) return;
+    try {
+      const d = await (await fetch('/api/taboos')).json();
+      const es = (d && d.entries) || [];
+      if (!es.length) { tabooEl.textContent = '（暂无）'; return; }
+      tabooEl.innerHTML = es.slice(0, 20).map((e) => {
+        const st = { pending: '待确认', active: '已生效', resolved: '已归档' }[e.status] || e.status;
+        const btn = e.status === 'pending' ? ` <button class="head-btn" style="padding:1px 8px;font-size:10px" data-tb-confirm="${escapeHtml(e.id)}">✅ 确认生效</button>` : '';
+        return `<div class="meta-taboo-row ${e.status === 'pending' ? 'pending' : ''}"><span class="tb-rule">${escapeHtml(e.rule || '')}</span><span class="tb-st">${st}</span>${btn}</div>`;
+      }).join('');
+      tabooEl.querySelectorAll('[data-tb-confirm]').forEach((b) => b.addEventListener('click', async () => {
+        try { await fetch('/api/taboos', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'confirm', id: b.dataset.tbConfirm }) }); loadTaboos(); } catch (e) { /* 忽略 */ }
+      }));
+    } catch (e) { /* 忽略 */ }
+  }
+  async function sendMeta() {
+    const text = String(input.value || '').trim();
+    if (!text) return;
+    if (!App.chatId) { setMsg('先打开一个会话', false); return; }
+    sendBtn.disabled = true; setMsg('发送中…', true);
+    try {
+      const d = await (await fetch('/api/meta', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatId: App.chatId, text }) })).json();
+      if (d && d.ok) { input.value = ''; setMsg('已记录（' + (d.cls || 'query') + '）' + (d.fix ? '；已给出修正草案，可在下方禁忌里确认入库' : ''), true); }
+      else setMsg('发送失败：' + ((d && d.error) || ''), false);
+    } catch (e) { setMsg('发送失败：' + e.message, false); }
+    sendBtn.disabled = false;
+    loadMeta(); loadTaboos();
+  }
+  sendBtn.addEventListener('click', sendMeta);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); sendMeta(); } });
+  window.__metaReload = () => { loadMode(); loadMeta(); loadTaboos(); };
+  loadMode(); loadMeta(); loadTaboos();
+})();
+
 // ---------- 侧栏收藏（⭐ 常用）：把高频卡片钉到第一个 tab，不用记它在哪个分类 ----------
 // 实现方式：不移动 DOM（避免打乱面板结构与已绑定事件），而是**克隆引用**——
 // 收藏面板里放的是原卡片的「移动占位」：切到 ⭐ 时把收藏的卡片临时 append 进来，切走时还原回原面板。
