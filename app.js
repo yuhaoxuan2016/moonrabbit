@@ -994,6 +994,14 @@ async function generate() {
           acc += sanitizeText(ev.text);
           tempBub.textContent = stripTurnTags(acc);
           els.messages.scrollTop = els.messages.scrollHeight;
+        } else if (ev.type === 'replace') {
+          // agent 打回重试后的终稿（默认关闭时不会出现）：整段替换当前气泡
+          acc = sanitizeText(ev.content || '');
+          tempBub.textContent = stripTurnTags(acc);
+          els.messages.scrollTop = els.messages.scrollHeight;
+        } else if (ev.type === 'selfcheck') {
+          // agent 生成后自检（只报不写）：在思考区给一行提示，不改正文
+          renderThinking('⚠️ 自查提示：' + String(ev.note || '').replace(/\n+/g, ' '));
         } else if (ev.type === 'thinking') {
           thinkAcc += sanitizeText(ev.text);
         } else if (ev.type === 'tools') {

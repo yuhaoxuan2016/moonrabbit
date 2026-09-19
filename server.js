@@ -1076,6 +1076,13 @@ async function appendTurnRecord(content, chatId, seq) {
     rec.ts = new Date().toISOString();
     rec.chatId = sanitizeId(chatId);
     if (seq) rec.seq = seq;   // 关联消息序号（重roll/删除时按 seq 清理）
+    // agent 格式校验留痕（T-009，默认关闭）：标签不合格 → 记在回合记录上，供下一轮回传与排查
+    if (agentModeOn(chatId)) {
+      try {
+        const v = agentValidate.validateTurnTags(content);
+        if (!v.ok) { rec._tagfail = agentValidate.makeTagFail(v, seq); console.log('[agent] 记账标签不合格·已留痕: ' + v.reason); }
+      } catch (e) { /* 校验失败不阻断记账 */ }
+    }
     const line = JSON.stringify(rec) + '\n';
     if (ASYNC_IO) { await writeQueued(turnsFile(chatId), () => appendLine(turnsFile(chatId), line)); return; }
     fs.appendFileSync(turnsFile(chatId), line, 'utf8');
@@ -1821,6 +1828,9 @@ const agentMetaLib = require('./lib/agent/meta');
 const agentCogPackLib = require('./lib/agent/cogpack');
 const agentInjectedLib = require('./lib/agent/injected');
 const agentToolsLib = require('./lib/agent/tools');
+const agentBudgetLib = require('./lib/agent/budget');
+const agentValidate = require('./lib/agent/validate');
+const agentSelfCheck = require('./lib/agent/selfcheck');
 
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const META_DIR = path.join(DATA_DIR, 'meta');
@@ -1889,6 +1899,74 @@ const agentTools = agentToolsLib.createTools({
 /** 认知包（T-021 三段式）——从 Meta 历史里取；未采纳的 canon 只进候选、不进可知段 */
 function agentCogPackFor(chatId) {
   try { return agentCogPackLib.buildCogPack(agentMeta.list(chatId, 200)); } catch (e) { return agentCogPackLib.newCogPack(); }
+}
+
+/** agent token 记账桶（懒创建：开关关着不在 stats.json 里留字段） */
+function agentTokenBucket() {
+  if (!State.stats) State.stats = {};
+  if (!State.stats.agentTokens) State.stats.agentTokens = agentBudgetLib.newAgentBucket();
+  return State.stats.agentTokens;
+}
+
+/** 计划轮（T-004）：开关开时先拟一份本轮计划；失败/超时静默回落（不影响正常对话） */
+const agentPlanLib = require('./lib/agent/plan');
+const runAgentPlan = agentPlanLib.createPlanRunner({
+  agentModeOn: (cid) => agentModeOn(cid),
+  revOnly: (cid) => agentTools.revOnly(cid),
+  toolNames: () => agentTools.NAMES,
+  injected: agentInjected,
+  revAnnotation: agentToolsLib.revAnnotation,
+  auxCall: (sys, user, maxTokens, extra, onUsage) => auxCall(sys, user, maxTokens, extra, onUsage),
+  onUsage: (u) => agentBudgetLib.addAgentUsage(agentTokenBucket(), u),
+  onCall: (kind, inChars, outChars, ms) => agentBudgetLib.addAgentCall(agentTokenBucket(), kind, inChars, outChars, ms),
+  endpointLabel: () => ((State.aux && State.aux.baseURL) ? 'aux' : 'main'),
+  log: (m) => console.log(m),
+});
+
+/** 打回重试（T-010）：带完整 messages 的非流式主端点调用；失败返回 '' 由调用方回落原稿 */
+async function agentRetryCall(messages, maxTokens) {
+  const ep = State.endpoint;
+  const mt = Math.max(256, Number(maxTokens) || 1200);
+  const t0 = Date.now();
+  if (ep.protocol === 'anthropic') {
+    const sysMsgs = messages.filter((m) => m.role === 'system');
+    const rest = messages.filter((m) => m.role !== 'system');
+    const r = await fetch(`${ep.baseURL}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': ep.apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: ep.model, system: sysMsgs.map((m) => m.content).join('\n\n'), messages: rest, max_tokens: mt }),
+      signal: AbortSignal.timeout(120000),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const out = (j.content || []).filter((c) => c && c.type === 'text').map((c) => c.text).join('');
+    return { text: out, ms: Date.now() - t0 };
+  }
+  const r = await fetch(`${ep.baseURL}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${ep.apiKey}` },
+    body: JSON.stringify({ model: ep.model, messages, max_tokens: mt }),
+    signal: AbortSignal.timeout(120000),
+  });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const j = await r.json();
+  const out = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '';
+  return { text: out, ms: Date.now() - t0 };
+}
+
+/** 生成后自检（T-011）：只报不写；失败静默 */
+async function agentSelfCheckFor(chatId, content, ctx) {
+  try {
+    const sys = agentSelfCheck.buildCheckPrompt(ctx || {});
+    const user = agentSelfCheck.buildCheckUser({ content, ...(ctx || {}) });
+    const raw = await Promise.race([
+      auxCall(sys, user, agentSelfCheck.CHECK_MAX_TOKENS, { thinking: { type: 'disabled' } }, (u) => agentBudgetLib.addAgentUsage(agentTokenBucket(), u)),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('自检超时')), agentSelfCheck.CHECK_TIMEOUT_MS)),
+    ]);
+    const pr = agentSelfCheck.parseCheckResult(raw);
+    agentBudgetLib.addAgentCall(agentTokenBucket(), 'check', 0, String(raw || '').length, 0);
+    return pr && pr.issues && pr.issues.length ? agentSelfCheck.renderIssues(pr.issues) : '';
+  } catch (e) { console.log('[agent] 自检跳过: ' + e.message); return ''; }
 }
 
 /**
@@ -4823,9 +4901,31 @@ async function h_api_chat_74(req, res, url, p) {
       if (pinFirst) {
         system += '\n\n---\n\n## 会话开局提示词（首条消息原文，每轮保底注入；与「会话常驻设定」冲突时以常驻设定为准）\n' + String(firstMsg.content).trim();
       }
-      // agent 助手（默认关闭）：注入禁忌（全局+角色级）与认知包可知段。
-      // 开关关 → agentAugmentSystem 原样返回 ⇒ 本轮 system 与未移植前逐字节一致。
-      system = agentAugmentSystem(system, payload.chatId || '');
+      // agent 助手（默认关闭）：注入禁忌（全局+角色级）、认知包可知段与本轮计划。
+      // 开关关 → agentAugmentSystem 原样返回、runAgentPlan 返回空 ⇒ 本轮 system 与未移植前逐字节一致。
+      const agentCid = payload.chatId || '';
+      const agentOn = agentModeOn(agentCid);
+      let agentPlanText = '';
+      if (agentOn) {
+        try {
+          const lastUserMsg = [...(payload.messages || [])].reverse().find((m) => m.role === 'user');
+          agentPlanText = await runAgentPlan(agentCid, String((lastUserMsg && lastUserMsg.content) || '').slice(0, 2000));
+        } catch (e) { console.log('[agent] 计划轮异常（已回落）: ' + e.message); }
+      }
+      system = agentAugmentSystem(system, agentCid);
+      if (agentPlanText) {
+        const revNote = agentTools.revAnnotation(agentTools.revOnly(agentCid).rev, false);
+        system += '\n\n---\n\n' + agentPlanLib.renderPlanBlock(agentPlanText, { revNote });
+      }
+      // 上一轮记账不合格 → 本轮 system 底部回传（T-009 的「下一轮提醒」；开关关时不读不写）
+      if (agentOn) {
+        try {
+          const turns = readTurns(agentCid);
+          const lastTurn = turns.length ? turns[turns.length - 1] : null;
+          const fb = lastTurn && lastTurn._tagfail ? agentValidate.tagFailFeedback(lastTurn._tagfail) : '';
+          if (fb) system += '\n\n---\n\n' + fb;
+        } catch (e) { /* 回传失败不影响对话 */ }
+      }
       // 标签生成最后重申：pinFirst 之后再次落底（近因效应），防止开局提示词挤掉记账指令（2026-08-30 修复）
       system += '\n\n---\n\n' + turnTagPrompt;
       // 调试：记录本轮 system prompt（落盘 data/prompts/）
@@ -5007,11 +5107,34 @@ merged = [{ role: 'user', content: `【历史摘要（${compressCount} 条旧消
           cb.cacheMiss += Math.max(0, inTok - cacheRead);
         }
         await saveStats();
+        // agent 打回重试（T-010，默认关闭）：本轮回复的记账标签不合格 → 就地补一次，把终稿 replace 给前端。
+        // 只打回一次；失败/超时 → 静默沿用原稿（正文已经流式发出，不能因此报错）。
+        if (agentOn && acc && !abortedByClient) {
+          try {
+            const v1 = agentValidate.validateTurnTags(acc);
+            if (!v1.ok) {
+              const t1 = Date.now();
+              const rr = await agentRetryCall(merged.concat([{ role: 'assistant', content: acc }, { role: 'user', content: agentValidate.retryInstruction(v1) }]), State.endpoint.maxTokens || 1200);
+              const acc2 = String((rr && rr.text) || '').trim();
+              const v2 = acc2 ? agentValidate.validateTurnTags(acc2) : { ok: false, missing: ['重试无输出'] };
+              agentBudgetLib.addAgentCall(agentTokenBucket(), 'retry', 0, acc2.length, Date.now() - t1);
+              if (acc2 && v2.ok) { acc = acc2; send({ type: 'replace', content: acc2 }); console.log('[agent] 打回重试成功（' + (Date.now() - t1) + 'ms）'); }
+              else console.log('[agent] 打回重试未通过：' + (v2.reason || v2.missing.join('、')));
+            }
+          } catch (e) { console.log('[agent] 打回重试失败（沿用原稿）: ' + e.message); }
+        }
         // seq 校验：仅接受正整数，防客户端伪造污染回合记录
         const seqNum = Number(payload.seq);
         await appendTurnRecord(acc, payload.chatId, Number.isFinite(seqNum) && seqNum > 0 ? seqNum : undefined);  // 剧情记忆：按会话自动记账（带消息序号）
         if (toolTrace && toolTrace.length) appendOpRecord(payload.chatId, '工具调用', toolTrace.map((t) => t.name + ':' + String(t.input.query || '').slice(0, 40)).join('；'));
         send({ type: 'done' });
+        // agent 生成后自检（T-011，默认关闭）：只报不写；结果随 SSE 旁路回传，由前端提示
+        if (agentOn && acc && !abortedByClient) {
+          try {
+            const note = await agentSelfCheckFor(payload.chatId || '', acc, { stateText: '' });
+            if (note) send({ type: 'selfcheck', note });
+          } catch (e) { /* 只报不写，失败静默 */ }
+        }
       } catch (e) {
         if (abortedByClient || llmAbort.signal.aborted) {
           // 客户端断连中止：静默收尾（不追加回合记录、不发 error）
