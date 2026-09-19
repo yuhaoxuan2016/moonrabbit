@@ -19,3 +19,25 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+Note on artwork and branding (NOT covered by the MIT license above)
+
+Copyright (c) 2026 — All rights reserved.
+
+The MIT license above applies to the source code and documentation in this
+repository. It does NOT apply to the project's artwork or branding, including
+but not limited to:
+
+  logo.png
+  favicon.png
+  share-card.png
+  moonrabbit-tauri/src-tauri/icons/  (icon-32/128/256/512, icon.ico)
+
+Those image assets remain the property of the author. Please do not reuse them,
+or derivatives of them, as the name or visual identity of another project
+without permission. Building your own version of this software with your own
+artwork is welcome — the logo and favicon are ordinary image files and can be
+replaced in place.
+
