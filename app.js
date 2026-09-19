@@ -4702,6 +4702,93 @@ document.querySelectorAll('#sidebar .card.collapsible .card-title').forEach(titl
   clearBtn?.addEventListener('click', () => { input.value = ''; resetFilter(); input.focus(); });
 })();
 
+// ---------- 命令面板（Ctrl+K / ⌘K）— 2026-09-04 设计，2026-09-19 移植 ----------
+// 与侧栏「🔍 搜功能」是两条路径：那个在原地筛卡片，这个是弹层直达 + 跨面板跳转 + 键盘流。
+(function initCmdK() {
+  const cmdk = document.getElementById('cmdk');
+  const input = document.getElementById('cmdk-input');
+  const list = document.getElementById('cmdk-list');
+  const openBtn = document.getElementById('cmd-open');
+  if (!cmdk || !input || !list) return;
+
+  const paneLabel = { 'panel-chat': '💬 对话', 'panel-setting': '📖 设定', 'panel-data': '📊 数据', 'panel-system': '⚙ 系统', 'panel-fav': '⭐ 收藏' };
+  const ACTIONS = [
+    { label: '➕ 新建对话', k: '动作', run: () => { newChat(); } },
+    { label: '🔁 刷新会话列表', k: '动作', run: () => { loadChatList(); } },
+  ];
+
+  let items = [];     // {title, k, pane, cardId, run}
+  let selIdx = 0;
+
+  function buildItems() {
+    items = [];
+    // 全部卡片（从 DOM 读标题 + 面板归属）；收藏面板是克隆借位容器，排除
+    document.querySelectorAll('.sb-panel:not(#panel-fav) .card').forEach(card => {
+      const pane = card.closest('.sb-panel')?.id || '';
+      const t = card.querySelector(':scope > .card-title');
+      let title = card.id;
+      if (t) {
+        // 克隆标题，剔除按钮/控件/折叠箭头/星标后取纯文字，得到卡片主标题
+        const clone = t.cloneNode(true);
+        clone.querySelectorAll('button, select, input, .fold-arrow, .card-fav, .sort-btns, .stale-badge, span[style], .badge').forEach(n => n.remove());
+        title = (clone.textContent || '').replace(/[▾⬊★☆\s]+/g, ' ').trim();
+        if (title.length > 26) title = title.slice(0, 26) + '…';
+      }
+      items.push({ title, k: paneLabel[pane] || pane, pane, cardId: card.id, run: () => gotoCard(pane, card.id) });
+    });
+    ACTIONS.forEach(a => items.push({ title: a.label, k: a.k, run: a.run }));
+  }
+
+  function gotoCard(pane, cardId) {
+    if (window.__sbActivatePanel) window.__sbActivatePanel(pane, true);
+    const el = document.getElementById(cardId);
+    if (el) { el.classList.remove('collapsed'); el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+  }
+
+  let currentHits = [];
+  function render(filter) {
+    const q = (filter || '').trim().toLowerCase();
+    currentHits = items.filter(it => !q || it.title.toLowerCase().includes(q) || it.k.toLowerCase().includes(q));
+    if (!currentHits.length) { list.innerHTML = '<div class="cmdk-empty">没有匹配「' + safeHtml(filter || '') + '」的功能</div>'; currentHits = []; return; }
+    if (selIdx >= currentHits.length) selIdx = currentHits.length - 1;
+    if (selIdx < 0) selIdx = 0;
+    list.innerHTML = '';
+    const nodes = [];
+    currentHits.forEach((it, i) => {
+      const div = document.createElement('div');
+      div.className = 'cmdk-item' + (i === selIdx ? ' sel' : '');
+      div.innerHTML = '<span>' + safeHtml(it.title) + '</span><span class="k">' + safeHtml(it.k) + '</span>';
+      div.addEventListener('click', () => { it.run(); close(); });
+      list.appendChild(div);
+      nodes.push(div);
+    });
+    // 滚进可视区的是 DOM 节点（currentHits 装的是条目对象，不能直接当元素用）
+    nodes[selIdx]?.scrollIntoView({ block: 'nearest' });
+  }
+
+  function open() {
+    buildItems(); selIdx = 0; input.value = '';
+    cmdk.classList.add('show'); render('');
+    input.focus();
+  }
+  function close() { cmdk.classList.remove('show'); }
+
+  openBtn?.addEventListener('click', open);
+  cmdk.addEventListener('click', (e) => { if (e.target === cmdk) close(); });
+  input.addEventListener('input', () => { selIdx = 0; render(input.value); });
+  input.addEventListener('keydown', (e) => {
+    const hits = [...list.querySelectorAll('.cmdk-item')];
+    if (e.key === 'ArrowDown') { e.preventDefault(); selIdx = Math.min(selIdx + 1, hits.length - 1); render(input.value); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); selIdx = Math.max(selIdx - 1, 0); render(input.value); }
+    else if (e.key === 'Enter') { e.preventDefault(); const it = currentHits[selIdx]; if (it) { it.run(); close(); } }
+    else if (e.key === 'Escape') { close(); }
+  });
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); cmdk.classList.contains('show') ? close() : open(); }
+    else if (e.key === 'Escape') { close(); }
+  });
+})();
+
 // ---------- 侧栏收藏（⭐ 常用）：把高频卡片钉到第一个 tab，不用记它在哪个分类 ----------
 // 实现方式：不移动 DOM（避免打乱面板结构与已绑定事件），而是**克隆引用**——
 // 收藏面板里放的是原卡片的「移动占位」：切到 ⭐ 时把收藏的卡片临时 append 进来，切走时还原回原面板。

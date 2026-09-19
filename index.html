@@ -30,6 +30,7 @@
     <button id="new-chat-btn" class="head-btn">＋ 新对话</button>
     <button id="new-group-btn" class="head-btn" title="新建群聊（未经测试 · 实验性）：每个角色独立调用模型发言，导演自动调度，支持 @点名">＋ 群聊（未经测试）</button>
     <button id="api-btn" class="head-btn" title="API / 端点设置">⚙ API</button>
+    <button id="cmd-open" class="head-btn" title="命令面板（Ctrl+K / ⌘K）：搜功能 / 跳转动作">⌘K</button>
   </div>
 </header>
 <div id="api-modal" class="modal hidden">
@@ -584,6 +585,18 @@
       <button id="tour-next" class="head-btn">下一步</button>
       <button id="tour-skip" class="head-btn ghost">跳过</button>
     </div>
+  </div>
+</div>
+
+<!-- 命令面板（Ctrl+K / ⌘K）：一次列出全部卡片 + 常用动作，键盘上下选、回车跳转（零后端） -->
+<div class="cmdk" id="cmdk">
+  <div class="cmdk-box">
+    <div class="cmdk-in">
+      <span style="color:var(--muted)">🔍</span>
+      <input id="cmdk-input" placeholder="搜索功能 / 动作…" autocomplete="off">
+      <span class="kbd">Esc</span>
+    </div>
+    <div class="cmdk-list" id="cmdk-list"></div>
   </div>
 </div>
 
