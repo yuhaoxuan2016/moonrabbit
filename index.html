@@ -217,7 +217,7 @@
       <div class="em-hint">给对话某处加作者视角的批注，会按位置注入 AI 上下文做引导。</div>
       </div>
       <div class="card collapsible" id="card-tm">
-      <div class="card-title">📜 剧情记忆（回合自动记账）<span class="fold-arrow">▾</span></div>
+      <div class="card-title">📜 剧情记忆（回合自动记账）<span id="vec-stale-badge" class="stale-badge hidden" title="向量索引有新内容未收录，点「🔍 语义」tab 重建">●</span><span class="fold-arrow">▾</span></div>
       <div class="tm-tabs">
       <button id="tm-tab-tl" class="tm-tab active">时间线</button>
       <button id="tm-tab-inv" class="tm-tab">物品栏</button>
@@ -225,6 +225,7 @@
       <button id="tm-tab-em" class="tm-tab">情绪</button>
       <button id="tm-tab-auto" class="tm-tab" title="从 <storyevent> 自动提取的角色简介/关系/场景（注入 system）">自动提取</button>
       <button id="tm-tab-loc" class="tm-tab" title="地点详细档案（location_detail），可导出为知识库格式">地点档案</button>
+      <button id="tm-tab-vec" class="tm-tab" title="向量语义检索：按意思找旧剧情（不用记得原话）">🔍 语义</button>
       </div>
       <div id="tm-timeline" class="tm-body">加载中…</div>
       <div class="tm-edit" id="tm-edit-tl">
@@ -297,6 +298,19 @@
       <button id="location-refresh-btn" class="head-btn" style="padding:4px 12px">🔄 刷新</button>
       </div>
       <div class="em-hint">AI 输出 <code>&lt;storyevent&gt;location_detail: 分组| 地点名：详细描写&lt;/storyevent&gt;</code> 自动建档（新地点首次造访时）；此面板为知识库格式预览，可导出 markdown 供其他知识库复用。</div>
+      </div>
+      <div id="tm-vec" class="tm-body hidden">
+      <div id="vec-status" style="padding:8px;background:var(--bg2);border-radius:6px;font-size:12px;margin-bottom:8px">加载中…</div>
+      <div style="display:flex;gap:6px;margin-bottom:8px">
+      <input id="vec-query" type="text" placeholder="按意思搜索旧剧情（如：那次争执 / 关于远行的争论）" style="flex:1;min-width:0;padding:4px 8px;border-radius:6px;background:var(--bg2);color:var(--text);border:1px solid var(--border);font-size:12px">
+      <button id="vec-search-btn" class="head-btn" style="padding:4px 12px;flex:none">🔍 搜</button>
+      </div>
+      <div id="vec-results" style="font-size:12px;max-height:280px;overflow-y:auto"></div>
+      <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+      <button id="vec-build-btn" class="head-btn" style="padding:4px 12px" title="全量重算该会话的向量索引（新增对话后需重建才能搜到）">🧬 建立/重建索引</button>
+      <button id="vec-config-btn" class="head-btn" style="padding:4px 12px" title="配置 embedding 端点 / Key 与自动注入">⚙️ 设置</button>
+      </div>
+      <div class="em-hint">语义检索：按<b>意思</b>找旧剧情（搜「吐露心事」能召回「告白」段落），弥补关键词搜索的不足。索引内容＝事件时间线＋对话原文＋历史摘要。需先在「⚙️ 设置」里填 embedding 端点与 Key；<b>默认关闭</b>，不配置不影响其他功能。开启「自动注入」后，每轮对话会自动召回相关旧剧情给 AI 参考。</div>
       </div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
       <button id="tm-export" class="attach">⬇ 导出回合记录（markdown）</button>

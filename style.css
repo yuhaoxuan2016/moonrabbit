@@ -432,6 +432,14 @@ main { flex: 1; display: flex; min-height: 0; }
 }
 .tm-tab:hover { border-color: var(--accent); }
 .tm-tab.active { background: var(--accent); border-color: var(--accent); color: #1a1a2e; font-weight: 700; }
+/* 向量索引过期角标（提醒重建，避免以为语义检索失效） */
+.stale-badge {
+  color: var(--warning, #e0a030); font-size: 15px; line-height: 1;
+  margin-left: 2px; cursor: help;
+  animation: stale-pulse 2s ease-in-out infinite;
+}
+@keyframes stale-pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .stale-badge { animation: none; } }
 
 /* 检索 */
 .search-row { display: flex; gap: 6px; }

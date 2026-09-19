@@ -1141,6 +1141,170 @@ function saveStoryMemoryConfig() {
 }
 loadStoryMemoryConfig();
 
+// ---------- 向量语义检索配置（同步自正式版批E · 2026-09-18）----------
+// 与正式版的差异（脱敏 + 可移植）：embedding 端点不写死，baseURL/model 均可在
+// 「🔍 语义」面板配置（便于接任意 OpenAI 兼容 embedding 服务或本地端点）；
+// autoInject 默认关闭，未配置 Key 时所有路径明确降级。
+State.vecConfig = {
+  apiKey: '',                                                   // 留空则复用辅助 API 的 Key / 环境变量
+  baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', // OpenAI 兼容 embedding 端点（可改）
+  model: 'qwen3.7-text-embedding',
+  autoInject: false,
+  injectTopK: 4,
+  minScore: 0.35,
+};
+const VEC_CONFIG_FILE = path.join(DATA_DIR, 'vec-config.json');
+function loadVecConfig() {
+  try {
+    if (fs.existsSync(VEC_CONFIG_FILE)) State.vecConfig = { ...State.vecConfig, ...JSON.parse(fs.readFileSync(VEC_CONFIG_FILE, 'utf8')) };
+  } catch (e) { /* 使用默认值 */ }
+}
+function saveVecConfig() {
+  try { backupConfig(VEC_CONFIG_FILE); writeFileAtomicSync(VEC_CONFIG_FILE, JSON.stringify(State.vecConfig, null, 2), 'utf8'); } catch (e) { console.error('保存向量配置失败:', e.message); }
+}
+loadVecConfig();
+
+// ---------- 向量语义检索核心（纯 Node 内置模块 · 零 npm 依赖）----------
+// 索引三类内容：事件时间线 / 对话原文 / 历史摘要；落盘 data/vec/{chatId}.json。
+const VEC_DIR = path.join(DATA_DIR, 'vec');
+const VEC_BATCH = 20;            // 单次批量上限
+const VEC_EMBED_DIM = 1024;      // 固定维度保持索引稳定
+function vecFilePath(chatId) { return path.join(VEC_DIR, `${sanitizeId(chatId || '')}.json`); }
+function vecSummaryFilePath(chatId) { return path.join(DATA_DIR, 'summaries', `${sanitizeId(chatId || '')}.json`); }
+function vecModel() { return (State.vecConfig && State.vecConfig.model) || 'qwen3.7-text-embedding'; }
+function vecBase() { return String((State.vecConfig && State.vecConfig.baseURL) || '').trim().replace(/\/+$/, ''); }
+
+// 清掉回合标签（storyevent/items/thinking 等），只留正文——标签是给引擎看的，不该进语义索引
+function vecStripTags(s) {
+  return String(s || '')
+    .replace(/<(?:storyevent|horaeevent|items|horae)>[\s\S]*?<\/(?:storyevent|horaeevent|items|horae)>/gi, '')
+    .replace(/<\/?(?:think|thinking)>/gi, '')
+    .trim();
+}
+
+// 取 embedding 用的 API Key：优先独立配置，其次辅助 API，最后环境变量
+function vecApiKey() {
+  if (State.vecConfig && State.vecConfig.apiKey) return State.vecConfig.apiKey;
+  if (State.aux && State.aux.apiKey) return State.aux.apiKey;
+  return process.env.DASHSCOPE_API_KEY || '';
+}
+
+// 批量算 embedding（失败抛错，由调用方决定降级）
+async function vecEmbed(texts) {
+  const key = vecApiKey();
+  if (!key) throw new Error('未配置 embedding API Key（可在「🔍 语义」面板填写，或配置辅助 API / 环境变量）');
+  const base = vecBase();
+  if (!base) throw new Error('未配置 embedding 端点地址（可在「🔍 语义」面板设置）');
+  const out = [];
+  for (let i = 0; i < texts.length; i += VEC_BATCH) {
+    const batch = texts.slice(i, i + VEC_BATCH);
+    const resp = await fetch(`${base}/embeddings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
+      body: JSON.stringify({ model: vecModel(), input: batch, dimensions: VEC_EMBED_DIM }),
+      signal: AbortSignal.timeout(60000),
+    });
+    if (!resp.ok) throw new Error(`embedding 请求失败 HTTP ${resp.status}：${(await resp.text()).slice(0, 200)}`);
+    const data = await resp.json();
+    const sorted = (data.data || []).slice().sort((a, b) => a.index - b.index);
+    for (const d of sorted) out.push(d.embedding);
+  }
+  return out;
+}
+
+// 余弦相似度（embedding 已归一化时等价于点积，这里仍完整算以防未归一化）
+function vecCosine(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  if (!na || !nb) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+// 收集待索引的分块：事件时间线 / 对话原文 / 历史摘要
+function vecCollectChunks(chatId) {
+  const chunks = [];
+  // ① 事件时间线（turn 记录的 event，带时间地点人物，语义完整）
+  try {
+    for (const t of readTurns(chatId)) {
+      if (!t.event) continue;
+      const time = t.story_time || '';
+      const loc = t.location ? ` @ ${t.location}` : '';
+      const chars = Array.isArray(t.characters) && t.characters.length ? `（${t.characters.join('、')}）` : '';
+      chunks.push({ kind: 'event', seq: t.seq ?? null, text: `${time}${loc}${chars} ${t.event}`.trim() });
+    }
+  } catch (e) { /* 忽略 */ }
+  // ② 对话原文（按消息切分；过长的截断到 1200 字，避免单块过大稀释语义）
+  try {
+    const file = chatFilePath(chatId);
+    if (fs.existsSync(file)) {
+      const chat = JSON.parse(fs.readFileSync(file, 'utf8'));
+      for (const m of (chat.messages || [])) {
+        const body = vecStripTags(String(m.content || '')).trim();
+        if (body.length < 10) continue;   // 太短的（「嗯」「好」）没有检索价值
+        chunks.push({ kind: 'msg', seq: m.seq ?? null, role: m.role, text: body.slice(0, 1200) });
+      }
+    }
+  } catch (e) { /* 忽略 */ }
+  // ③ 历史摘要（自动压缩产生的累积摘要，回忆早期剧情时有用）
+  try {
+    const sf = vecSummaryFilePath(chatId);
+    if (fs.existsSync(sf)) {
+      const sm = JSON.parse(fs.readFileSync(sf, 'utf8'));
+      const sum = String(sm.summary || '').trim();
+      if (sum) {
+        // 摘要通常较长 → 按段落切块，保证每块语义独立可召回
+        for (const seg of sum.split(/\n{2,}/)) {
+          const s = seg.trim();
+          if (s.length >= 20) chunks.push({ kind: 'summary', seq: null, text: s.slice(0, 1200) });
+        }
+      }
+    }
+  } catch (e) { /* 忽略 */ }
+  return chunks;
+}
+
+// 建索引：算 embedding 并落盘（返回统计）
+async function vecBuildIndex(chatId) {
+  const chunks = vecCollectChunks(chatId);
+  if (!chunks.length) return { ok: false, error: '没有可索引的内容（先聊几轮或确认该会话有数据）' };
+  const embeddings = await vecEmbed(chunks.map(c => c.text));
+  if (embeddings.length !== chunks.length) return { ok: false, error: `embedding 数量不匹配（${embeddings.length}/${chunks.length}）` };
+  const index = {
+    version: 1,
+    model: vecModel(),
+    dim: VEC_EMBED_DIM,
+    at: new Date().toISOString(),
+    items: chunks.map((c, i) => ({ ...c, vec: embeddings[i] })),
+  };
+  if (!fs.existsSync(VEC_DIR)) fs.mkdirSync(VEC_DIR, { recursive: true });
+  writeFileAtomicSync(vecFilePath(chatId), JSON.stringify(index), 'utf8');
+  const byKind = {};
+  for (const c of chunks) byKind[c.kind] = (byKind[c.kind] || 0) + 1;
+  return { ok: true, total: chunks.length, byKind, at: index.at };
+}
+
+function vecLoadIndex(chatId) {
+  try {
+    const f = vecFilePath(chatId);
+    if (!fs.existsSync(f)) return null;
+    return JSON.parse(fs.readFileSync(f, 'utf8'));
+  } catch (e) { return null; }
+}
+
+// 语义检索：算 query 向量 → 与索引逐条算余弦 → 取 topK
+async function vecSearch(chatId, query, topK = 6, kinds = null) {
+  const index = vecLoadIndex(chatId);
+  if (!index || !Array.isArray(index.items) || !index.items.length) {
+    return { ok: false, error: '该会话尚未建立向量索引（先点「建立/重建索引」）' };
+  }
+  const [qvec] = await vecEmbed([String(query || '').slice(0, 2000)]);
+  if (!qvec) return { ok: false, error: 'query embedding 失败' };
+  const pool = kinds && kinds.length ? index.items.filter(it => kinds.includes(it.kind)) : index.items;
+  const scored = pool.map(it => ({ kind: it.kind, seq: it.seq, role: it.role, text: it.text, score: vecCosine(qvec, it.vec) }));
+  scored.sort((a, b) => b.score - a.score);
+  return { ok: true, hits: scored.slice(0, Math.max(1, Math.min(topK, 30))), total: pool.length, at: index.at };
+}
+
 // 构建剧情记忆注入（场景、角色、关系）
 function buildStoryMemory(chatId) {
   const turns = readTurns(chatId);
@@ -3502,6 +3666,124 @@ async function h_api_story_memory_summary(req, res, url, p) {
   }
   return false;
 }
+// ===== 向量检索 API（同步自正式版批E · 2026-09-18）=====
+async function h_api_vec_status(req, res, url, p) {
+  // 索引状态：是否已建、条数、分类统计、建立时间、可索引块数（对比 total 判断是否需重建）
+  if (p === '/api/vec/status' && req.method === 'GET') {
+    const cid = sanitizeId(url.searchParams.get('chatId') || '');
+    const index = vecLoadIndex(cid);
+    const byKind = {};
+    if (index && Array.isArray(index.items)) for (const it of index.items) byKind[it.kind] = (byKind[it.kind] || 0) + 1;
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({
+      ok: true,
+      built: !!index,
+      total: index ? (index.items || []).length : 0,
+      byKind, at: index ? index.at : '',
+      model: index ? index.model : vecModel(),
+      config: {
+        autoInject: !!State.vecConfig.autoInject,
+        injectTopK: State.vecConfig.injectTopK,
+        minScore: State.vecConfig.minScore,
+        hasKey: !!vecApiKey(),
+        baseURL: State.vecConfig.baseURL || '',
+        model: State.vecConfig.model || '',
+      },
+      pending: vecCollectChunks(cid).length,
+    }));
+    return true;
+  }
+  return false;
+}
+
+async function h_api_vec_build(req, res, url, p) {
+  // 建立/重建索引（全量重算）
+  if (p === '/api/vec/build' && req.method === 'POST') {
+    const body = await readBody(req);
+    try {
+      const { chatId } = JSON.parse(body || '{}');
+      const r = await vecBuildIndex(sanitizeId(chatId || ''));
+      res.writeHead(r.ok ? 200 : 400, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(r));
+    } catch (e) {
+      // 明确降级：未配置 Key / 端点不可达 → 400 + 可读错误（不抛全局、不 500 崩溃）
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, error: String(e && e.message || e) }));
+    }
+    return true;
+  }
+  return false;
+}
+
+async function h_api_vec_search(req, res, url, p) {
+  // 语义检索：query → topK 命中（可按 kinds 过滤 event/msg/summary）
+  if (p === '/api/vec/search' && req.method === 'POST') {
+    const body = await readBody(req);
+    try {
+      const { chatId, query, topK, kinds } = JSON.parse(body || '{}');
+      if (!query || !String(query).trim()) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, error: '缺少检索内容' }));
+        return true;
+      }
+      const r = await vecSearch(sanitizeId(chatId || ''), String(query), Number(topK) || 6, Array.isArray(kinds) ? kinds : null);
+      res.writeHead(r.ok ? 200 : 400, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(r));
+    } catch (e) {
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, error: String(e && e.message || e) }));
+    }
+    return true;
+  }
+  return false;
+}
+
+async function h_api_vec_config(req, res, url, p) {
+  // 向量配置读写（Key / 端点 / 模型 / 自动注入开关 / topK / 最低分）
+  if (p === '/api/vec/config' && req.method === 'POST') {
+    const body = await readBody(req);
+    try {
+      const u = JSON.parse(body || '{}');
+      if (typeof u.apiKey === 'string') State.vecConfig.apiKey = u.apiKey.trim();
+      if (typeof u.baseURL === 'string' && u.baseURL.trim()) {
+        const raw = u.baseURL.trim().replace(/\/+$/, '');
+        let parsed = null;
+        try { parsed = new URL(raw); } catch (e) { parsed = null; }
+        // 仅校验协议合法（允许本机/局域网端点：本地 embedding 服务是离线场景的主要用法，
+        // 与「AI 场景插图」的 baseURL 配置口径一致）
+        if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, error: 'embedding 端点必须是合法的 http/https 地址' }));
+          return true;
+        }
+        State.vecConfig.baseURL = raw.slice(0, 300);
+      }
+      if (typeof u.model === 'string' && u.model.trim()) State.vecConfig.model = u.model.trim().slice(0, 100);
+      if (typeof u.autoInject === 'boolean') State.vecConfig.autoInject = u.autoInject;
+      if (Number.isFinite(u.injectTopK) && u.injectTopK >= 1 && u.injectTopK <= 12) State.vecConfig.injectTopK = Math.round(u.injectTopK);
+      if (Number.isFinite(u.minScore) && u.minScore >= 0 && u.minScore <= 1) State.vecConfig.minScore = u.minScore;
+      saveVecConfig();
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        ok: true,
+        config: {
+          autoInject: State.vecConfig.autoInject,
+          injectTopK: State.vecConfig.injectTopK,
+          minScore: State.vecConfig.minScore,
+          baseURL: State.vecConfig.baseURL,
+          model: State.vecConfig.model,
+          hasKey: !!vecApiKey(),
+        },
+      }));
+    } catch (e) {
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, error: String(e) }));
+    }
+    return true;
+  }
+  return false;
+}
+
 async function h_api_memory_search_45(req, res, url, p) {
   // 语义回忆：BM25 搜索聊天历史（跨会话或指定会话）
     if (p === '/api/memory/search' && req.method === 'POST') {
@@ -4371,6 +4653,27 @@ async function h_api_chat_74(req, res, url, p) {
       // 剧情记忆注入（场景、角色、关系）
       const storyMemory = buildStoryMemory(payload.chatId || '');
       if (storyMemory) system += '\n\n---\n\n' + storyMemory;
+      // 向量语义召回（默认关闭）：用本轮用户输入做 query，从索引里召回语义相关的旧剧情。
+      // 补足「关键词检索搜不到近义表达」的缺口（如问「那次告白」能召回「表白/心意」相关段落）。
+      // 失败/未建索引/未开开关 → 静默跳过，不影响正常对话。
+      if (State.vecConfig.autoInject) {
+        try {
+          const lastUser = [...(payload.messages || [])].reverse().find(m => m.role === 'user');
+          const q = lastUser ? String(lastUser.content || '').slice(0, 500) : '';
+          if (q.trim()) {
+            const vr = await vecSearch(payload.chatId || '', q, State.vecConfig.injectTopK || 4, null);
+            if (vr.ok && vr.hits && vr.hits.length) {
+              const minScore = Number.isFinite(State.vecConfig.minScore) ? State.vecConfig.minScore : 0.35;
+              const kept = vr.hits.filter(h => h.score >= minScore);
+              if (kept.length) {
+                const kindLabel = { event: '事件', msg: '对话', summary: '早期摘要' };
+                const lines = kept.map(h => `· [${kindLabel[h.kind] || h.kind}｜相关度 ${h.score.toFixed(2)}] ${String(h.text).replace(/\s+/g, ' ').slice(0, 300)}`);
+                system += `\n\n---\n\n## 🔍 语义召回的相关旧剧情（按与当前话题的相关度，仅供回忆参考）\n${lines.join('\n')}`;
+              }
+            }
+          }
+        } catch (e) { /* 向量召回失败不影响对话 */ }
+      }
       // 开局提示词保底：首条长消息原文注入 system（每轮都在，不参与 maxContext 裁剪/自动压缩）
       if (pinFirst) {
         system += '\n\n---\n\n## 会话开局提示词（首条消息原文，每轮保底注入；与「会话常驻设定」冲突时以常驻设定为准）\n' + String(firstMsg.content).trim();
@@ -4674,6 +4977,10 @@ const ROUTES = [
   { test: (p, req) => (p === '/api/analyze/retro' && req.method === 'POST'), handler: h_api_analyze_retro_44 },
   { test: (p, req) => (p === '/api/memory/search' && req.method === 'POST'), handler: h_api_memory_search_45 },
   { test: (p, req) => (p === '/api/story-memory/summary' && req.method === 'GET'), handler: h_api_story_memory_summary },
+  { test: (p, req) => (p === '/api/vec/status' && req.method === 'GET'), handler: h_api_vec_status },
+  { test: (p, req) => (p === '/api/vec/build' && req.method === 'POST'), handler: h_api_vec_build },
+  { test: (p, req) => (p === '/api/vec/search' && req.method === 'POST'), handler: h_api_vec_search },
+  { test: (p, req) => (p === '/api/vec/config' && req.method === 'POST'), handler: h_api_vec_config },
   { test: (p, req) => (/^\/api\/cards\/export\/([^/]+)$/).test(p) && (req.method === 'GET'), handler: h_route_46 },
   { test: (p, req) => (p === '/api/cards/import' && req.method === 'POST'), handler: h_api_cards_import_47 },
   { test: (p, req) => (p === '/api/illustration/generate' && req.method === 'POST'), handler: h_api_illustration_generate_48 },

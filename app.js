@@ -1046,6 +1046,7 @@ async function generate() {
     loadEmotions();
     loadLocationsUI();
     loadStats();      // 会话统计
+    refreshVecStaleBadge();   // 新回合可能让向量索引过期，更新角标提醒
   }
 }
 
@@ -1399,6 +1400,7 @@ async function newChat() {
     loadChatList();
     loadChatProfileManage();   // 配置档按会话刷新（新会话标记跟随）
     loadTimeline();   // 剧情记忆按会话隔离，切会话后刷新
+    refreshVecStaleBadge();   // 按会话检查向量索引是否过期
     loadBookmarksUI();   // 书签按会话加载（同步自正式版 NEW-2）
     loadInventory();
     loadSessionNote();   // 会话常驻设定按会话加载（新会话为空）
@@ -1460,6 +1462,7 @@ async function openChat(id) {
     loadChatList();
     loadChatProfileManage();   // 配置档按会话刷新（切换对话后「← 当前会话」标记跟随）
     loadTimeline();   // 剧情记忆按会话隔离，切会话后刷新
+    refreshVecStaleBadge();   // 按会话检查向量索引是否过期
     loadBookmarksUI();   // 书签按会话加载（同步自正式版 NEW-2）
     loadInventory();
     loadCurrentWardrobe();
@@ -2001,6 +2004,7 @@ const tmTabWd = document.getElementById('tm-tab-wd');
 const tmTabEm = document.getElementById('tm-tab-em');
 const tmTabAuto = document.getElementById('tm-tab-auto');
 const tmTabLoc = document.getElementById('tm-tab-loc');
+const tmTabVec = document.getElementById('tm-tab-vec');
 const tmTimeline = document.getElementById('tm-timeline');
 const tmInventory = document.getElementById('tm-inventory');
 const tmWardrobe = document.getElementById('tm-wardrobe');
@@ -2247,39 +2251,44 @@ async function loadInventory() {
 const tmEditTl = document.querySelector('.tm-edit:not(#inv-edit)');  // 手动补记（时间线）编辑区
 const tmEditInv = document.getElementById('inv-edit');                // 手动修改物品栏编辑区
 function setTmTabVis(active) {
-  const map = { tl: [tmTimeline, tmEditTl], inv: [tmInventory, tmEditInv], wd: [tmWardrobe], em: [tmEmotions], auto: [tmAuto], loc: [tmLocations] };
+  const map = { tl: [tmTimeline, tmEditTl], inv: [tmInventory, tmEditInv], wd: [tmWardrobe], em: [tmEmotions], auto: [tmAuto], loc: [tmLocations], vec: [document.getElementById('tm-vec')] };
   for (const [k, els] of Object.entries(map)) {
     els.forEach(el => { if (el) el.classList.toggle('hidden', k !== active); });
   }
 }
 tmTabTl.addEventListener('click', () => {
-  tmTabTl.classList.add('active'); tmTabInv.classList.remove('active'); tmTabWd.classList.remove('active'); tmTabEm.classList.remove('active'); tmTabAuto.classList.remove('active'); tmTabLoc.classList.remove('active');
+  tmTabTl.classList.add('active'); tmTabInv.classList.remove('active'); tmTabWd.classList.remove('active'); tmTabEm.classList.remove('active'); tmTabAuto.classList.remove('active'); tmTabLoc.classList.remove('active'); tmTabVec.classList.remove('active');
   setTmTabVis('tl');
 });
 tmTabInv.addEventListener('click', () => {
-  tmTabInv.classList.add('active'); tmTabTl.classList.remove('active'); tmTabWd.classList.remove('active'); tmTabEm.classList.remove('active'); tmTabAuto.classList.remove('active'); tmTabLoc.classList.remove('active');
+  tmTabInv.classList.add('active'); tmTabTl.classList.remove('active'); tmTabWd.classList.remove('active'); tmTabEm.classList.remove('active'); tmTabAuto.classList.remove('active'); tmTabLoc.classList.remove('active'); tmTabVec.classList.remove('active');
   setTmTabVis('inv');
   loadInventory();
 });
 tmTabWd.addEventListener('click', () => {
-  tmTabWd.classList.add('active'); tmTabTl.classList.remove('active'); tmTabInv.classList.remove('active'); tmTabEm.classList.remove('active'); tmTabAuto.classList.remove('active'); tmTabLoc.classList.remove('active');
+  tmTabWd.classList.add('active'); tmTabTl.classList.remove('active'); tmTabInv.classList.remove('active'); tmTabEm.classList.remove('active'); tmTabAuto.classList.remove('active'); tmTabLoc.classList.remove('active'); tmTabVec.classList.remove('active');
   setTmTabVis('wd');
   loadCurrentWardrobe();
 });
 tmTabEm.addEventListener('click', () => {
-  tmTabEm.classList.add('active'); tmTabTl.classList.remove('active'); tmTabInv.classList.remove('active'); tmTabWd.classList.remove('active'); tmTabAuto.classList.remove('active'); tmTabLoc.classList.remove('active');
+  tmTabEm.classList.add('active'); tmTabTl.classList.remove('active'); tmTabInv.classList.remove('active'); tmTabWd.classList.remove('active'); tmTabAuto.classList.remove('active'); tmTabLoc.classList.remove('active'); tmTabVec.classList.remove('active');
   setTmTabVis('em');
   loadEmotions();
 });
 tmTabAuto.addEventListener('click', () => {
-  tmTabAuto.classList.add('active'); tmTabTl.classList.remove('active'); tmTabInv.classList.remove('active'); tmTabWd.classList.remove('active'); tmTabEm.classList.remove('active'); tmTabLoc.classList.remove('active');
+  tmTabAuto.classList.add('active'); tmTabTl.classList.remove('active'); tmTabInv.classList.remove('active'); tmTabWd.classList.remove('active'); tmTabEm.classList.remove('active'); tmTabLoc.classList.remove('active'); tmTabVec.classList.remove('active');
   setTmTabVis('auto');
   loadStoryMemoryUI();
 });
 tmTabLoc.addEventListener('click', () => {
-  tmTabLoc.classList.add('active'); tmTabTl.classList.remove('active'); tmTabInv.classList.remove('active'); tmTabWd.classList.remove('active'); tmTabEm.classList.remove('active'); tmTabAuto.classList.remove('active');
+  tmTabLoc.classList.add('active'); tmTabTl.classList.remove('active'); tmTabInv.classList.remove('active'); tmTabWd.classList.remove('active'); tmTabEm.classList.remove('active'); tmTabAuto.classList.remove('active'); tmTabVec.classList.remove('active');
   setTmTabVis('loc');
   loadLocationsUI();
+});
+tmTabVec.addEventListener('click', () => {
+  tmTabVec.classList.add('active'); tmTabTl.classList.remove('active'); tmTabInv.classList.remove('active'); tmTabWd.classList.remove('active'); tmTabEm.classList.remove('active'); tmTabAuto.classList.remove('active'); tmTabLoc.classList.remove('active');
+  setTmTabVis('vec');
+  loadVecStatus();
 });
 
 // ---------- 剧情记忆手动编辑：时间线补记 / 物品栏增删 / 当前着装 ----------
@@ -4221,6 +4230,150 @@ document.getElementById('memory-config-btn')?.addEventListener('click', async ()
   overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
 });
 loadStoryMemoryUI();
+
+// ===== 向量语义检索面板（同步自正式版批E · 2026-09-18）=====
+// 索引过期角标：不打开「🔍 语义」tab 也能看到提醒。
+// 触发条件：已建过索引 且 待索引块数比已索引多出 VEC_STALE_THRESHOLD 以上（聊了不少新内容）。
+const VEC_STALE_THRESHOLD = 20;
+async function refreshVecStaleBadge() {
+  const badge = document.getElementById('vec-stale-badge');
+  if (!badge || !App.chatId) return;
+  try {
+    const d = await (await fetch(`/api/vec/status?chatId=${encodeURIComponent(App.chatId)}`)).json();
+    const stale = d.ok && d.built && (Number(d.pending) - Number(d.total)) >= VEC_STALE_THRESHOLD;
+    badge.classList.toggle('hidden', !stale);
+    if (stale) badge.title = `向量索引有 ${d.pending - d.total} 块新内容未收录，建议到「🔍 语义」tab 重建索引`;
+  } catch (e) { badge.classList.add('hidden'); }   // 查询失败不打扰
+}
+
+async function loadVecStatus() {
+  const box = document.getElementById('vec-status');
+  if (!box) return;
+  if (!App.chatId) { box.textContent = '无会话'; return; }
+  try {
+    const d = await (await fetch(`/api/vec/status?chatId=${encodeURIComponent(App.chatId)}`)).json();
+    if (!d.ok) { box.textContent = '状态读取失败'; return; }
+    const kindLabel = { event: '事件', msg: '对话', summary: '摘要' };
+    if (!d.built) {
+      box.innerHTML = `<span style="color:var(--warning)">尚未建立索引</span>　可索引内容：<b>${d.pending}</b> 块<br>
+        <span style="color:var(--muted)">${d.config.hasKey ? '已检测到 API Key' : '⚠️ 未配置 embedding Key（点 ⚙️ 设置填写，或配置辅助 API / 环境变量）'}</span>`;
+      return;
+    }
+    const kinds = Object.entries(d.byKind).map(([k, n]) => `${kindLabel[k] || k} ${n}`).join(' / ');
+    const stale = d.pending > d.total;
+    box.innerHTML = `已索引 <b>${d.total}</b> 块（${kinds}）<br>
+      <span style="color:var(--muted)">建立于 ${String(d.at).slice(0, 19).replace('T', ' ')}　模型 ${safeHtml(d.model)}</span><br>
+      ${stale ? `<span style="color:var(--warning)">⚠️ 有 ${d.pending - d.total} 块新内容未入索引，建议重建</span><br>` : ''}
+      自动注入：<b style="color:${d.config.autoInject ? 'var(--success)' : 'var(--muted)'}">${d.config.autoInject ? '开启' : '关闭'}</b>
+      （TopK ${d.config.injectTopK}，最低相关度 ${d.config.minScore}）`;
+  } catch (e) { box.textContent = '状态读取异常：' + e.message; }
+}
+
+async function doVecSearch() {
+  const q = document.getElementById('vec-query')?.value.trim();
+  const out = document.getElementById('vec-results');
+  if (!out) return;
+  if (!q) { toast('请输入搜索内容'); return; }
+  if (!App.chatId) { toast('无会话'); return; }
+  out.innerHTML = '<div style="color:var(--muted);padding:8px">检索中…</div>';
+  try {
+    const r = await fetch('/api/vec/search', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId: App.chatId, query: q, topK: 8 }),
+    });
+    const d = await r.json();
+    if (!d.ok) { out.innerHTML = `<div style="color:var(--danger);padding:8px">${safeHtml(d.error || '检索失败')}</div>`; return; }
+    if (!d.hits.length) { out.innerHTML = '<div style="color:var(--muted);padding:8px">无匹配结果</div>'; return; }
+    const kindLabel = { event: '事件', msg: '对话', summary: '摘要' };
+    out.innerHTML = d.hits.map(h => {
+      const pct = (h.score * 100).toFixed(0);
+      const color = h.score >= 0.6 ? 'var(--success)' : (h.score >= 0.4 ? 'var(--accent)' : 'var(--muted)');
+      return `<div style="padding:6px 8px;margin-bottom:6px;background:var(--bg2);border-radius:6px;border-left:2px solid ${color}">
+        <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:2px">
+          <span style="color:var(--accent);font-size:11px">${kindLabel[h.kind] || h.kind}${h.role ? '·' + (h.role === 'user' ? '用户' : 'AI') : ''}${h.seq != null ? ' #' + h.seq : ''}</span>
+          <span style="color:${color};font-size:11px">${pct}%</span>
+        </div>
+        <div style="color:var(--text);line-height:1.5">${safeHtml(String(h.text).slice(0, 400))}</div>
+      </div>`;
+    }).join('');
+  } catch (e) { out.innerHTML = `<div style="color:var(--danger);padding:8px">检索异常：${safeHtml(e.message)}</div>`; }
+}
+
+document.getElementById('vec-search-btn')?.addEventListener('click', doVecSearch);
+document.getElementById('vec-query')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doVecSearch(); } });
+
+document.getElementById('vec-build-btn')?.addEventListener('click', async () => {
+  if (!App.chatId) { toast('无会话'); return; }
+  const btn = document.getElementById('vec-build-btn');
+  const old = btn.textContent;
+  btn.textContent = '建索引中…（首次较慢）';
+  btn.disabled = true;
+  try {
+    const d = await (await fetch('/api/vec/build', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId: App.chatId }),
+    })).json();
+    if (d.ok) {
+      const kinds = Object.entries(d.byKind || {}).map(([k, n]) => `${k} ${n}`).join('/');
+      toast(`✅ 索引完成：${d.total} 块（${kinds}）`);
+    } else { toast(d.error || '建索引失败', 'err'); }
+  } catch (e) { toast('建索引异常：' + e.message, 'err'); }
+  btn.textContent = old;
+  btn.disabled = false;
+  loadVecStatus();
+});
+
+document.getElementById('vec-config-btn')?.addEventListener('click', async () => {
+  const st = await (await fetch(`/api/vec/status?chatId=${encodeURIComponent(App.chatId || '')}`)).json().catch(() => ({}));
+  const cfg = (st && st.config) || {};
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `<div class="modal-box u-modal-sm">
+    <div style="font-size:15px;font-weight:500;margin-bottom:12px">🔍 语义检索设置</div>
+    <label class="api-field">embedding 端点（OpenAI 兼容 <code>/embeddings</code>）
+      <input id="vc-base" type="text" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1" value="${safeHtml(cfg.baseURL || '')}" style="width:100%">
+    </label>
+    <label class="api-field">embedding 模型名
+      <input id="vc-model" type="text" value="${safeHtml(cfg.model || '')}" style="width:100%">
+    </label>
+    <label class="api-field">embedding API Key（留空则复用「辅助 API」的 Key / 环境变量）
+      <input id="vc-key" type="password" placeholder="${cfg.hasKey ? '已配置（留空保持不变）' : 'sk-...'}" style="width:100%">
+    </label>
+    <label style="display:flex;align-items:center;gap:8px;margin:10px 0">
+      <input type="checkbox" id="vc-auto" ${cfg.autoInject ? 'checked' : ''}> 自动注入（每轮用你的输入语义召回相关旧剧情给 AI）
+    </label>
+    <label class="api-field">召回条数 TopK
+      <input id="vc-topk" type="number" min="1" max="12" step="1" value="${cfg.injectTopK ?? 4}">
+    </label>
+    <label class="api-field">最低相关度（0-1，低于此值不注入）
+      <input id="vc-min" type="number" min="0" max="1" step="0.05" value="${cfg.minScore ?? 0.35}">
+    </label>
+    <div class="api-msg" style="margin-top:8px">⚠️ 自动注入会在每轮对话额外调用一次 embedding（有少量费用；本地端点则无）。索引本身只在点「建立/重建索引」时计算。</div>
+    <div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px">
+      <button id="vc-cancel" class="btn-sm" style="padding:6px 16px">取消</button>
+      <button id="vc-save" class="btn-sm" style="padding:6px 16px;background:var(--accent);color:#fff;border:none;border-radius:6px">保存</button>
+    </div>
+  </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#vc-cancel').onclick = () => overlay.remove();
+  overlay.querySelector('#vc-save').onclick = async () => {
+    const body = {
+      baseURL: overlay.querySelector('#vc-base').value.trim(),
+      model: overlay.querySelector('#vc-model').value.trim(),
+      autoInject: overlay.querySelector('#vc-auto').checked,
+      injectTopK: Number(overlay.querySelector('#vc-topk').value) || 4,
+      minScore: Number(overlay.querySelector('#vc-min').value),
+    };
+    const k = overlay.querySelector('#vc-key').value.trim();
+    if (k) body.apiKey = k;
+    const d = await (await fetch('/api/vec/config', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    })).json();
+    if (d.ok) { toast('✅ 设置已保存'); overlay.remove(); loadVecStatus(); refreshVecStaleBadge(); }
+    else { toast(d.error || '保存失败', 'err'); }
+  };
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+});
 
 // ---------- 地点档案管理 UI（知识库格式，可导出 markdown 复用） ----------
 App.locationDetailsCache = [];
