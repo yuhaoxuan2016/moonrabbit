@@ -2756,7 +2756,7 @@ function pngCreateWithTextChunk(imageBuffer, keyword, text) {
     } catch (e) { return null; }
   }
 
-// 场景插图：AI 图片生成（硅基流动，OpenAI 兼容 /images/generations）
+// 场景插图：AI 图片生成（OpenAI 兼容 /images/generations；端点可配）
   // Kolors 免费；Z-Image/Qwen-Image/ERNIE 等按张计费（¥0.10-0.30/张，共用同一 key）
   const SILICON_BASE = 'https://api.siliconflow.cn/v1';
 
@@ -2779,7 +2779,7 @@ function getSiliconImgKey() {
   }
 
 // 提示词优化：把中文场景描述润色成高质量英文生图提示词。
-  // 独立用 models.json 里的硅基流动对话端点（生图同款 key 可通用于 chat），不依赖主端点(可能失效的 key)
+  // 独立用本机模型配置里可用的对话端点（生图同款 key 可通用于 chat），不依赖主端点(可能失效的 key)
   function getSiliconChatCfg() {
     try {
       const cfgPath = path.join(process.env.USERPROFILE || process.env.HOME || '', '.workbuddy', 'models.json');
@@ -2794,7 +2794,7 @@ function getSiliconImgKey() {
   }
 
 // 语音朗读：TTS 配置和合成
-  // MiMo 官方 TTS（token-plan 免费，OpenAI 兼容 chat/completions + audio）
+  // TTS（OpenAI 兼容 chat/completions + audio；引擎键名沿用 mimo，可换成任意兼容端点）
   const MIMO_TTS_MODEL = 'mimo-v2.5-tts';
 
 const MIMO_TTS_BASE = 'https://token-plan-cn.xiaomimimo.com/v1';
@@ -2802,7 +2802,7 @@ const MIMO_TTS_BASE = 'https://token-plan-cn.xiaomimimo.com/v1';
 const MIMO_TTS_VOICES = ['mimo_default', 'default_zh', 'default_en', 'Mia', 'Chloe', 'Milo', 'Dean'];
 
 function getMimoTtsKey() {
-    // 复用 WorkBuddy 模型配置里的 MiMo key（tp-...，token-plan 免费）
+    // 复用本机模型配置里匹配该引擎的 key（找不到就回落到界面里手填）
     try {
       const cfgPath = path.join(process.env.USERPROFILE || process.env.HOME || '', '.workbuddy', 'models.json');
       if (!fs.existsSync(cfgPath)) return '';
@@ -4088,7 +4088,7 @@ async function h_api_illustration_generate_48(req, res, url, p) {
         const key = config.apiKey || getSiliconImgKey();
         if (!key) {
           res.writeHead(501, { 'content-type': 'application/json; charset=utf-8' });   // MINOR-1：需配置
-          { res.end(JSON.stringify({ error: '图片生成功能未配置。请在设置中配置硅基流动 API Key，或确认 ~/.workbuddy/models.json 中存在硅基流动端点。', needConfig: true })); return true; };
+          { res.end(JSON.stringify({ error: '图片生成功能未配置。请在设置中填入图片生成 API Key，或确认本机模型配置里有可用端点。', needConfig: true })); return true; };
         }
         const baseURL = (config.baseURL || SILICON_BASE).replace(/\/+$/, '');
         const modelKey = String(config.engine || 'kolors');
@@ -4149,7 +4149,7 @@ async function h_api_illustration_enhance_50(req, res, url, p) {
         const { prompt, style } = JSON.parse(body);
         if (!prompt || !String(prompt).trim()) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '缺少场景描述' })); return true; }; }
         const cfg = getSiliconChatCfg();
-        if (!cfg) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '未能从 ~/.workbuddy/models.json 读取硅基流动对话端点，无法优化提示词', status: 503 })); return true; }; }
+        if (!cfg) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: '未能从本机模型配置读取可用的对话端点，无法优化提示词', status: 503 })); return true; }; }
         const styleHint = style ? `（风格：${style}）` : '';
         const sys = '你是专业 AI 绘画提示词工程师。请把用户的中文场景描述改写成一段高质量、可直接用于文生图模型的英文提示词。要求：只输出英文提示词正文，不要任何解释、编号、引号或多余文字；用逗号分隔的关键词短语，包含场景环境、光线、氛围、主体、材质/风格关键词；控制在 6-12 个短语内。';
         const callR = await fetch(cfg.chatUrl, {
@@ -4259,12 +4259,12 @@ async function h_api_tts_synthesize_53(req, res, url, p) {
         }
         
         if (config.engine === 'mimo') {
-          // MiMo 官方 TTS：文本放 assistant 消息，audio 参数指定音色（token-plan 免费）
-          // 三模型：mimo-v2.5-tts（内置音色）/ -voicedesign（文字设计声线）/ -voiceclone（参考音频克隆）
+          // TTS：文本放 assistant 消息，audio 参数指定音色
+          // 三个模型 id：mimo-v2.5-tts（内置音色）/ -voicedesign（文字设计声线）/ -voiceclone（参考音频克隆）
           const mimoKey = config.apiKey || getMimoTtsKey();
           if (!mimoKey) {
             res.writeHead(501, { 'content-type': 'application/json; charset=utf-8' });   // MINOR-1：需配置
-            { res.end(JSON.stringify({ error: '未找到 MiMo API Key。可在 TTS 配置中手动填写，或确认 ~/.workbuddy/models.json 里有 MiMo (tp-) 配置。', needConfig: true })); return true; };
+            { res.end(JSON.stringify({ error: '未找到该引擎的 API Key。请在 TTS 设置里填入，或确认本机模型配置里有对应条目。', needConfig: true })); return true; };
           }
           const useModel = String(model || characterModel || config.model || MIMO_TTS_MODEL).slice(0, 40);
           if (!/^mimo-v2\.5-tts/.test(useModel)) {
@@ -4306,24 +4306,24 @@ async function h_api_tts_synthesize_53(req, res, url, p) {
           if (!audioResp.ok) {
             const errText = await audioResp.text();
             res.writeHead(502, { 'content-type': 'application/json; charset=utf-8' });   // MINOR-1：上游失败
-            { res.end(JSON.stringify({ error: `MiMo TTS 请求失败（HTTP ${audioResp.status}）：${errText.slice(0, 200)}` })); return true; };
+            { res.end(JSON.stringify({ error: `TTS 请求失败（HTTP ${audioResp.status}）：${errText.slice(0, 200)}` })); return true; };
           }
           const ar = await audioResp.json();
           const audioData = ar && ar.choices && ar.choices[0] && ar.choices[0].message && ar.choices[0].message.audio && ar.choices[0].message.audio.data;
           if (!audioData) {
             res.writeHead(502, { 'content-type': 'application/json; charset=utf-8' });   // MINOR-1：上游返回异常
-            { res.end(JSON.stringify({ error: 'MiMo TTS 响应缺少音频数据', raw: JSON.stringify(ar).slice(0, 200) })); return true; };
+            { res.end(JSON.stringify({ error: 'TTS 响应缺少音频数据', raw: JSON.stringify(ar).slice(0, 200) })); return true; };
           }
           res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-          { res.end(JSON.stringify({ ok: true, audio: audioData, format: audioParam.format, voice: voiceLabel, model: useModel, message: `MiMo TTS 合成成功（${useModel === 'mimo-v2.5-tts' ? voiceLabel : useModel === 'mimo-v2.5-tts-voicedesign' ? '声线设计' : '声音克隆'}）` })); return true; };
+          { res.end(JSON.stringify({ ok: true, audio: audioData, format: audioParam.format, voice: voiceLabel, model: useModel, message: `TTS 合成成功（${useModel === 'mimo-v2.5-tts' ? voiceLabel : useModel === 'mimo-v2.5-tts-voicedesign' ? '声线设计' : '声音克隆'}）` })); return true; };
         }
         if (config.engine === 'none') {
           res.writeHead(501, { 'content-type': 'application/json; charset=utf-8' });   // MINOR-1：需配置
-          { res.end(JSON.stringify({ error: '语音合成功能未配置。请在设置中配置 TTS 引擎（支持 MiMo TTS / Edge TTS / OpenAI TTS）。', needConfig: true })); return true; };
+          { res.end(JSON.stringify({ error: '语音合成功能未配置。请在设置中配置 TTS 引擎（内置三种：mimo / edge / openai）。', needConfig: true })); return true; };
         }
         // edge/openai 引擎：预留（需接入对应 SDK/API 后启用）
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-        { res.end(JSON.stringify({ ok: true, status: 'pending', message: `TTS 引擎 ${config.engine} 尚未接入实际合成，当前请使用 MiMo 引擎。`, config: { engine: config.engine, voice: useVoice, rate: useRate } })); return true; };
+        { res.end(JSON.stringify({ ok: true, status: 'pending', message: `TTS 引擎 ${config.engine} 尚未接入实际合成，当前请使用 mimo 引擎。`, config: { engine: config.engine, voice: useVoice, rate: useRate } })); return true; };
       } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }); { res.end(JSON.stringify({ error: String(e) })); return true; }; }
     }
   return false;

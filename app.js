@@ -2831,7 +2831,7 @@ function openIllustration(prefillText) {
     } catch (e) { resBox.innerHTML = `<div style="color:var(--danger);padding:12px">优化失败：${safeHtml(e.message)}</div>`; }
     finally { btn.textContent = oldText; btn.disabled = false; }
   };
-  // 风格 → 英文提示词片段（硅基流动对英文更稳）
+  // 风格 → 英文提示词片段（该端点对英文提示更稳）
   const styleToEn = (s) => {
     const map = { anime: ', anime style, cel shading, vibrant colors', realistic: ', photorealistic, cinematic lighting, high detail', watercolor: ', watercolor painting style, soft colors', sketch: ', pencil sketch, monochrome, line art' };
     return map[s] || '';
@@ -2850,7 +2850,7 @@ function openIllustration(prefillText) {
       const d = await r.json();
       if (d.error) {
         resBox.innerHTML = `<div style="color:var(--danger);padding:12px">${safeHtml(d.error)}</div>`;
-        if (d.needConfig) resBox.innerHTML += '<div style="font-size:12px;color:var(--muted,#888);margin-top:8px">点击「配置」按钮设置图片生成 API Key（硅基流动）</div>';
+        if (d.needConfig) resBox.innerHTML += '<div style="font-size:12px;color:var(--muted,#888);margin-top:8px">点击「配置」按钮设置图片生成 API Key</div>';
         return;
       }
       if (d.image) {
@@ -2866,8 +2866,8 @@ function openIllustration(prefillText) {
   overlay.querySelector('#ill-config').onclick = async () => {
     const engine = prompt('引擎（kolors/schnell/dev）：', 'kolors');
     if (!engine) return;
-    const apiKey = prompt('API Key（留空则用 models.json 里的硅基流动 key）：');
-    const baseURL = prompt('Base URL（留空用默认 api.siliconflow.cn/v1）：', '');
+    const apiKey = prompt('API Key（留空则尝试读本机模型配置）：');
+    const baseURL = prompt('Base URL（留空用内置默认端点）：', '');
     try {
       await fetch('/api/illustration/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ engine, apiKey, baseURL }) });
       toast('✅ 配置已保存');
@@ -2968,7 +2968,7 @@ function openTts(text) {
         return;
       }
       if (d.audio) {
-        // MiMo TTS 返回 base64 音频 → 直接播放
+        // TTS 返回 base64 音频 → 直接播放
         const a = new Audio('data:audio/' + (d.format || 'mp3') + ';base64,' + d.audio);
         a.play().catch(() => {});
         resBox.innerHTML = `<div style="color:var(--success);padding:8px">▶ ${safeHtml(d.message || '合成成功')}</div>`;
@@ -2978,10 +2978,10 @@ function openTts(text) {
     } catch (e) { resBox.textContent = '请求失败：' + e.message; }
   };
   overlay.querySelector('#tts-config').onclick = async () => {
-    const engine = prompt('TTS 引擎（mimo/edge/openai，mimo=MiMo 官方免费）：', 'mimo');
+    const engine = prompt('TTS 引擎（mimo / edge / openai）：', 'mimo');
     if (!engine) return;
-    const apiKey = prompt('API Key（mimo 引擎可留空，自动读 WorkBuddy 配置）：', '');
-    const voice = prompt('语音（mimo 内置：mimo_default / default_zh / default_en / Mia / Chloe / Milo / Dean）：', 'mimo_default');
+    const apiKey = prompt('API Key（可留空，将尝试读本机模型配置）：', '');
+    const voice = prompt('语音（内置音色 id：mimo_default / default_zh / default_en / Mia / Chloe / Milo / Dean）：', 'mimo_default');
     const rate = prompt('语速（0.5-2.0）：', '1.0');
     try {
       await fetch('/api/tts/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ engine, apiKey, voice, rate }) });

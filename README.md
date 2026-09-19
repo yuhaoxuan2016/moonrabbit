@@ -94,7 +94,7 @@ data/vec-config.json          语义检索配置（含 embedding 端点/模型/K
 - **零 npm 依赖**：核心仅使用 Node.js 内置模块（`http` / `fs` / `path` / `net`），**无需 `npm install`**；运行仅要求 **Node ≥ 18**（`fetch` 等 API 为内置）
 - **零前端框架**：界面为纯原生 JS，无 Vue / React / 无 CDN 外链；主题、世界设定、会话数据全部本地存储（浏览器 localStorage + `data/`）
 - **核心零外部服务**：检索 / 摘要 / 记账全部本地完成；**只有 LLM 对话**走你配置的端点
-- **可选外部服务（按需开启）**：联网搜索（`web_search` 工具）、AI 场景插图（硅基流动 `/images/generations`）、TTS 语音（MiMo tts）、语义检索的 embedding 端点等为**可选增强能力**，由用户显式开启才使用，未开启不影响核心功能，且**均为运行时 HTTP 调用而非 npm 依赖**
+- **可选外部服务（按需开启）**：联网搜索（`web_search` 工具）、AI 场景插图（`/images/generations`，端点可配）、TTS 语音（端点可配）、语义检索的 embedding 端点等为**可选增强能力**，由用户显式开启才使用，未开启不影响核心功能，且**均为运行时 HTTP 调用而非 npm 依赖**
 - **内容与平台解耦**：不内置任何世界观 / 角色，一切设定由用户填写
 
 ## 相关项目
