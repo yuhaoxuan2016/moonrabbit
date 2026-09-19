@@ -2323,7 +2323,15 @@ function normalizeToolsState() {
 }
 normalizeToolsState();
 function toolsEnabled(chatId) { return (State.opState.tools && State.opState.tools[sanitizeId(chatId)]) || []; }
-async function executeBridgeTool(name, input) {
+async function executeBridgeTool(name, input, chatId) {
+  // agent 只读工具（默认关闭；只有开关开时才放行——关掉即与未移植前一致）
+  if (name !== 'web_search' && agentTools.handlers[name]) {
+    if (!agentModeOn(chatId || '')) return '未知工具: ' + name;
+    try {
+      const res = await agentTools.handlers[name](input || {}, chatId || '');
+      return agentTools.stringify(res);
+    } catch (e) { return '工具异常: ' + (e && e.message || e); }
+  }
   if (name !== 'web_search') return '未知工具: ' + name;
   const q = String(input.query || '').slice(0, 200);
   const toolDef = { name: 'web_search', description: 'Search the web', input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } };
@@ -2414,9 +2422,11 @@ async function bridgeDirectTool(lastUserText) {
   }
   return res;
 }
-async function runBridgeToolLoop(messages, system, enabledNames) {
+async function runBridgeToolLoop(messages, system, enabledNames, chatId) {
   const enabledSet = new Set(enabledNames || []);
-  const tools = BRIDGE_TOOLS.filter((t) => enabledSet.has(t.name));
+  // agent 只读工具（默认关闭）：开关开时随联网工具一起下发给模型；关掉即与未移植前完全一致
+  const tools = BRIDGE_TOOLS.filter((t) => enabledSet.has(t.name))
+    .concat((chatId && agentModeOn(chatId)) ? agentTools.DEFS : []);
   if (!tools.length) return { messages: messages.slice(), trace: [], finalText: '' };
   let msgs = messages.slice();
   const trace = [];
@@ -2473,7 +2483,7 @@ async function runBridgeToolLoop(messages, system, enabledNames) {
       for (const tu of toolUses) {
         let resultText;
         if (!enabledSet.has(tu.name)) resultText = '工具不可用：' + tu.name + '（未在本会话开启）';
-        else try { resultText = await executeBridgeTool(tu.name, tu.input); }
+        else try { resultText = await executeBridgeTool(tu.name, tu.input, chatId); }
         catch (e) { resultText = '工具执行失败: ' + e.message; }
         trace.push({ name: tu.name, input: tu.input, resultHead: resultText.slice(0, 120) });
         results.push({ role: 'tool', tool_call_id: tu.id, content: String(resultText).slice(0, 5000) });
@@ -2486,7 +2496,7 @@ async function runBridgeToolLoop(messages, system, enabledNames) {
     for (const tu of toolUses) {
       let resultText;
       if (!enabledSet.has(tu.name)) resultText = '工具不可用：' + tu.name + '（未在本会话开启）';
-      else try { resultText = await executeBridgeTool(tu.name, tu.input); }
+      else try { resultText = await executeBridgeTool(tu.name, tu.input, chatId); }
       catch (e) { resultText = '工具执行失败: ' + e.message; }
       trace.push({ name: tu.name, input: tu.input, resultHead: resultText.slice(0, 120) });
       results.push({ type: 'tool_result', tool_use_id: tu.id, content: String(resultText).slice(0, 5000) });
@@ -5012,21 +5022,22 @@ merged = [{ role: 'user', content: `【历史摘要（${compressCount} 条旧消
       // 工具桥：联网搜索（独立开关，会话内持久）
       let toolTrace = null;
       const enabledNames = toolsEnabled(payload.chatId);
-      if (enabledNames.length) {
+      // 开关：联网工具按用户勾选；agent 助手开着时，另把 4 具只读工具一并下发（否则它们到不了模型）
+      if (enabledNames.length || (agentOn && agentTools.DEFS.length)) {
         try {
           const lastU = merged[merged.length - 1];
           const direct = (lastU && lastU.role === 'user' ? await bridgeDirectTool(lastU.content) : []).filter((d) => enabledNames.includes(d.name));
           if (direct.length) {
             const parts2 = [];
             for (const d of direct) {
-              const out = await executeBridgeTool(d.name, d.input);
+              const out = await executeBridgeTool(d.name, d.input, payload.chatId || '');
               parts2.push('[工具 ' + d.name + ']\n' + out);
               toolTrace = [...(toolTrace || []), { name: d.name, input: d.input, resultHead: out.slice(0, 120) }];
             }
             merged = merged.slice(0, -1).concat([{ role: 'user', content: lastU.content + '\n\n【工具结果】\n' + parts2.join('\n\n') }]);
             send({ type: 'tools', trace: toolTrace.map((t) => t.name + '(' + JSON.stringify(t.input).slice(0, 60) + ')') });
           } else {
-            const tr = await runBridgeToolLoop(merged, system, enabledNames);
+            const tr = await runBridgeToolLoop(merged, system, enabledNames, payload.chatId || '');
             merged = tr.messages;
             toolTrace = tr.trace;
             if (toolTrace && toolTrace.length) send({ type: 'tools', trace: toolTrace.map((t) => t.name + '(' + JSON.stringify(t.input).slice(0, 60) + ')') });
@@ -5264,6 +5275,112 @@ async function h_api_group(req, res, url, p) {
 }
 
 // 声明式保序路由表：数组顺序 = 匹配优先级（与原 if 链顺序严格一致）
+// ---------- agent 助手端点（开关 / Meta 通道 / 禁忌库）----------
+// 开关：纯配置态；Meta：只落 data/meta/，绝不写 data/chats/*；禁忌：create 一律 pending，只有 confirm 能生效。
+async function h_api_agent(req, res, url, p) {
+  const send = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); return true; };
+  const readJsonBody = async () => { try { return JSON.parse((await readBody(req)) || '{}'); } catch (e) { return null; } };
+
+  if (p === '/api/agent-mode' && req.method === 'GET') return send(200, { ok: true, ...agentModeLib.agentModeView(State.settings, State.opState) });
+  if (p === '/api/agent-mode' && req.method === 'POST') {
+    const o = await readJsonBody();
+    if (o === null) return send(400, { ok: false, error: 'body 不是 JSON' });
+    try {
+      const r = agentModeLib.applyAgentModeChange(o, {
+        getSettings: () => State.settings,
+        getOpState: () => State.opState,
+        saveSettings: (s) => { State.settings = s; saveSettings(s); },
+        saveOpState: () => saveOpState(),
+        sanitizeId: (x) => sanitizeId(x),
+      });
+      return send(200, { ok: true, changed: r.changed, ...r.view });
+    } catch (e) { return send(400, { ok: false, error: String(e && e.message || e) }); }
+  }
+
+  if (p === '/api/meta' && req.method === 'GET') {
+    const rawCid = String(url.searchParams.get('chatId') || '').trim();
+    if (!rawCid) return send(400, { ok: false, error: '缺少 chatId' });
+    const chatId = sanitizeId(rawCid);
+    if (chatId !== rawCid) return send(400, { ok: false, error: '会话 id 含非法字符' });
+    const entries = agentMeta.list(chatId, 50);
+    let cp = { knowledge: 0, direction: 0 }, cands = [];
+    try {
+      const pack = agentCogPackLib.buildCogPack(agentMeta.list(chatId, 0));
+      cp = { knowledge: pack.knowledge.length, direction: pack.direction.length };
+      cands = pack.candidates;
+    } catch (e) { /* 预览失败不影响历史读取 */ }
+    return send(200, { ok: true, entries, cogpack: cp, candidates: cands, count: agentMeta.count(chatId) });
+  }
+  if (p === '/api/meta' && req.method === 'POST') {
+    const o = await readJsonBody();
+    if (o === null) return send(400, { ok: false, error: 'body 不是 JSON' });
+    const rawCid = String(o.chatId || '').trim();
+    const text = String(o.text || '').trim();
+    if (!rawCid || !text) return send(400, { ok: false, error: '缺少 chatId/text' });
+    const chatId = sanitizeId(rawCid);
+    if (chatId !== rawCid) return send(400, { ok: false, error: '会话 id 含非法字符' });
+    if (!agentModeOn(chatId)) return send(200, { ok: false, error: 'agent 未开启' });
+    agentMeta.append(chatId, { role: 'user', raw: text.slice(0, 2000) });
+    let cls = '', tag = '', summary = '', note = '';
+    try {
+      const raw = await auxCall(agentMetaLib.buildClassifyPrompt(), agentMetaLib.buildClassifyUser(text), agentMetaLib.CLASSIFY_MAX_TOKENS, { thinking: { type: 'disabled' } }, (u) => agentMetaLib.addMetaUsage(agentTokenBucket(), u));
+      const pr = agentMetaLib.parseClassify(raw);
+      if (pr.ok) { cls = pr.data.cls; tag = pr.data.tag; summary = pr.data.summary; note = pr.note || ''; }
+      else note = pr.error || '分类失败';
+    } catch (e) { note = '分类调用失败：' + e.message; }
+    const entry = { role: 'agent', cls: cls || 'query', tag, summary: summary || text.slice(0, 200), srcRaw: text.slice(0, 600) };
+    if (cls === 'query' && /查了|查什么|查过|工具|trace|注入/.test(text)) entry.trace = agentInjected.render(chatId);
+    agentMeta.append(chatId, entry);
+    // 修正流入口：纠错话（或前端显式 fix:true）→ 跑纠错助手；**只回显三动作，不自动入库**
+    let fix = null;
+    if (o.fix === true || (cls !== 'query' && /不对|错了|应该|别|不该|不要|偏差|纠正|重来|改一下|不是这样|写错/.test(text))) {
+      try {
+        const rawF = await auxCall(agentTabooLib.buildFixPrompt(), agentTabooLib.buildFixUser(text, {}), agentMetaLib.CLASSIFY_MAX_TOKENS, { thinking: { type: 'disabled' } }, (u) => agentMetaLib.addMetaUsage(agentTokenBucket(), u));
+        const pf = agentTabooLib.parseFix(rawF);
+        if (pf.ok) {
+          fix = { plan: pf.plan, type: pf.type, typeName: pf.typeName, needUpstream: pf.needUpstream, reason: pf.reason, draft: pf.draft };
+          if (pf.needUpstream) fix.upstreamNote = '⚠️ 定性为「上游数据错」：只上报「需修上游」，本系统不自动改设定来源';
+          agentMeta.append(chatId, { role: 'agent', cls: 'fix', kind: 'fix', plan: pf.plan, typeName: pf.typeName, needUpstream: pf.needUpstream, draft: pf.draft });
+        } else fix = { error: pf.error };
+      } catch (e) { fix = { error: e.message }; }
+    }
+    let summarized = null;
+    try { summarized = await agentMeta.summarizeIfNeeded(chatId, {}); } catch (e) { summarized = { ok: false, reason: e.message }; }
+    return send(200, { ok: true, cls, tag, summary, note, fix, trace: entry.trace || '', summarized: summarized && summarized.summarized ? summarized : null });
+  }
+
+  if (p === '/api/taboos' && req.method === 'GET') {
+    const st = String(url.searchParams.get('status') || '').trim();
+    const all = agentTaboo.list('');
+    const entries = st ? agentTaboo.list(st) : all;
+    const cnt = (s) => all.filter((e) => e.status === s).length;
+    return send(200, { ok: true, status: st || 'all', entries, counts: { pending: cnt('pending'), active: cnt('active'), resolved: cnt('resolved'), total: all.length } });
+  }
+  if (p === '/api/taboos' && req.method === 'POST') {
+    const o = await readJsonBody();
+    if (o === null) return send(400, { ok: false, error: 'body 不是 JSON' });
+    const act = String(o.action || '');
+    try {
+      if (act === 'create') {
+        if (!String(o.rule || '').trim()) return send(200, { ok: false, error: '缺少 rule（一句话规则）' });
+        const row = agentTaboo.add({ scope: o.scope, role: o.role, pattern: o.pattern, rule: o.rule, rootCause: o.rootCause, source: o.source });
+        return send(200, { ok: true, entry: row, note: '已入待确认队列（pending）——确认后才生效' });
+      }
+      // 🔴 唯一入库路径：只此一处调用 confirm（前端「✅ 确认生效」按钮触发）
+      if (act === 'confirm') {
+        const r = agentTaboo.confirm(o.id, 'user');
+        return send(200, r.ok ? { ok: true, entry: r.entry } : { ok: false, error: r.error });
+      }
+      if (act === 'resolve') {
+        const r = agentTaboo.resolve(o.id);
+        return send(200, r.ok ? { ok: true, entry: r.entry } : { ok: false, error: r.error });
+      }
+      return send(200, { ok: false, error: '未知 action：' + act });
+    } catch (e) { return send(500, { ok: false, error: e.message }); }
+  }
+  return false;
+}
+
 const ROUTES = [
   { test: (p, req) => (p === '/' || p === '/index.html'), handler: h_route_0 },
   { test: (p, req) => (/^\/api\/bookmarks(?:\/([^/]+))?$/).test(p), handler: h_api_bookmarks },
@@ -5320,6 +5437,12 @@ const ROUTES = [
   { test: (p, req) => (p === '/api/vec/build' && req.method === 'POST'), handler: h_api_vec_build },
   { test: (p, req) => (p === '/api/vec/search' && req.method === 'POST'), handler: h_api_vec_search },
   { test: (p, req) => (p === '/api/vec/config' && req.method === 'POST'), handler: h_api_vec_config },
+  { test: (p, req) => (p === '/api/agent-mode' && req.method === 'GET'), handler: h_api_agent },
+  { test: (p, req) => (p === '/api/agent-mode' && req.method === 'POST'), handler: h_api_agent },
+  { test: (p, req) => (p === '/api/meta' && req.method === 'GET'), handler: h_api_agent },
+  { test: (p, req) => (p === '/api/meta' && req.method === 'POST'), handler: h_api_agent },
+  { test: (p, req) => (p === '/api/taboos' && req.method === 'GET'), handler: h_api_agent },
+  { test: (p, req) => (p === '/api/taboos' && req.method === 'POST'), handler: h_api_agent },
   { test: (p, req) => (/^\/api\/cards\/export\/([^/]+)$/).test(p) && (req.method === 'GET'), handler: h_route_46 },
   { test: (p, req) => (p === '/api/cards/import' && req.method === 'POST'), handler: h_api_cards_import_47 },
   { test: (p, req) => (p === '/api/illustration/generate' && req.method === 'POST'), handler: h_api_illustration_generate_48 },
