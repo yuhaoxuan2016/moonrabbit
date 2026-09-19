@@ -92,7 +92,7 @@ function safeParse(s) {
 }
 
 // ===== 分区：数据访问层（store）=====
-// P-1 同步 I/O 异步化（镜像自正式版，方案 A）：热路径文件读写经此层走 fs.promises 异步 + 按文件键串行写队列；
+// P-1 同步 I/O 异步化（方案 A）：热路径文件读写经此层走 fs.promises 异步 + 按文件键串行写队列；
 // 冷路径（启动加载/低频配置保存）保持同步不动。RW_ASYNC_IO=0 → 调用点回退原同步路径（应急回退）。
 const RW_ASYNC_IO = process.env.RW_ASYNC_IO !== '0';
 // 读 JSON：失败（不存在/损坏）返回 null，不抛
@@ -295,7 +295,7 @@ item-: 物品名</items>
 // ---------- 回合记账数据层（按会话隔离） ----------
 const DATA_DIR = path.join(WWW, 'data');
 const TURNS_DIR = path.join(DATA_DIR, 'turns');
-// ---------- 最后打开的会话（服务端记忆 · 桌面壳 WebView2 里 localStorage 可能不落盘 · 2026-09-18 同步自正式版） ----------
+// ---------- 最后打开的会话（服务端记忆 · 桌面壳 WebView2 里 localStorage 可能不落盘 · 2026-09-18） ----------
 const LAST_CHAT_FILE = path.join(DATA_DIR, 'last-chat.json');
 function recordLastChat(cid) {
   const raw = String(cid || '').trim();
@@ -334,7 +334,7 @@ function loadNameRedact() {
   } catch (e) { console.error('[name-redact] 配置读取失败，按不替换处理:', e.message); return null; }
 }
 
-// ---------- 消息书签（2026-09-02 同步自正式版 NEW-2）----------
+// ---------- 消息书签（2026-09-02 NEW-2）----------
 const BOOKMARKS_DIR = path.join(DATA_DIR, 'bookmarks');
 fs.mkdirSync(BOOKMARKS_DIR, { recursive: true });
 function loadBookmarks(chatId) {
@@ -409,7 +409,7 @@ function applyVariables(text, context) {
 }
 
 // ---------- NPC 档案（独立追踪） ----------
-// ---------- 角色头像（2026-09-06 S5 同步正式版·去 RW 化：图存 data/自定义头像/，映射存 avatar-custom.json） ----------
+// ---------- 角色头像（2026-09-06 S5：图存 data/自定义头像/，映射存 avatar-custom.json） ----------
 const AVATAR_CUSTOM_DIR = path.join(DATA_DIR, '自定义头像');
 const AVATAR_CUSTOM_FILE = path.join(DATA_DIR, 'avatar-custom.json');
 State.avatarCustom = {};
@@ -1141,8 +1141,8 @@ function saveStoryMemoryConfig() {
 }
 loadStoryMemoryConfig();
 
-// ---------- 向量语义检索配置（同步自正式版批E · 2026-09-18）----------
-// 与正式版的差异（脱敏 + 可移植）：embedding 端点不写死，baseURL/model 均可在
+// ---------- 向量语义检索配置（批E · 2026-09-18）----------
+// 移植时的改造（脱敏 + 可移植）：embedding 端点不写死，baseURL/model 均可在
 // 「🔍 语义」面板配置（便于接任意 OpenAI 兼容 embedding 服务或本地端点）；
 // autoInject 默认关闭，未配置 Key 时所有路径明确降级。
 State.vecConfig = {
@@ -2839,7 +2839,7 @@ async function h_route_8(req, res, url, p) {
               chat.messages = Array.isArray(messages) ? cleanMsgs(messages) : (chat.messages || []);
               /* E-7+F-2 修复：空对象 {} 不覆盖已存链（防旧版前端/异常路径把版本链覆盖成空） */
               if (versions && typeof versions === 'object' && Object.keys(versions).length) chat.versions = versions;
-              /* ⭐ S4（2026-09-06 同步正式版）：chatProfile 随 PUT 落盘（对话配置档绑定通道；undefined=不覆盖） */
+              /* ⭐ S4（2026-09-06）：chatProfile 随 PUT 落盘（对话配置档绑定通道；undefined=不覆盖） */
               if (chatProfile !== undefined) chat.chatProfile = String(chatProfile).trim() || undefined;
               chat.updatedAt = new Date().toISOString();
               await writeJson(file, chat);
@@ -3154,7 +3154,7 @@ async function h_api_chat_profiles_21(req, res, url, p) {
   return false;
 }
 
-// ---------- 角色头像（2026-09-06 S5 同步正式版·去 RW 化） ----------
+// ---------- 角色头像（2026-09-06 S5） ----------
 async function h_route_avatars(req, res, url, p) {
   const sendJson = (o, c = 200) => { res.writeHead(c, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(o)); };
     const STRIP_PREFIX = String.fromCharCode(233) + String.fromCharCode(135) + String.fromCharCode(353) + String.fromCharCode(233) + '头像/';   /* 自定义头像/ 前缀（绕过反斜杠转义） */
@@ -3209,9 +3209,9 @@ const am = p.match(/^\/avatars\/([^/]+)$/);
     sendJson({ ok: true, files });
     return true;
   }
-  // 图生图产头像（同步自正式版 server.js:6598-6665，去 RW 化）：
+  // 图生图产头像（2026-09-18 移植，脱敏）：
   //   引擎/端点/模型一律跟随已有的场景插图配置（illustration-config.json），不新增配置口；
-  //   与正式版差在三处——①不搬 Ark 分支（本版的生图层也没有 Ark）
+  //   移植时改了三处——①不搬 Ark 分支（本版的生图层也没有 Ark）
   //   ②外观锚不读真值源文件，改读本版的本地 NPC 档案 appearance（无档案则退回通用兜底句）
   //   ③必须显式传示例图（本版没有「角色立绘库」可回落）。
   if (p === '/api/avatar/generate' && req.method === 'POST') {
@@ -3654,7 +3654,7 @@ async function h_api_analyze_retro_44(req, res, url, p) {
 }
 
 async function h_api_story_memory_summary(req, res, url, p) {
-  /* ⭐ S6 读取端点（2026-09-06 对齐正式版）：供前端显示当前会话的历史摘要缓存 */
+  /* ⭐ S6 读取端点（2026-09-06）：供前端显示当前会话的历史摘要缓存 */
   if (p === '/api/story-memory/summary' && req.method === 'GET') {
     const chatId = url.searchParams.get('chatId') || '';
     const sumFile = path.join(DATA_DIR, 'summaries', sanitizeId(chatId) + '.json');
@@ -3666,7 +3666,7 @@ async function h_api_story_memory_summary(req, res, url, p) {
   }
   return false;
 }
-// ===== 向量检索 API（同步自正式版批E · 2026-09-18）=====
+// ===== 向量检索 API（批E · 2026-09-18）=====
 async function h_api_vec_status(req, res, url, p) {
   // 索引状态：是否已建、条数、分类统计、建立时间、可索引块数（对比 total 判断是否需重建）
   if (p === '/api/vec/status' && req.method === 'GET') {
@@ -4001,7 +4001,7 @@ async function h_api_tts_config_52(req, res, url, p) {
       const ttsConfigFile = path.join(DATA_DIR, 'tts-config.json');
       let config = defaultTtsConfig();
       try { if (fs.existsSync(ttsConfigFile)) config = JSON.parse(fs.readFileSync(ttsConfigFile, 'utf8')); } catch (e) {}
-      // 2026-09-03 脱敏：角色音色下拉原为硬编码正式版角色名，改为回传用户自建映射的键
+      // 2026-09-03 脱敏：角色音色下拉原为硬编码角色名，改为回传用户自建映射的键
       let characters = [];
       try {
         const cvf = path.join(DATA_DIR, 'character-voices.json');
@@ -4566,7 +4566,7 @@ async function h_api_timeline_export_73(req, res, url, p) {
   return false;
 }
 
-// 消息书签 API（2026-09-02 同步自正式版 NEW-2）
+// 消息书签 API（2026-09-02 NEW-2）
 async function h_api_bookmarks(req, res, url, p) {
   const m = p.match(/^\/api\/bookmarks(?:\/([^/]+))?$/);
   if (!m) return false;
@@ -4751,7 +4751,7 @@ async function h_api_chat_74(req, res, url, p) {
           } else {
             try {
               const summary = await summarizeOldMessages(oldPart);
-                            /* ⭐ S6（2026-09-06 对齐正式版批D1）：分层摘要——旧摘要+新摘要超阈值时再压成更高层（防摘要越写越长） */
+                            /* ⭐ S6（2026-09-06 批D1）：分层摘要——旧摘要+新摘要超阈值时再压成更高层（防摘要越写越长） */
               let finalSummary = summary;
               const oldSum = (cached && cached.summary) || '';
               const concat = oldSum ? oldSum + '\n\n' + summary : summary;
@@ -4923,7 +4923,7 @@ merged = [{ role: 'user', content: `【历史摘要（${compressCount} 条旧消
 
 // ---------- 分支同步：把 fromChatId 的回合记录（seq <= upToSeq）复制到 toChatId ----------
 //   用途：「⤵ 从这条消息分叉」出的新会话应继承分叉点之前的剧情记忆（时间线/物品栏/情绪等都从 turns 读）。
-//   2026-09-18 同步自正式版 h_api_fork_turns（去 RW 化：本版 turns 结构相同，无需改字段）。
+//   2026-09-18  h_api_fork_turns（脱敏：本版 turns 结构相同，无需改字段）。
 async function h_api_fork_turns(req, res, url, p) {
   const sendJson = (obj, code = 200) => { res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
   try {

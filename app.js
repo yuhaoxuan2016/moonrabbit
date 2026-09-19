@@ -256,7 +256,7 @@ App.streaming = false;
 // 无立绘：一律首字徽章（通用版无任何角色图片素材）
 function avatarHtml(name) {
   const ch = String(name || '?').slice(0, 1).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  /* ⭐ S5（2026-09-06 同步正式版）：有自定义头像的角色显示图片（启动/上传后由 loadAvatarCache 刷新映射） */
+  /* ⭐ S5（2026-09-06）：有自定义头像的角色显示图片（启动/上传后由 loadAvatarCache 刷新映射） */
   const custom = (window.avatarCustomCache || {})[name];
   if (custom) return `<img class="avatar-img" src="${custom}" alt="${ch}" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'avatar-badge',style:'background:${nameColor(name)}',textContent:'${ch}'}))">`;
   return `<span class="avatar-badge" style="background:${nameColor(name)}">${ch}</span>`;
@@ -429,7 +429,7 @@ function makeWrap(role, seq) {
       toast('已引用到输入框');
     });
     bar.appendChild(qtBtn);
-    // ===== 消息书签（2026-09-02 同步自正式版 NEW-2）=====
+    // ===== 消息书签（2026-09-02 NEW-2）=====
     const bmBtn = document.createElement('button');
     bmBtn.className = 'ma-btn bm-btn';
     bmBtn.dataset.seq = seq;
@@ -453,7 +453,7 @@ function makeWrap(role, seq) {
       } catch (err) { toast('书签操作异常：' + err.message, 'err'); }
     });
     bar.appendChild(bmBtn);
-    // ===== 从此分叉（2026-09-02 同步自正式版）：复制该条及之前的消息到新会话 =====
+    // ===== 从此分叉（2026-09-02）：复制该条及之前的消息到新会话 =====
     const forkBtn = document.createElement('button');
     forkBtn.className = 'ma-btn';
     forkBtn.textContent = '⤵';
@@ -561,7 +561,7 @@ function restoreVersion(anchorSeq, verIdx, oldSeq) {
   // DOM：目标气泡转正（移除 alt-version 样式），并移除其后所有气泡
   const oldWrap = els.messages.querySelector(`.msg-wrap[data-seq="${oldSeq}"]`);
   if (oldWrap) {
-    // 2026-09-03 修复 M-15：原缺此行（正式版有）→ 气泡 data-seq 仍是旧值，
+    // 2026-09-03 修复 M-15：原缺此行 → 气泡 data-seq 仍是旧值，
     // 而 history 里已换成 newSeq → ✕/↻ 用 findIndex 查不到（<0 静默 return），
     // 书签/时间轴也会记到已不存在的 seq 上。
     oldWrap.dataset.seq = newSeq;
@@ -768,12 +768,12 @@ function renderAssistant(content, seq) {
     wrap.appendChild(row);
   }
   els.messages.scrollTop = els.messages.scrollHeight;
-  // F1 Swipe 版本切换器（2026-09-02 同步自正式版）
+  // F1 Swipe 版本切换器（2026-09-02）
   attachVersionSwiper(wrap, seq);
   return wrap;
 }
 
-// 给 assistant 气泡挂版本切换器：‹ 当前/总数 ›（同步自正式版 F1）
+// 给 assistant 气泡挂版本切换器：‹ 当前/总数 ›（F1）
 // curIdx: 当前显示的是第几版（0..versions.length-1 = 历史版本；null = 最新版）
 // 2026-09-03 修复 M-16：原标签写死 `${total}/${total}` 且 › 永久 disabled → 切旧版后仍显示 N/N
 // 给 assistant 气泡挂版本切换器：‹ 当前/总数 ›，点箭头原地切换版本
@@ -833,7 +833,7 @@ function pushVersionToChain(anchorSeq, content) {
   if (!chain.some((v) => v.content === content)) chain.push({ content, ts: Date.now() });
 }
 
-// ===== 分段渲染（2026-09-02 同步自正式版 FN-1：长对话不再全量渲染）=====
+// ===== 分段渲染（2026-09-02 FN-1：长对话不再全量渲染）=====
 // 通用版适配：无摘要压缩/旁注/书签/时间轴机制，故移除相应调用（只保留本函数核心）。
 const RENDER_BATCH = 80;
 
@@ -1387,7 +1387,7 @@ function showChatProfilePicker() {
 }
 
 async function newChat() {
-  if (App.streaming) return; // F-1 修复（2026-09-05 同步正式版守卫）：流式生成期间禁止新建会话，防回复写错会话
+  if (App.streaming) return; // F-1 修复（2026-09-05 守卫）：流式生成期间禁止新建会话，防回复写错会话
   if (App.history.length) await saveChat();   // 旧对话自动归档
   App.pendingContext = '';   // 清空上一会话的附加资料
   await loadChatProfiles();
@@ -1410,7 +1410,7 @@ async function newChat() {
     loadChatProfileManage();   // 配置档按会话刷新（新会话标记跟随）
     loadTimeline();   // 剧情记忆按会话隔离，切会话后刷新
     refreshVecStaleBadge();   // 按会话检查向量索引是否过期
-    loadBookmarksUI();   // 书签按会话加载（同步自正式版 NEW-2）
+    loadBookmarksUI();   // 书签按会话加载（NEW-2）
     loadInventory();
     loadSessionNote();   // 会话常驻设定按会话加载（新会话为空）
     loadAgendaUI();      // 剧情备忘按会话加载（M8/M10）
@@ -1422,7 +1422,7 @@ async function newChat() {
 
 let openChatSeq = 0;   // F-10 修复：会话切换请求序号（快速连点时丢弃过期响应）
 async function openChat(id) {
-  if (App.streaming) return; // F-1 修复（2026-09-05 同步正式版守卫）：流式生成期间禁止切换会话，防数据写错会话
+  if (App.streaming) return; // F-1 修复（2026-09-05 守卫）：流式生成期间禁止切换会话，防数据写错会话
   const mySeq = ++openChatSeq;
   if (App.history.length) await saveChat();
   App.pendingContext = '';   // 清空上一会话的附加资料
@@ -1440,7 +1440,7 @@ async function openChat(id) {
     localStorage.setItem(CUR_CHAT_KEY, id);
     els.messages.innerHTML = '';
     App.history = Array.isArray(c.messages) ? c.messages : [];
-    /* F-2 修复（2026-09-05 同步正式版）：切会话清空重 roll 版本缓存 + 从会话落盘恢复版本链。
+    /* F-2 修复（2026-09-05）：切会话清空重 roll 版本缓存 + 从会话落盘恢复版本链。
        旧版既不清空也不恢复 → ①重载后任意一次保存把服务端已存版本链覆盖成 {}（全灭）；
        ②旧链残留致 B 会话按 seq 撞键显示 A 的假版本切换器、restoreVersion 跨会话注入。 */
     for (const k in rerollVersions) delete rerollVersions[k];
@@ -1449,7 +1449,7 @@ async function openChat(id) {
         if (Array.isArray(list) && list.length) rerollVersions[anchorSeq] = list;
       }
     }
-    // ⭐ 分段加载（2026-09-02 同步自正式版 FN-1）：长对话全量渲染会卡，改为只渲染最近 RENDER_BATCH 条。
+    // ⭐ 分段加载（2026-09-02 FN-1）：长对话全量渲染会卡，改为只渲染最近 RENDER_BATCH 条。
     for (const m of App.history) {   // 先统一补 seq（分段渲染也要保证 seq 完整）
       if (!m.seq) m.seq = ++App.msgSeq;
       else App.msgSeq = Math.max(App.msgSeq, m.seq);
@@ -1472,7 +1472,7 @@ async function openChat(id) {
     loadChatProfileManage();   // 配置档按会话刷新（切换对话后「← 当前会话」标记跟随）
     loadTimeline();   // 剧情记忆按会话隔离，切会话后刷新
     refreshVecStaleBadge();   // 按会话检查向量索引是否过期
-    loadBookmarksUI();   // 书签按会话加载（同步自正式版 NEW-2）
+    loadBookmarksUI();   // 书签按会话加载（NEW-2）
     loadInventory();
     loadCurrentWardrobe();
     loadSessionNote();   // 会话常驻设定按会话加载
@@ -2906,7 +2906,7 @@ function openTts(text) {
   </div>`;
   document.body.appendChild(overlay);
   // 2026-09-03 脱敏：角色音色下拉改为动态填充（来自 data/character-voices.json 的映射键），
-  // 不再硬编码正式版角色名。拉取失败/无配置 → 只剩「（不绑定角色）」。
+  // 不再硬编码角色名。拉取失败/无配置 → 只剩「（不绑定角色）」。
   (async () => {
     try {
       const r = await fetch('/api/tts/config');
@@ -3042,7 +3042,7 @@ window.addEventListener('beforeunload', () => {
 });
 // 全局快捷键：Ctrl+Shift+F 聚焦世界设定（通用版无检索框）
 
-// ===== 快捷键速查面板（2026-09-02 同步自正式版 F4）=====
+// ===== 快捷键速查面板（2026-09-02 F4）=====
 const SHORTCUT_LIST = [
   ['Ctrl / ⌘ + Enter', '发送消息'],
   ['Ctrl + Shift + F', '聚焦世界设定输入框'],
@@ -3354,7 +3354,7 @@ document.getElementById('cp-add-btn')?.addEventListener('click', () => { const i
 loadChatProfileManage();
 
 // ---------- NPC 档案管理 UI ----------
-/* S5 头像弹窗（2026-09-06 同步正式版·去 RW 化）：上传/更换/删除角色自定义头像 */
+/* S5 头像弹窗（2026-09-06）：上传/更换/删除角色自定义头像 */
 function openAvatarWin(name) {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
@@ -4103,7 +4103,7 @@ function renderGraph() {
   nodes.forEach((n, i) => { const a = (2 * Math.PI * i) / nodes.length - Math.PI / 2; positions[n.id] = { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) }; });
   let svgContent = '';
   // 2026-09-03 安全修复 M-12：节点名/边标签原为未转义拼进 SVG，且用内联 onclick 拼 id
-  // （含 ' 即注入 JS 或直接语法报错）→ 改为转义 + data-gnode 事件委托（与正式版口径一致）
+  // （含 ' 即注入 JS 或直接语法报错）→ 改为转义 + data-gnode 事件委托（口径一致）
   for (const e of edges) { const f = positions[e.from], t = positions[e.to]; if (!f || !t) continue; svgContent += `<line x1="${f.x}" y1="${f.y}" x2="${t.x}" y2="${t.y}" stroke="var(--muted)" stroke-width="${Number(e.weight) || 1}"/>`; if (e.label) svgContent += `<text x="${(f.x+t.x)/2}" y="${(f.y+t.y)/2-6}" text-anchor="middle" fill="var(--text)" font-size="11">${safeHtml(e.label)}</text>`; }
   for (const n of nodes) { const p = positions[n.id]; if (!p) continue; const c = n.type==='character'?'#a78bfa':n.type==='location'?'#6ee7a0':'#f0a35e'; svgContent += `<circle cx="${p.x}" cy="${p.y}" r="20" fill="${c}" stroke="var(--border)" stroke-width="1" style="cursor:pointer" data-gnode="${safeHtml(n.id)}"/>`; svgContent += `<text x="${p.x}" y="${p.y+30}" text-anchor="middle" fill="var(--text)" font-size="11">${safeHtml(n.name)}</text>`; }
   svg.innerHTML = svgContent;
@@ -4240,7 +4240,7 @@ document.getElementById('memory-config-btn')?.addEventListener('click', async ()
 });
 loadStoryMemoryUI();
 
-// ===== 向量语义检索面板（同步自正式版批E · 2026-09-18）=====
+// ===== 向量语义检索面板（批E · 2026-09-18）=====
 // 索引过期角标：不打开「🔍 语义」tab 也能看到提醒。
 // 触发条件：已建过索引 且 待索引块数比已索引多出 VEC_STALE_THRESHOLD 以上（聊了不少新内容）。
 const VEC_STALE_THRESHOLD = 20;
@@ -4553,7 +4553,7 @@ function editAnnotation(note) {
   };
   overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
 }
-// 内联添加旁注（2026-09-03 补齐：DOM 补全后同步正式版的「位置+内容+回车」快捷录入）
+// 内联添加旁注（2026-09-03 补齐：DOM 补全后的「位置+内容+回车」快捷录入）
 async function addAnnotationInline() {
   if (!App.chatId) { toast('请先打开对话'); return; }
   const posEl = document.getElementById('ann-pos-input');
@@ -4647,7 +4647,7 @@ document.querySelectorAll('#sidebar .card.collapsible .card-title').forEach(titl
     return t ? t.textContent.replace(/[\u25be\u25b4]/g, '').trim().toLowerCase() : '';
   };
   const allPanels = () => [...sidebar.querySelectorAll('.sb-panel')];
-  const panelShown = (p) => !p.classList.contains('hidden');   // 通用版面板显隐走 .hidden（正式版走 .active）
+  const panelShown = (p) => !p.classList.contains('hidden');   // 通用版面板显隐走 .hidden 类
 
   function resetFilter() {
     sidebar.querySelectorAll('.card').forEach(c => c.classList.remove('search-hit', 'search-miss'));
@@ -4713,7 +4713,7 @@ document.querySelectorAll('#sidebar .card.collapsible .card-title').forEach(titl
 
   let favs = [];
   try { favs = JSON.parse(localStorage.getItem(FAV_KEY) || '[]'); } catch (e) { favs = []; }
-  /* ⭐ 常驻制（2026-09-06 同步正式版）：收藏卡本体常驻 panel-fav（不因切分区搬回）；
+  /* ⭐ 常驻制（2026-09-06）：收藏卡本体常驻 panel-fav（不因切分区搬回）；
      homeOf 持久化（重启后取消收藏仍知道回哪个面板）。 */
   const HOME_KEY = 'mr-sidebar-home';
   const homeLoad = () => { try { return JSON.parse(localStorage.getItem(HOME_KEY) || '{}'); } catch (e) { return {}; } };
@@ -4742,7 +4742,7 @@ document.querySelectorAll('#sidebar .card.collapsible .card-title').forEach(titl
         btn.classList.toggle('on', on);
         btn.textContent = on ? '★' : '☆';
         btn.title = on ? '取消收藏' : '收藏到 ⭐ 常用';
-        /* ⭐ 常驻制（2026-09-06 同步正式版）：收藏→本体常驻 panel-fav；取消→搬回原面板 */
+        /* ⭐ 常驻制（2026-09-06）：收藏→本体常驻 panel-fav；取消→搬回原面板 */
         if (on) {
           if (!homeOf.has(card.id)) homeOf.set(card.id, card.closest('.sb-panel')?.id || '');
           saveHome();
@@ -4933,10 +4933,10 @@ setInterval(loadStats, 15000);
 })();
 
 
-// ===== 消息书签 UI（2026-09-02 同步自正式版 NEW-2）=====
+// ===== 消息书签 UI（2026-09-02 NEW-2）=====
 
 
-// ===== 从某条消息分叉出新会话（2026-09-02 同步自正式版）=====
+// ===== 从某条消息分叉出新会话（2026-09-02）=====
 async function forkFromSeq(seq) {
   if (App.streaming) { toast('生成中，请稍后再分叉'); return; }
   if (!App.chatId) { toast('请先打开对话'); return; }
@@ -4975,7 +4975,7 @@ async function forkFromSeq(seq) {
         });
       } catch (e) { /* 不阻断 */ }
     }
-    // ⭐ 同步常驻设定四槽（分支应继承分叉点前的设定；2026-09-18 同步自正式版）
+    // ⭐ 同步常驻设定四槽（分支应继承分叉点前的设定；2026-09-18）
     try {
       const oldNote = await (await fetch('/api/op/note', {
         method: 'POST', headers: { 'content-type': 'application/json' },
@@ -5061,7 +5061,7 @@ function jumpToSeq(seq) {
 }
 
 
-// ===== 消息时间轴导航（2026-09-02 同步自正式版，去除旁注色分支）=====
+// ===== 消息时间轴导航（2026-09-02，去除旁注色分支）=====
 function renderTimelineNav() {
   const nav = document.getElementById('timeline-nav');
   if (!nav) return;
