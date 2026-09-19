@@ -14,3 +14,13 @@ moonrabbit-tauri/src-tauri/target/
 # 本地备份（不入库）
 *.bak_*
 *.syncbak_*
+
+# 品牌素材（作者个人设计，不进仓库；缺失时 favicon/分享图回落 placeholder*.png、页头 logo 自动隐藏）
+logo.png
+favicon.png
+share-card.png
+moonrabbit-tauri/src-tauri/icons/icon-32.png
+moonrabbit-tauri/src-tauri/icons/icon-128.png
+moonrabbit-tauri/src-tauri/icons/icon-256.png
+moonrabbit-tauri/src-tauri/icons/icon-512.png
+moonrabbit-tauri/src-tauri/icons/icon.ico

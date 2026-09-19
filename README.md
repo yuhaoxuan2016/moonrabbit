@@ -102,7 +102,20 @@ data/vec-config.json          语义检索配置（含 embedding 端点/模型/K
 - 🤖 本项目的开发、测试与文档由 **AI 多智能体协作**完成——运行在 **DeepSeek Harness**（[deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)，"一切皆插件"的开源 Agent 框架）中的 AI 代理，与 **WorkBuddy**、**Qoder CN** 等 AI 编程助手分工协作（功能开发 / 全量代码审查 / 回归测试 / 文档撰写），人类监督把关
 - 界面接入任意 OpenAI / Anthropic 兼容端点，包括 DeepSeek API
 
+## 品牌素材说明
+
+以下文件属于作者的品牌素材，**未包含在仓库中**（已列入 `.gitignore`），克隆后请自行准备或替换：
+
+| 文件 | 用途 | 建议替换内容 |
+|------|------|-------------|
+| `logo.png` | 页头站点图标 | 你自己的图标（同尺寸方图即可） |
+| `favicon.png` | 浏览器标签页图标 | 你自己的 favicon |
+| `share-card.png` | 社交分享卡片 | 自行绘制 |
+| `moonrabbit-tauri/src-tauri/icons/icon-{32,128,256,512}.png`、`icon.ico` | 桌面壳应用图标 | 用 `tauri icon <你的图>` 生成 |
+
+**缺失也不影响网页版运行**：favicon 与分享图缺失时回落到随仓库发布的中性占位件（`placeholder.png` / `placeholder-share.png`），页头 logo 缺失时自动收起、只留站名。⚠️ 唯一例外是**桌面壳打包**：`tauri build` 需要 `icons/` 下有图标，打包前请自行生成。
+
 ## 许可
 
 - **代码**：MIT（见 [`LICENSE`](LICENSE)）——可自由使用、修改、分发。
-- **美术资源与标识**：`logo.png`、`favicon.png`、`share-card.png` 与 `moonrabbit-tauri/src-tauri/icons/` 下的应用图标**不在 MIT 授权范围内**，版权保留（详见 LICENSE 末尾附注）。想做自己的版本，请替换成你自己的图——界面里的 logo / favicon / 分享图都是普通图片文件，同名替换即可。
+- **本项目的名称与视觉标识**（含上述品牌素材、以及 `placeholder*.png` 之外任何标注为品牌识别的内容）：版权保留，不在 MIT 授权范围内（详见 `LICENSE` 末尾附注）。用这套代码做你自己的版本完全欢迎——把它换成你自己的名字和图标即可。

@@ -35,9 +35,10 @@ but not limited to:
   share-card.png
   moonrabbit-tauri/src-tauri/icons/  (icon-32/128/256/512, icon.ico)
 
-Those image assets remain the property of the author. Please do not reuse them,
-or derivatives of them, as the name or visual identity of another project
-without permission. Building your own version of this software with your own
-artwork is welcome — the logo and favicon are ordinary image files and can be
-replaced in place.
+Those image assets are the property of the author and are NOT shipped in this
+repository (they are listed in .gitignore); the neutral placeholder images
+(placeholder.png, placeholder-share.png) are provided so the app still runs
+without them. Please do not reuse the project's name, logo or visual identity
+for another project without permission. Building your own version with your own
+name and artwork is welcome.
 
