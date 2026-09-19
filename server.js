@@ -4624,6 +4624,44 @@ async function h_api_chat_74(req, res, url, p) {
         res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
         { res.end('未找到 API Key（请在 header「API」设置里配置）'); return true; };
       }
+      // ── 群聊模式分流 ─────────────────────────────────────────────────
+      // 仅当该会话显式开启 groupMode 才走群聊；缺省 false → 下方单脑逻辑一字不改。
+      {
+        let gcfg = null;
+        try {
+          const chatMeta = JSON.parse(fs.readFileSync(chatFilePath(payload.chatId || ''), 'utf8'));
+          if (chatMeta && chatMeta.groupMode) gcfg = chatMeta;
+        } catch { gcfg = null; }
+        if (gcfg) {
+          res.writeHead(200, {
+            'content-type': 'text/event-stream; charset=utf-8',
+            'cache-control': 'no-cache, no-transform',
+            connection: 'keep-alive',
+            'x-accel-buffering': 'no',
+          });
+          let gFinished = false;
+          const gSend = (obj) => { if (!gFinished) res.write(`data: ${JSON.stringify(obj)}\n\n`); };
+          const gHistory = (payload.messages || [])
+            .filter((m) => m.role === 'user' || m.role === 'assistant')
+            .map((m) => ({ role: m.role, content: String(m.content || '') }));
+          const gLastUser = [...gHistory].reverse().find((m) => m.role === 'user');
+          const gInput = gLastUser ? gLastUser.content : String(payload.input || '');
+          try {
+            const gOut = await groupRuntime.groupTurn(
+              { ...gcfg, sessionModel: gcfg.model || null },
+              payload.chatId || '', gInput, gHistory.slice(0, -1), gSend,
+            );
+            gSend({ type: 'done', content: gOut.content });
+          } catch (e) {
+            console.error('[group] 本轮失败:', e.message);
+            gSend({ type: 'error', error: '群聊生成失败: ' + e.message });
+          }
+          gFinished = true;
+          res.end();
+          return true;
+        }
+      }
+
       // 规范化历史：Anthropic 要求 user/assistant 交替、首条为 user
       // 开局提示词保底（2026-08-20）：首条 user 消息若为长文本（≥300 字，如开局注入/长提示词），
       // 移入 system 常驻、不参与历史截断——长对话后设定仍在；历史上限 300 条（v4 1M 窗口，预算由 maxContext 兜底）
@@ -4924,6 +4962,74 @@ async function h_api_last_chat(req, res, url, p) {
   return false;
 }
 
+// ---------- 群聊模式：每角色独立调用模型、看得到前序角色输出（真实反应链） ----------
+// 新角色由回合记账的 characters[] 自动纳入 roster，无需手工配置。
+// 单脑模式路径完全不受影响：仅当会话显式开启 groupMode 才走群聊分支。
+const { createGroup } = require('./lib/group');
+const groupRuntime = createGroup({
+  get endpoint() { return State.endpoint; },
+  readTurns,
+  scanLorebook: (history, lastMsg, chatId) => {
+    try { return scanWorldbooks(history || [], lastMsg || '', State.endpoint.maxContext, chatId || '', {}); }
+    catch { return { entries: [] }; }
+  },
+  completeText: (ep, sys, userText, maxTokens, extraBody) =>
+    completeText(ep || State.endpoint, sys, userText, maxTokens, extraBody),
+  // 角色档案（data/npc-profiles/*.json）：命中既有档案 → 注入设定并禁止改写
+  lookupNpcProfile: (name) => {
+    try {
+      const hit = loadNpcProfile(name);
+      if (hit) return hit;
+      // 别名回退：模型可能用别名/简称称呼已建档角色
+      const low = String(name || '').trim();
+      for (const p of listNpcProfiles()) {
+        if (Array.isArray(p.aliases) && p.aliases.includes(low)) return p;
+      }
+      return null;
+    } catch { return null; }
+  },
+  // 用户本人不由 AI 代言（玩家身份名 + 通用自称）
+  isUserRole: (name) => {
+    const n = String(name || '').trim();
+    if (!n) return false;
+    if (['你', '我', '用户', '玩家'].includes(n)) return true;
+    const persona = State.personas && State.personas[State.activePersona];
+    return !!(persona && persona.name && persona.name === n);
+  },
+  log: (s) => console.log(s),
+});
+
+// ── 群聊配置 API：GET 读 / PUT 写（按会话落在 chat json 内）──────────────────
+async function h_api_group(req, res, url, p) {
+  const m = p.match(/^\/api\/group\/([^/]+)$/);
+  if (!m) return false;
+  const cid = m[1];
+  const sendJson = (o, c = 200) => { res.writeHead(c, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(o)); };
+  if (req.method === 'GET') {
+    try {
+      const d = JSON.parse(fs.readFileSync(chatFilePath(cid), 'utf8'));
+      sendJson({ ok: true, groupMode: !!d.groupMode, roster: d.roster || [],
+        maxSpeakersPerTurn: d.maxSpeakersPerTurn || 4 });
+      return true;
+    } catch (e) { sendJson({ ok: false, error: e.message }, 500); return true; }
+  }
+  if (req.method === 'PUT') {
+    try {
+      const body = await readBody(req);
+      const data = JSON.parse(body);
+      const file = chatFilePath(cid);
+      const chat = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (data.groupMode !== undefined) chat.groupMode = !!data.groupMode;
+      if (data.roster !== undefined) chat.roster = data.roster;
+      if (data.maxSpeakersPerTurn !== undefined) chat.maxSpeakersPerTurn = data.maxSpeakersPerTurn;
+      writeFileAtomicSync(file, JSON.stringify(chat, null, 2), 'utf8');
+      sendJson({ ok: true });
+      return true;
+    } catch (e) { sendJson({ ok: false, error: e.message }, 500); return true; }
+  }
+  return false;
+}
+
 // 声明式保序路由表：数组顺序 = 匹配优先级（与原 if 链顺序严格一致）
 const ROUTES = [
   { test: (p, req) => (p === '/' || p === '/index.html'), handler: h_route_0 },
@@ -5011,6 +5117,7 @@ const ROUTES = [
   { test: (p, req) => (p === '/api/inventory/manual' && req.method === 'POST'), handler: h_api_inventory_manual_71 },
   { test: (p, req) => (p === '/api/wardrobe/current' && req.method === 'GET'), handler: h_api_wardrobe_current_72 },
   { test: (p, req) => (p === '/api/timeline/export' && req.method === 'GET'), handler: h_api_timeline_export_73 },
+  { test: (p, req) => p.startsWith('/api/group/') && p.split('/').length === 4 && (req.method === 'GET' || req.method === 'PUT'), handler: h_api_group },
   { test: (p, req) => (p === '/api/chat' && req.method === 'POST'), handler: h_api_chat_74 },
   { test: (p, req) => (p === '/api/op/attach-pending' && req.method === 'GET'), handler: h_api_op_attach_pending_75 },
   { test: (p, req) => (p === '/api/op/attach-pending' && req.method === 'POST'), handler: h_api_op_attach_pending_75 },

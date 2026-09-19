@@ -998,6 +998,15 @@ async function generate() {
           thinkAcc += sanitizeText(ev.text);
         } else if (ev.type === 'tools') {
           renderThinking(`🔧 ${(ev.trace || []).join('；')}`);
+        } else if (ev.type === 'group-plan') {
+          const who = (ev.speakers || []).join('、');
+          if (who || ev.narrator) renderThinking(`🎬 本轮发言：${who}${ev.narrator ? (who ? ' ＋旁白' : '旁白') : ''}`);
+        } else if (ev.type === 'group-speaking') {
+          renderThinking(`… ${ev.name} 正在回应`);
+        } else if (ev.type === 'group-roster') {
+          renderThinking(`👥 ${ev.tier === 'new' ? '新角色入场' : '角色入场'}：${(ev.added || []).join('、')}`);
+        } else if (ev.type === 'group-error') {
+          renderThinking(`⚠️ ${ev.name} 发言失败：${ev.error}`);
         } else if (ev.type === 'summarized') {
           renderThinking(`💾 ${ev.note}`);
         } else if (ev.type === 'ping') {
@@ -5097,4 +5106,170 @@ function updateTimelineCurrent() {
     if (raf) return;
     raf = requestAnimationFrame(() => { raf = 0; updateTimelineCurrent(); });
   }, { passive: true });
+})();
+
+// ============ 群聊模式 ============
+// 独立「＋ 群聊」入口建会话 + 侧栏面板随时调配置。
+const Group = {
+  cfg: { groupMode: false, roster: [], maxSpeakersPerTurn: 4 },
+  els: {},
+  async load(chatId) {
+    if (!chatId) return;
+    try {
+      const d = await (await fetch('/api/group/' + encodeURIComponent(chatId))).json();
+      if (d && d.ok) {
+        this.cfg = { groupMode: !!d.groupMode, roster: d.roster || [],
+          maxSpeakersPerTurn: d.maxSpeakersPerTurn || 4 };
+        this.render();
+      }
+    } catch (e) { /* 会话无群聊配置属正常 */ }
+  },
+  async save(msg) {
+    if (!App.chatId) return;
+    try {
+      const r = await fetch('/api/group/' + encodeURIComponent(App.chatId), {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(this.cfg),
+      });
+      const d = await r.json();
+      this.tip(d && d.ok ? (msg || '已保存') : ('保存失败：' + ((d && d.error) || '未知')), !(d && d.ok));
+      this.render();
+    } catch (e) { this.tip('保存失败：' + e.message, true); }
+  },
+  tip(text, isErr) {
+    const el = this.els.msg; if (!el) return;
+    el.textContent = text; el.className = 'group-msg' + (isErr ? ' err' : ' ok');
+    setTimeout(() => { if (el.textContent === text) { el.textContent = ''; el.className = 'group-msg'; } }, 2600);
+  },
+  render() {
+    const e = this.els; if (!e.enable) return;
+    e.enable.checked = !!this.cfg.groupMode;
+    if (e.maxspk) e.maxspk.value = this.cfg.maxSpeakersPerTurn || 4;
+    if (e.badge) {
+      e.badge.textContent = this.cfg.groupMode ? ('群聊 · ' + (this.cfg.roster || []).length + ' 人') : '未开启';
+      e.badge.className = 'badge' + (this.cfg.groupMode ? '' : ' off');
+    }
+    if (!e.roster) return;
+    const list = this.cfg.roster || [];
+    if (!list.length) { e.roster.innerHTML = '<div class="group-hint">（空 · 随剧情自动加入）</div>'; return; }
+    const TIER = { npc: ['📝', '角色档案'], new: ['🆕', '全新角色'] };
+    e.roster.innerHTML = list.map((r, i) => {
+      const t = TIER[r.tier] || ['·', ''];
+      return '<div class="group-role' + (r.muted ? ' muted' : '') + '">'
+        + '<span class="gr-tier" title="' + t[1] + '">' + t[0] + '</span>'
+        + '<span class="gr-name">' + escapeHtml(r.name) + '</span>'
+        + '<label class="gr-mute"><input type="checkbox" data-gi="' + i + '" class="gr-mute-cb"' + (r.muted ? ' checked' : '') + '>禁言</label>'
+        + '<input type="number" class="gr-lines" data-gi="' + i + '" min="1" max="6" value="' + (r.maxLines || 3) + '" title="每轮最多句数">'
+        + '<button class="gr-del" data-gi="' + i + '" title="移出名单">✕</button>'
+        + '</div>';
+    }).join('');
+    e.roster.querySelectorAll('.gr-mute-cb').forEach((cb) => cb.addEventListener('change', () => {
+      this.cfg.roster[+cb.dataset.gi].muted = cb.checked; this.save('已更新');
+    }));
+    e.roster.querySelectorAll('.gr-lines').forEach((ip) => ip.addEventListener('change', () => {
+      this.cfg.roster[+ip.dataset.gi].maxLines = Math.max(1, Math.min(6, +ip.value || 3)); this.save('已更新');
+    }));
+    e.roster.querySelectorAll('.gr-del').forEach((b) => b.addEventListener('click', () => {
+      this.cfg.roster.splice(+b.dataset.gi, 1); this.save('已移出');
+    }));
+  },
+  init() {
+    const g = (id) => document.getElementById(id);
+    this.els = { enable: g('group-enable'), maxspk: g('group-maxspk'),
+      roster: g('group-roster'), badge: g('group-badge'), msg: g('group-msg'),
+      addName: g('group-add-name'), addBtn: g('group-add-btn'), saveBtn: g('group-save-btn') };
+    const e = this.els;
+    if (e.enable) e.enable.addEventListener('change', () => { this.cfg.groupMode = e.enable.checked; this.save(e.enable.checked ? '群聊已开启' : '已关闭'); });
+    if (e.maxspk) e.maxspk.addEventListener('change', () => { this.cfg.maxSpeakersPerTurn = Math.max(1, Math.min(8, +e.maxspk.value || 4)); this.save('已更新'); });
+    if (e.addBtn) e.addBtn.addEventListener('click', () => {
+      const n = (e.addName.value || '').trim(); if (!n) return;
+      if ((this.cfg.roster || []).some((r) => r.name === n)) { this.tip('已在名单中', true); return; }
+      this.cfg.roster = this.cfg.roster || [];
+      this.cfg.roster.push({ name: n, muted: false, maxLines: 3, tier: 'new' });
+      e.addName.value = ''; this.save('已加入：' + n);
+    });
+    if (e.addName) e.addName.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') e.addBtn.click(); });
+    if (e.saveBtn) e.saveBtn.addEventListener('click', () => this.save());
+  },
+};
+
+// 「＋ 群聊」：建普通会话后立即开启群聊模式
+async function newGroupChat() {
+  if (App.streaming) return;
+  const prev = App.chatId;
+  await newChat();
+  if (!App.chatId || App.chatId === prev) return;   // 用户在配置档选择处取消
+  Group.cfg = { groupMode: true, roster: [], maxSpeakersPerTurn: 4 };
+  await Group.save('群聊模式已开启');
+  const card = document.getElementById('card-group');
+  // 展开群聊面板：折叠态类名是 collapsed（saveFoldedState 依据 DOM 存 localStorage，
+  // 必须一并保存，否则刷新后又被折叠回去）
+  if (card) { card.classList.remove('collapsed'); saveFoldedState(); card.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+}
+
+// 群聊：按钮绑定 + 会话切换时加载配置 + @ 自动补全
+(function initGroupUI() {
+  Group.init();
+  const btn = document.getElementById('new-group-btn');
+  if (btn) btn.addEventListener('click', newGroupChat);
+
+  // 会话切换 → 同步群聊配置
+  if (typeof openChat === 'function') {
+    const _openChat = openChat;
+    window.openChat = openChat = async function (id) {
+      const r = await _openChat(id);
+      Group.load(id);
+      return r;
+    };
+  }
+  if (App.chatId) Group.load(App.chatId);
+
+  // @ 自动补全：只提示本会话 roster 内角色 + 旁白
+  const input = document.getElementById('input');
+  if (!input) return;
+  let pop = null;
+  const closePop = () => { if (pop) { pop.remove(); pop = null; } };
+  input.addEventListener('input', () => {
+    if (!Group.cfg.groupMode) { closePop(); return; }
+    const pos = input.selectionStart || 0;
+    const m = input.value.slice(0, pos).match(/@([^\s@]*)$/);
+    if (!m) { closePop(); return; }
+    const q = m[1];
+    const names = ['旁白', ...(Group.cfg.roster || []).filter((r) => !r.muted).map((r) => r.name)];
+    const hits = names.filter((n) => !q || n.includes(q)).slice(0, 8);
+    if (!hits.length) { closePop(); return; }
+    closePop();
+    pop = document.createElement('div');
+    pop.className = 'group-at-pop';
+    pop.innerHTML = hits.map((n, i) => '<div class="gat-item' + (i === 0 ? ' active' : '') + '" data-n="' + escapeHtml(n) + '">' + escapeHtml(n) + '</div>').join('');
+    const box = input.getBoundingClientRect();
+    pop.style.left = box.left + 'px';
+    pop.style.top = (box.top - Math.min(hits.length, 8) * 28 - 6) + 'px';
+    pop.style.width = Math.min(box.width, 220) + 'px';
+    document.body.appendChild(pop);
+    pop.querySelectorAll('.gat-item').forEach((it) => it.addEventListener('mousedown', (ev) => {
+      ev.preventDefault();
+      const name = it.dataset.n;
+      input.value = input.value.slice(0, pos - q.length) + name + ' ' + input.value.slice(pos);
+      input.focus();
+      const np = pos - q.length + name.length + 1;
+      input.setSelectionRange(np, np);
+      closePop();
+    }));
+  });
+  input.addEventListener('keydown', (ev) => {
+    if (!pop) return;
+    const items = [...pop.querySelectorAll('.gat-item')];
+    const cur = items.findIndex((x) => x.classList.contains('active'));
+    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+      ev.preventDefault();
+      items[cur] && items[cur].classList.remove('active');
+      const ni = ev.key === 'ArrowDown' ? (cur + 1) % items.length : (cur - 1 + items.length) % items.length;
+      items[ni].classList.add('active');
+    } else if (ev.key === 'Enter' || ev.key === 'Tab') {
+      ev.preventDefault();
+      (items[cur] || items[0]).dispatchEvent(new MouseEvent('mousedown'));
+    } else if (ev.key === 'Escape') { closePop(); }
+  });
+  input.addEventListener('blur', () => setTimeout(closePop, 150));
 })();

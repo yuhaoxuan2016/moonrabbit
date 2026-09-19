@@ -28,6 +28,7 @@
       <option value="__custom__">✎ 自定义…</option>
     </select>
     <button id="new-chat-btn" class="head-btn">＋ 新对话</button>
+    <button id="new-group-btn" class="head-btn" title="新建群聊（未经测试 · 实验性）：每个角色独立调用模型发言，导演自动调度，支持 @点名">＋ 群聊（未经测试）</button>
     <button id="api-btn" class="head-btn" title="API / 端点设置">⚙ API</button>
   </div>
 </header>
@@ -200,6 +201,25 @@
       <div class="card-title">📋 配置档</div>
       <div id="cp-manage-list" class="cp-list">加载中…</div>
       <div style="margin-top:8px"><button id="cp-add-btn" class="head-btn" style="padding:4px 12px">＋ 新建</button></div>
+      </div>
+      <div class="card collapsible" id="card-group">
+      <div class="card-title">👥 群聊模式（未经测试）<span id="group-badge" class="badge off">未开启</span><span class="fold-arrow">▾</span></div>
+      <div class="group-body">
+        <div class="group-untested">⚠️ 未经测试 · 实验性：功能按设计实现，但尚未充分测试，行为与接口可能变化。默认关闭，需在本会话显式开启。</div>
+        <label class="group-row"><input type="checkbox" id="group-enable"> 本会话启用群聊（每角色独立发言）</label>
+        <div class="group-hint">开启后：导演自动调度谁发言 · 支持 <code>@角色</code> 点名与 <code>@旁白</code> · 新角色随剧情自动入场</div>
+        <div class="group-sub">
+          <label>每轮最多发言 <input type="number" id="group-maxspk" min="1" max="8" value="4" style="width:52px"></label>
+        </div>
+        <div class="group-roster-title">角色名单 <span class="group-hint-inline">（随剧情自动增长，可禁言/调发言量）</span></div>
+        <div id="group-roster" class="group-roster">未开启</div>
+        <div style="margin-top:8px">
+          <input id="group-add-name" placeholder="手动添加角色名" style="width:52%">
+          <button id="group-add-btn" class="head-btn" style="padding:4px 10px">＋ 加入</button>
+          <button id="group-save-btn" class="head-btn" style="padding:4px 10px">保存</button>
+        </div>
+        <div id="group-msg" class="group-msg"></div>
+      </div>
       </div>
       <div class="card collapsible" id="card-bookmarks">
       <div class="card-title">🔖 书签 <span class="fold-arrow">▾</span></div>
