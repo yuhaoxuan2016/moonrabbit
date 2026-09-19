@@ -1812,6 +1812,113 @@ function saveOpState() {
   } catch (e) { console.error('保存操作状态失败:', e.message); }
 }
 
+// ===== agent 助手（未经测试 · 实验性）：开关 / 存储 / 只读工具 / prompt 挂点 =====
+// 🔴 开关关掉时：agentAugmentSystem 原样返回入参（prompt 逐字节不变）；本段不读写任何文件。
+// 🔴 本段只读用户自己的数据（回合记录 / 设定条目 / 向量索引），不联网、不写对话文件。
+const agentModeLib = require('./lib/agent/mode');
+const agentTabooLib = require('./lib/agent/taboo');
+const agentMetaLib = require('./lib/agent/meta');
+const agentCogPackLib = require('./lib/agent/cogpack');
+const agentInjectedLib = require('./lib/agent/injected');
+const agentToolsLib = require('./lib/agent/tools');
+
+const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+const META_DIR = path.join(DATA_DIR, 'meta');
+function loadSettings() {
+  let raw = null;
+  try { raw = fs.readFileSync(SETTINGS_FILE, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') console.error('[settings.json] 读取失败：' + e.message); }
+  const r = agentModeLib.parseSettings(raw);
+  if (r.error) console.error('[settings.json] ' + r.error + '（本次用默认值；未回写盘，避免空态覆盖真实数据）');
+  return r.settings;
+}
+function saveSettings(s) { try { writeFileAtomicSync(SETTINGS_FILE, agentModeLib.serializeSettings(s), 'utf8'); } catch (e) { console.error('[settings.json] 写盘失败：' + e.message); } }
+State.settings = loadSettings();
+{ const norm = agentModeLib.normalizeAgentModeTable(State.opState.agentMode); State.opState.agentMode = norm.table; }
+function agentModeOn(chatId) { return agentModeLib.agentModeOn(State.settings, State.opState, chatId); }
+
+/** 禁忌库（data/taboos.json）：add() 一律 pending；只有 confirm(id) 能置 active（唯一入库路径） */
+const TABOO_FILE = path.join(DATA_DIR, 'taboos.json');
+const agentTaboo = agentTabooLib.newTabooStore({
+  readJSON: () => JSON.parse(fs.readFileSync(TABOO_FILE, 'utf8').replace(/^\uFEFF/, '')),
+  writeJSON: (o) => writeFileAtomicSync(TABOO_FILE, JSON.stringify(o, null, 2), 'utf8'),
+});
+/** Meta 通道（data/meta/<chatId>.jsonl，append-only；绝不写 data/chats/*） */
+const agentMeta = agentMetaLib.createMetaStore({ fs, path, dir: META_DIR, sanitizeId: (x) => sanitizeId(x) });
+/** 注入清单旁路（只记「类别 + 条数」，不记条目名） */
+const agentInjected = agentInjectedLib.createInjectedRecorder();
+
+/** 读用户自建的设定条目（read_setting 工具的数据源）：设定触发器 / 世界书，只读内存态 */
+function readSettingEntries(source, query) {
+  const q = String(query || '').trim().toLowerCase();
+  const rows = [];
+  if (source === 'lorebook') {
+    for (const [id, e] of Object.entries(State.lorebookEntries || {})) {
+      if (!e || typeof e !== 'object') continue;
+      const kw = Array.isArray(e.keywords) ? e.keywords.join('、') : '';
+      rows.push({ title: e.title || id, content: [kw, e.content || ''].filter(Boolean).join('｜') });
+    }
+  } else {
+    for (const [bid, book] of Object.entries(State.worldbooks || {})) {
+      const entries = (book && book.entries) || {};
+      for (const [eid, e] of Object.entries(entries)) {
+        if (!e || typeof e !== 'object') continue;
+        const kw = Array.isArray(e.keys) ? e.keys.join('、') : (Array.isArray(e.keywords) ? e.keywords.join('、') : '');
+        rows.push({ title: `${(book && book.name) || bid}／${e.name || e.title || eid}`, content: [kw, e.content || ''].filter(Boolean).join('｜') });
+      }
+    }
+  }
+  const all = rows.filter((r) => r.title || r.content);
+  const hit = q ? all.filter((r) => (r.title + r.content).toLowerCase().includes(q)) : all;
+  return { entries: hit, total: hit.length };
+}
+
+/** 只读工具集（4 具）；依赖一律在此注入，模块本身不 require server.js */
+const agentTools = agentToolsLib.createTools({
+  readTurns: (cid) => readTurns(cid),
+  searchMemory: async (q, topK, cid) => {
+    const id = sanitizeId(String(cid || ''));
+    if (!id) return null;
+    const r = await vecSearch(id, q, topK || 8, null);
+    if (!r || !r.ok || !Array.isArray(r.hits) || !r.hits.length) return null;
+    return { text: r.hits.map((h, i) => `${i + 1}. ${String(h.text || '').replace(/\s+/g, ' ').slice(0, 300)}`).join('\n') };
+  },
+  readSetting: readSettingEntries,
+  injected: agentInjected,
+});
+
+/** 认知包（T-021 三段式）——从 Meta 历史里取；未采纳的 canon 只进候选、不进可知段 */
+function agentCogPackFor(chatId) {
+  try { return agentCogPackLib.buildCogPack(agentMeta.list(chatId, 200)); } catch (e) { return agentCogPackLib.newCogPack(); }
+}
+
+/**
+ * prompt 侧挂点（开关关 → 原样返回，逐字节不变）。
+ * 组装顺序：禁忌（全局+角色级）→ 认知包可知段 → 原 system。
+ * @param {string} system 已拼好的 system
+ * @param {string} chatId
+ */
+function agentAugmentSystem(system, chatId) {
+  const cid = String(chatId || '');
+  if (!agentModeOn(cid)) return system;
+  const blocks = [];
+  let tabooGroup = null;
+  try { tabooGroup = agentTaboo.groupActive(); } catch (e) { tabooGroup = null; }
+  if (tabooGroup) {
+    const g = agentTabooLib.renderGlobalTaboos(tabooGroup.global);
+    if (g) blocks.push(g);
+    for (const role of Object.keys(tabooGroup.byRole || {})) {
+      const b = agentTabooLib.renderRoleTaboos(tabooGroup.byRole[role], role);
+      if (b) blocks.push(b);
+    }
+  }
+  const pack = agentCogPackFor(cid);
+  const know = pack && pack.knowledge && pack.knowledge.length ? agentCogPackLib.renderKnowledge(pack) : '';
+  if (know) blocks.push(know);
+  try { agentInjectedLib.recordFromPromptBlocks(agentInjected, cid, [system].concat(blocks), {}); } catch (e) { /* 只统计，失败不阻断 */ }
+  if (!blocks.length) return system;
+  return blocks.join('\n\n---\n\n') + '\n\n---\n\n' + system;
+}
+
 // ---------- 会话常驻设定多槽位（Task15：背景 / 关系 / 规则 / 其他） ----------
 // opState.notes[chatId] 兼容两种形态：
 //   ① 旧字符串（向后兼容）→ 视为「其他」槽
@@ -4716,6 +4823,9 @@ async function h_api_chat_74(req, res, url, p) {
       if (pinFirst) {
         system += '\n\n---\n\n## 会话开局提示词（首条消息原文，每轮保底注入；与「会话常驻设定」冲突时以常驻设定为准）\n' + String(firstMsg.content).trim();
       }
+      // agent 助手（默认关闭）：注入禁忌（全局+角色级）与认知包可知段。
+      // 开关关 → agentAugmentSystem 原样返回 ⇒ 本轮 system 与未移植前逐字节一致。
+      system = agentAugmentSystem(system, payload.chatId || '');
       // 标签生成最后重申：pinFirst 之后再次落底（近因效应），防止开局提示词挤掉记账指令（2026-08-30 修复）
       system += '\n\n---\n\n' + turnTagPrompt;
       // 调试：记录本轮 system prompt（落盘 data/prompts/）
