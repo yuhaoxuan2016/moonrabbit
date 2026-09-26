@@ -284,15 +284,7 @@ document.getElementById('api-save').addEventListener('click', async () => {
 });
 
 // ---------- 自定义注入槽（⚙️ 前缀 / 后缀，按会话，随 system 注入） ----------
-async function loadInjections() {
-  try {
-    const r = await (await fetch('/api/op/inject?chatId=' + encodeURIComponent(App.chatId || ''))).json();
-    if (r.ok) {
-      document.getElementById('inject-prefix').value = r.prefix || '';
-      document.getElementById('inject-suffix').value = r.suffix || '';
-    }
-  } catch (e) { /* 忽略 */ }
-}
+// —— loadInjections 已抽到 app/05-settings.js（F 批）——
 document.getElementById('inject-save').addEventListener('click', async () => {
   const note = document.getElementById('inject-note');
   try {
@@ -584,49 +576,11 @@ migrateKey('rw-tour-done-v1', 'mr-tour-done-v1');
 const CUSTOM_SKIN_DEFAULT = { mode: 'dark', hue: 250, sat: 55, light: 45 };
 App.customSkin = { ...CUSTOM_SKIN_DEFAULT };
 try { App.customSkin = { ...CUSTOM_SKIN_DEFAULT, ...(JSON.parse(localStorage.getItem('mr-custom-skin')) || {}) }; } catch (e) { /* 首次 */ }
-function saveCustomSkin() { localStorage.setItem('mr-custom-skin', JSON.stringify(App.customSkin)); }
+// —— saveCustomSkin 已抽到 app/05-settings.js（F 批）——
 
-function applyCustomSkin() {
-  const { mode, hue, sat, light } = App.customSkin;
-  const root = document.documentElement;
-  const H = hue, S = sat / 100, L = light / 100;
-  const hsl = (h, s, l) => `hsl(${h} ${s * 100}% ${l * 100}%)`;
-  const base = mode === 'light'
-    ? { bg: [H, S * 0.55, 0.90], bg2: [H, S * 0.45, 0.95], card: [H, S * 0.4, 1.0], border: [H, S * 0.25, 0.78], text: [H, S * 0.3, 0.18], muted: [H, S * 0.2, 0.45], accent: [H, S * 0.65, 0.42] }
-    : { bg: [H, S * 0.5, L * 0.5], bg2: [H, S * 0.45, L * 0.58], card: [H, S * 0.42, L * 0.68], border: [H, S * 0.3, L * 0.85], text: [H, S * 0.2, 0.93], muted: [H, S * 0.15, 0.72], accent: [H, S * 0.75, Math.min(0.68, L * 1.1 + 0.25)] };
-  const set = (name, v) => root.style.setProperty(name, hsl(...v));
-  set('--bg', base.bg); set('--bg2', base.bg2); set('--card', base.card);
-  set('--border', base.border); set('--text', base.text); set('--muted', base.muted);
-  set('--accent', base.accent);
-  root.style.setProperty('--user-bubble', hsl(H, S * 0.5, L * 0.72));
-  root.style.setProperty('--user-border', hsl(H, S * 0.55, L * 0.9));
-  root.style.setProperty('--scrim', mode === 'light' ? 'rgba(245, 241, 231, 0.55)' : 'rgba(12, 14, 24, 0.72)');
-}
+// —— applyCustomSkin 已抽到 app/05-settings.js（F 批）——
 
-function applySkin() {
-  if (App.prefs.theme === 'custom') {
-    document.body.dataset.theme = 'default';   // 走默认结构，CSS 变量由 applyCustomSkin 覆盖
-    applyCustomSkin();
-  } else {
-    document.documentElement.style.cssText = '';   // 清除自定义变量（还原主题定义）
-    document.body.dataset.theme = App.prefs.theme || 'default';
-  }
-  // 背景 URL（自助美化）
-  if (App.prefs.bgUrl && App.prefs.bgUrl.trim()) {
-    // 过滤引号防 CSS 上下文注入
-    document.body.style.setProperty('--bg-url', `url('${App.prefs.bgUrl.trim().replace(/['"\\]/g, '')}')`);
-    document.body.classList.add('with-bg');
-    document.body.classList.remove('bg-contain');
-  } else {
-    document.body.classList.remove('with-bg');
-    document.body.style.removeProperty('--bg-url');
-  }
-  themeSelect.value = App.prefs.theme || 'default';
-  const csBox = document.getElementById('custom-skin');
-  if (csBox) csBox.classList.toggle('hidden', App.prefs.theme !== 'custom');
-  const bgUrlInput = document.getElementById('bg-url-input');
-  if (bgUrlInput) bgUrlInput.value = App.prefs.bgUrl || '';
-}
+// —— applySkin 已抽到 app/05-settings.js（F 批）——
 themeSelect.addEventListener('change', () => {
   App.prefs.theme = themeSelect.value;
   savePrefs();
@@ -634,46 +588,7 @@ themeSelect.addEventListener('change', () => {
 });
 
 // 自定义调色板控件（仅 theme=custom 时显示）
-function bindCustomSkin() {
-  const csMode = document.getElementById('cs-mode');
-  const csHue = document.getElementById('cs-hue');
-  const csSat = document.getElementById('cs-sat');
-  const csLight = document.getElementById('cs-light');
-  const csNote = document.getElementById('cs-note');
-  if (!csMode) return;
-  csMode.value = App.customSkin.mode;
-  csHue.value = App.customSkin.hue;
-  csSat.value = App.customSkin.sat;
-  csLight.value = App.customSkin.light;
-  const apply = () => {
-    App.customSkin = { mode: csMode.value, hue: Number(csHue.value), sat: Number(csSat.value), light: Number(csLight.value) };
-    saveCustomSkin();
-    if (App.prefs.theme === 'custom') applyCustomSkin();
-    csNote.classList.remove('hidden');
-    setTimeout(() => csNote.classList.add('hidden'), 1500);
-  };
-  csMode.addEventListener('change', apply);
-  csHue.addEventListener('input', apply);
-  csSat.addEventListener('input', apply);
-  csLight.addEventListener('input', apply);
-  document.getElementById('cs-reset').addEventListener('click', () => {
-    App.customSkin = { ...CUSTOM_SKIN_DEFAULT };
-    csMode.value = App.customSkin.mode;
-    csHue.value = App.customSkin.hue;
-    csSat.value = App.customSkin.sat;
-    csLight.value = App.customSkin.light;
-    saveCustomSkin();
-    if (App.prefs.theme === 'custom') applyCustomSkin();
-  });
-  const bgUrlInput = document.getElementById('bg-url-input');
-  if (bgUrlInput) {
-    bgUrlInput.addEventListener('change', () => {
-      App.prefs.bgUrl = bgUrlInput.value.trim();
-      savePrefs();
-      applySkin();
-    });
-  }
-}
+// —— bindCustomSkin 已抽到 app/05-settings.js（F 批）——
 
 // ---------- 显示设置（localStorage 持久化） ----------
 const PREFS_KEY = 'moonrabbitPrefs';
@@ -681,25 +596,9 @@ App.prefs = { hlEnabled: true, theme: 'default', showThinking: true, peakConfirm
 try {
   App.prefs = { ...App.prefs, ...(JSON.parse(localStorage.getItem(PREFS_KEY)) || {}) };
 } catch (e) { /* 首次使用 */ }
-function savePrefs() { localStorage.setItem(PREFS_KEY, JSON.stringify(App.prefs)); }
+// —— savePrefs 已抽到 app/05-settings.js（F 批）——
 
-function renderSettings() {
-  const panel = document.getElementById('settings-panel');
-  panel.innerHTML = '';
-  const mk = (label, checked, onChange) => {
-    const row = document.createElement('label');
-    row.className = 'set-item';
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.checked = checked;
-    cb.addEventListener('change', () => { onChange(cb.checked); savePrefs(); });
-    row.appendChild(cb);
-    row.appendChild(document.createTextNode(label));
-    return row;
-  };
-  panel.appendChild(mk('显示思考过程（💭 折叠块）', App.prefs.showThinking !== false, (v) => { App.prefs.showThinking = v; }));
-  panel.appendChild(mk('高峰时段发送确认（官方直连渠道）', App.prefs.peakConfirm !== false, (v) => { App.prefs.peakConfirm = v; }));
-}
+// —— renderSettings 已抽到 app/05-settings.js（F 批）——
 document.getElementById('settings-toggle').addEventListener('click', () => {
   const panel = document.getElementById('settings-panel');
   panel.classList.toggle('hidden');
@@ -1824,23 +1723,8 @@ els.manAttachOk.addEventListener('click', () => {
   els.manAttachNote.classList.remove('hidden');
 });
 // ---------- 待注入附加资料持久化（2026-08-30 修复：重启/刷新后恢复，不再丢失） ----------
-async function saveAttachPending(text) {
-  await fetch('/api/op/attach-pending', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ chatId: App.chatId || '', text: String(text || '') }),
-  });
-}
-async function loadAttachPending() {
-  // 打开会话时恢复「已附加」状态（本轮消费后由 saveAttachPending('') 清除）
-  if (!App.chatId) { App.pendingContext = ''; return; }
-  try {
-    const r = await (await fetch('/api/op/attach-pending?chatId=' + encodeURIComponent(App.chatId))).json();
-    const t = (r && r.text || '').trim();
-    App.pendingContext = t;
-    if (t) els.manAttachNote.classList.remove('hidden');
-  } catch (e) { /* 忽略 */ }
-}
+// —— saveAttachPending 已抽到 app/05-settings.js（F 批）——
+// —— loadAttachPending 已抽到 app/05-settings.js（F 批）——
 
 // ---------- 会话常驻设定（📌 每轮注入 system，防遗忘；按会话隔离） ----------
 // Task15 多槽位：其他 / 背景 / 关系 / 规则（页签切换编辑，保存时整包提交）
@@ -1860,22 +1744,7 @@ function switchNoteSlot(name) {
     if (t) t.classList.toggle('active', k === name);
   });
 }
-async function loadSessionNote() {
-  try {
-    const r = await (await fetch('/api/op/note', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ chatId: App.chatId, get: true }),
-    })).json();
-    App.noteSlotsData = (r && r.slots && typeof r.slots === 'object') ? r.slots : {};
-    App.noteSlotsPristine = JSON.parse(JSON.stringify(App.noteSlotsData));   // 快照：取消时还原到本次加载值
-    const hasAny = NOTE_SLOTS_UI.some((k) => String(App.noteSlotsData[k] || '').trim());
-    els.noteAttachBtn.textContent = hasAny
-      ? '📌 会话常驻设定（已设置，点击查看/修改）'
-      : '📌 会话常驻设定（每轮注入，防遗忘）';
-    switchNoteSlot('其他');
-  } catch (e) { /* 忽略 */ }
-}
+// —— loadSessionNote 已抽到 app/05-settings.js（F 批）——
 els.noteAttachBtn.addEventListener('click', () => {
   els.noteAttachBox.classList.toggle('hidden');
 });
