@@ -494,7 +494,7 @@ const ROUTES = [
   { test: (p, req) => (p === '/logo.png'), handler: h_logo_png_2 },
   { test: (p, req) => (p === '/share-card.png' || p === '/placeholder.png' || p === '/placeholder-share.png'), handler: h_share_card_png_3 },
   { test: (p, req) => (p === '/style.css'), handler: h_style_css_4 },
-  { test: (p, req) => (p === '/app.js'), handler: h_app_js_5 },
+  { test: (p, req) => (p === '/app.js' || /^\/app\/[\w.-]+\.js$/.test(p)), handler: h_app_js_5 },
   { test: (p, req) => (p === '/api/model' && req.method === 'GET'), handler: h_api_model_6 },
   { test: (p, req) => (p === '/api/model' && req.method === 'POST'), handler: h_api_model_7 },
   { test: (p, req) => (/^\/api\/chats(?:\/([^/]+))?$/).test(p), handler: h_route_8 },
