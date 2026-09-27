@@ -876,6 +876,14 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 }
 .sb-tab:hover { color: var(--text); background: var(--bg2); }
 .sb-tab.active { color: var(--accent); background: var(--card); border-color: var(--accent); font-weight: 600; }
+/* 窄窗口媒体查询把侧栏收窄到 286px/248px，5 个 tab 平分仅 ~50px，15px 字号装不下「💬对话」→ 被省略号截断；
+   覆盖规则必须放在基础规则之后（放前面会被同特异性的基础 font-size 覆盖而不生效） */
+@media (min-width: 769px) and (max-width: 1200px) {
+  .sb-tab { padding: 6px 1px; font-size: 12px; }
+}
+@media (min-width: 769px) and (max-width: 1000px) {
+  .sb-tab { font-size: 11px; }
+}
 .sb-panel { display: flex; flex-direction: column; gap: 10px; }
 /* G-D3：侧栏功能搜索（输入框 09-02 已同步但 JS/CSS 缺 → 死 UI） */
 #sidebar-search-wrap {
