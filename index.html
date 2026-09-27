@@ -627,6 +627,8 @@
   </div>
 </div>
 
+<!-- 前端模块：加载顺序 = 依赖顺序。00-state 必须最先（全局状态/常量），10-bind 必须最后
+     （顶层事件绑定与启动副作用）。app.js 为入口说明文件，其位置由历史引用保留。 -->
 <script src="/app/00-state.js"></script>
 <script src="/app/01-core.js"></script>
 <script src="/app/02-render.js"></script>

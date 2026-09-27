@@ -7,17 +7,12 @@
 // app.js —— Moonrabbit 前端逻辑（多角色 RP / 互动小说界面）
 'use strict';
 
-// —— 共享工具（toast / confirmDialog / fetchJson / 文本净化 / renderMarkdown）已抽到 app/01-core.js（F-01）——
 
-// —— 消息容器与气泡渲染（makeWrap / reroll / renderAssistant / renderUser / 分段渲染）已抽到 app/02-render.js（F-02）——
 
 // ---------- 流式对话 ----------
-// —— send 已抽到 app/03-chat.js（F-03）——
 
-// —— generate 已抽到 app/03-chat.js（F-03）——
 
 // 思考链折叠块
-// —— renderThinking 已抽到 app/09-ui.js（F 批）——
 
 // ---------- 会话管理（新对话 / 归档 / 恢复） ----------
 const CUR_CHAT_KEY = 'currentChatId';
@@ -25,11 +20,8 @@ App.chatId = null;
 App.currentChatProfileId = 'main';   // 当前会话绑定的配置档（按对话过滤显示用）
 App.chatTitle = '';
 
-// —— saveChat 已抽到 app/03-chat.js（F-03）——
 
 // ---------- 会话导出（JSON 完整备份 / Markdown 可读版；随手备份） ----------
-// —— downloadBlob 已抽到 app/03-chat.js（F-03）——
-// —— exportChat 已抽到 app/03-chat.js（F-03）——
 document.getElementById('export-btn').addEventListener('click', () => exportChat(false));
 document.getElementById('export-md-btn').addEventListener('click', () => exportChat(true));
 
@@ -115,17 +107,12 @@ document.getElementById('loadpoint-btn').addEventListener('click', async () => {
   } catch (e) { toast('读档失败：' + e.message); }
 });
 
-// —— loadChatList 已抽到 app/03-chat.js（F-03）——
 
 // ---------- 对话配置档选择器 ----------
 App.chatProfilesCache = {};
-// —— loadChatProfiles 已抽到 app/08-config.js（F 批）——
-// —— showChatProfilePicker 已抽到 app/08-config.js（F 批）——
 
-// —— newChat 已抽到 app/03-chat.js（F-03）——
 
 let openChatSeq = 0;   // F-10 修复：会话切换请求序号（快速连点时丢弃过期响应）
-// —— openChat 已抽到 app/03-chat.js（F-03）——
 
 document.getElementById('new-chat-btn').addEventListener('click', newChat);
 
@@ -227,7 +214,6 @@ document.getElementById('api-save').addEventListener('click', async () => {
 });
 
 // ---------- 自定义注入槽（⚙️ 前缀 / 后缀，按会话，随 system 注入） ----------
-// —— loadInjections 已抽到 app/05-settings.js（F 批）——
 document.getElementById('inject-save').addEventListener('click', async () => {
   const note = document.getElementById('inject-note');
   try {
@@ -252,9 +238,6 @@ document.getElementById('inject-save').addEventListener('click', async () => {
 
 // ---------- API 采样预设（命名预设） ----------
 const presetSelect = document.getElementById('preset-select');
-// —— loadPresets 已抽到 app/08-config.js（F 批）——
-// —— readPresetInputs 已抽到 app/08-config.js（F 批）——
-// —— presetPost 已抽到 app/08-config.js（F 批）——
 document.getElementById('preset-apply').addEventListener('click', () => presetPost({ action: 'apply', name: presetSelect.value }));
 document.getElementById('preset-save').addEventListener('click', () => {
   const name = (prompt('预设名称（与现有同名 = 覆盖）：', presetSelect.value) || '').trim();
@@ -272,7 +255,6 @@ const profileInput = document.getElementById('profile-input');
 const profileSelect = document.getElementById('profile-select');
 App.profileData = {};
 
-// —— loadProfiles 已抽到 app/08-config.js（F 批）——
 profileInput.addEventListener('change', async () => {
   const name = profileInput.value;
   if (!name) return;
@@ -374,8 +356,6 @@ document.getElementById('profile-del').addEventListener('click', async () => {
 
 // ---------- 模型查看 / 切换（select 下拉 + 自定义） ----------
 const modelInput = document.getElementById('model-input');
-// —— ensureModelOption 已抽到 app/08-config.js（F 批）——
-// —— loadModel 已抽到 app/08-config.js（F 批）——
 modelInput.addEventListener('change', async () => {
   let m = modelInput.value;
   if (m === '__custom__') {
@@ -412,7 +392,6 @@ modelInput.addEventListener('change', async () => {
 const themeSelect = document.getElementById('theme-select');
 
 // localStorage key 迁移：旧 rw- 前缀（早期版本）→ mr-（当前）
-// —— migrateKey 已抽到 app/08-config.js（F 批）——
 migrateKey('rw-custom-skin', 'mr-custom-skin');
 migrateKey('rw-op-view', 'mr-op-view');
 migrateKey('rw-op-expand', 'mr-op-expand');
@@ -423,11 +402,8 @@ migrateKey('rw-tour-done-v1', 'mr-tour-done-v1');
 const CUSTOM_SKIN_DEFAULT = { mode: 'dark', hue: 250, sat: 55, light: 45 };
 App.customSkin = { ...CUSTOM_SKIN_DEFAULT };
 try { App.customSkin = { ...CUSTOM_SKIN_DEFAULT, ...(JSON.parse(localStorage.getItem('mr-custom-skin')) || {}) }; } catch (e) { /* 首次 */ }
-// —— saveCustomSkin 已抽到 app/05-settings.js（F 批）——
 
-// —— applyCustomSkin 已抽到 app/05-settings.js（F 批）——
 
-// —— applySkin 已抽到 app/05-settings.js（F 批）——
 themeSelect.addEventListener('change', () => {
   App.prefs.theme = themeSelect.value;
   savePrefs();
@@ -435,7 +411,6 @@ themeSelect.addEventListener('change', () => {
 });
 
 // 自定义调色板控件（仅 theme=custom 时显示）
-// —— bindCustomSkin 已抽到 app/05-settings.js（F 批）——
 
 // ---------- 显示设置（localStorage 持久化） ----------
 const PREFS_KEY = 'moonrabbitPrefs';
@@ -443,9 +418,7 @@ App.prefs = { hlEnabled: true, theme: 'default', showThinking: true, peakConfirm
 try {
   App.prefs = { ...App.prefs, ...(JSON.parse(localStorage.getItem(PREFS_KEY)) || {}) };
 } catch (e) { /* 首次使用 */ }
-// —— savePrefs 已抽到 app/05-settings.js（F 批）——
 
-// —— renderSettings 已抽到 app/05-settings.js（F 批）——
 document.getElementById('settings-toggle').addEventListener('click', () => {
   const panel = document.getElementById('settings-panel');
   panel.classList.toggle('hidden');
@@ -486,7 +459,6 @@ if (tmCopyBtn) tmCopyBtn.addEventListener('click', async () => {
   }
 });
 
-// —— loadEmotions 已抽到 app/06-timeline.js（F 批）——
 document.getElementById('em-btn').addEventListener('click', async () => {
   const name = document.getElementById('em-name').value.trim();
   const emotion = document.getElementById('em-text').value.trim();
@@ -508,20 +480,15 @@ document.getElementById('em-btn').addEventListener('click', async () => {
   setTimeout(() => note.classList.add('hidden'), 6000);
 });
 
-// —— loadTimeline 已抽到 app/06-timeline.js（F 批）——
 
 // 时间线条目 修改/补充：行内编辑表单（edit=预填原值；insert=清空，插到该条之后）
 App.tmItemEditBox = null;   // 当前展开的编辑容器（同一时间只开一个）
-// —— openTmItemEdit 已抽到 app/06-timeline.js（F 批）——
 
 // AI 智能补全：调用 /api/timeline/ai-fill（辅助 API 串行队列），把返回字段填入表单（box 内需带 data-f 输入框）
-// —— aiFillTimeline 已抽到 app/06-timeline.js（F 批）——
 
-// —— loadInventory 已抽到 app/06-timeline.js（F 批）——
 
 const tmEditTl = document.querySelector('.tm-edit:not(#inv-edit)');  // 手动补记（时间线）编辑区
 const tmEditInv = document.getElementById('inv-edit');                // 手动修改物品栏编辑区
-// —— setTmTabVis 已抽到 app/06-timeline.js（F 批）——
 tmTabTl.addEventListener('click', () => {
   tmTabTl.classList.add('active'); tmTabInv.classList.remove('active'); tmTabWd.classList.remove('active'); tmTabEm.classList.remove('active'); tmTabAuto.classList.remove('active'); tmTabLoc.classList.remove('active'); tmTabVec.classList.remove('active');
   setTmTabVis('tl');
@@ -622,7 +589,6 @@ document.getElementById('inv-btn').addEventListener('click', async () => {
   setTimeout(() => note.classList.add('hidden'), 5000);
 });
 // 当前着装聚合显示（换装卡片顶部）
-// —— loadCurrentWardrobe 已抽到 app/06-timeline.js（F 批）——
 
 
 tmExport.addEventListener('click', async () => {
@@ -792,10 +758,6 @@ wdBtn.addEventListener('click', async () => {
 
 // ---------- 会话统计 ----------
 const statsBar = document.getElementById('stats-bar');
-// —— fmtDur 已抽到 app/09-ui.js（F 批）——
-// —— fmtTok 已抽到 app/09-ui.js（F 批）——
-// —— fmtCost 已抽到 app/09-ui.js（F 批）——
-// —— loadStats 已抽到 app/09-ui.js（F 批）——
 
 // ---------- 高峰时段提示条（官方直连渠道 + 高峰时间才生效） ----------
 App.peakEligible = true;   // 端点是否为 DeepSeek 官方直连（峰谷定价渠道）
@@ -804,8 +766,6 @@ const OFFPEAK_HOLIDAYS = new Set([
   '2026-09-25', '2026-09-26', '2026-09-27',   // 中秋
   '2026-10-01', '2026-10-02', '2026-10-03', '2026-10-04', '2026-10-05', '2026-10-06', '2026-10-07',   // 国庆
 ]);
-// —— isPeakHours 已抽到 app/09-ui.js（F 批）——
-// —— updatePeakBanner 已抽到 app/09-ui.js（F 批）——
 
 // ---------- 新手导航（首次使用交互式导览） ----------
 const TOUR_KEY = 'mr-tour-done-v1';
@@ -817,8 +777,6 @@ const tourSteps = [
   { title: '⚙ API 设置', body: '右上角「⚙ API」可配置端点 / 模型 / 上下文预算 / 辅助 API（后台任务独立端点）。', target: 'api-btn' },
 ];
 App.tourIdx = 0;
-// —— tourShow 已抽到 app/09-ui.js（F 批）——
-// —— tourDone 已抽到 app/09-ui.js（F 批）——
 document.getElementById('tour-next').addEventListener('click', () => {
   if (App.tourIdx < tourSteps.length - 1) { App.tourIdx += 1; tourShow(); } else tourDone();
 });
@@ -826,13 +784,10 @@ document.getElementById('tour-prev').addEventListener('click', () => {
   if (App.tourIdx > 0) { App.tourIdx -= 1; tourShow(); }
 });
 document.getElementById('tour-skip').addEventListener('click', tourDone);
-// —— maybeStartTour 已抽到 app/09-ui.js（F 批）——
 
 // ---------- 事件 ----------
 els.send.addEventListener('click', send);
 // Token 预估
-// —— estimateTokens 已抽到 app/09-ui.js（F 批）——
-// —— updateTokenEstimate 已抽到 app/09-ui.js（F 批）——
 App.lastSystemPrompt = '';
 App.currentMaxContext = 1048576;
 els.input.addEventListener('input', updateTokenEstimate);
@@ -923,12 +878,10 @@ document.getElementById('recall-btn')?.addEventListener('click', async () => {
 document.getElementById('illustration-btn')?.addEventListener('click', () => { openIllustration(); });
 
 // 插图弹窗（可传入 prefillText 预填场景描述；不传则自动提取最近一条对话）
-// —— openIllustration 已抽到 app/07-media.js（F 批）——
 // 语音朗读：TTS 合成
 document.getElementById('tts-btn')?.addEventListener('click', () => { openTts(); });
 
 // 朗读指定文本（seq 为空时由调用方已传 text）
-// —— openTts 已抽到 app/07-media.js（F 批）——
 els.input.addEventListener('keydown', (e) => {
   // Enter = 换行（textarea 默认行为）；Ctrl/Cmd+Enter = 发送
   // 输入法组合期间（isComposing/keyCode 229）不触发发送，避免发出缺最后一段组合文本的输入
@@ -998,7 +951,6 @@ const SHORTCUT_LIST = [
   ['Enter', '（检索框内）跳到下一个匹配'],
   ['?', '打开本速查表'],
 ];
-// —— openShortcutPanel 已抽到 app/09-ui.js（F 批）——
 document.addEventListener('keydown', (e) => {
   if (e.key !== '?') return;
   const t = e.target;
@@ -1017,7 +969,6 @@ document.addEventListener('keydown', (e) => {
 const sidebarToggle = document.getElementById('sidebar-toggle');
 const sidebarOverlay = document.getElementById('sidebar-overlay');
 const sidebarEl = document.getElementById('sidebar');
-// —— toggleSidebar 已抽到 app/09-ui.js（F 批）——
 if (sidebarToggle) sidebarToggle.addEventListener('click', () => toggleSidebar(!(sidebarEl && sidebarEl.classList.contains('open'))));
 if (sidebarOverlay) sidebarOverlay.addEventListener('click', () => toggleSidebar(false));
 
@@ -1040,8 +991,6 @@ els.manAttachOk.addEventListener('click', () => {
   els.manAttachNote.classList.remove('hidden');
 });
 // ---------- 待注入附加资料持久化（2026-08-30 修复：重启/刷新后恢复，不再丢失） ----------
-// —— saveAttachPending 已抽到 app/05-settings.js（F 批）——
-// —— loadAttachPending 已抽到 app/05-settings.js（F 批）——
 
 // ---------- 会话常驻设定（📌 每轮注入 system，防遗忘；按会话隔离） ----------
 // Task15 多槽位：其他 / 背景 / 关系 / 规则（页签切换编辑，保存时整包提交）
@@ -1050,9 +999,6 @@ App.noteSlotsData = {};      // 内存槽位数据
 App.noteSlotsPristine = {};  // 打开/加载时的原始槽位快照（取消时整体还原，防页签暂存无法撤销）
 App.currentNoteSlot = '其他';
 
-// —— noteSlotTab 已抽到 app/09-ui.js（F 批）——
-// —— switchNoteSlot 已抽到 app/09-ui.js（F 批）——
-// —— loadSessionNote 已抽到 app/05-settings.js（F 批）——
 els.noteAttachBtn.addEventListener('click', () => {
   els.noteAttachBox.classList.toggle('hidden');
 });
@@ -1087,24 +1033,18 @@ els.noteAttachOk.addEventListener('click', async () => {
 });
 
 // ---------- 对话内搜索（🔍 搜索当前会话消息：输入即过滤 + 高亮 + 跳转） ----------
-// —— initMsgSearch 已抽到 app/09-ui.js（F 批）——
 
 // ---------- 对话配置档管理 UI ----------
-// —— loadChatProfileManage 已抽到 app/04-panels.js（F 批）——
-// —— editChatProfile 已抽到 app/08-config.js（F 批）——
 document.getElementById('cp-add-btn')?.addEventListener('click', () => { const id = prompt('配置档 ID：'); if (id?.trim()) editChatProfile(id.trim()); });
 loadChatProfileManage();
 
 // ---------- NPC 档案管理 UI ----------
 /* S5 头像弹窗（2026-09-06）：上传/更换/删除角色自定义头像 */
-// —— openAvatarWin 已抽到 app/07-media.js（F 批）——
 document.addEventListener('click', (e) => {
   const b = e.target.closest && e.target.closest('.npc-avatar-btn');
   if (!b) return;
   openAvatarWin(b.dataset.name);
 });
-// —— loadNpcProfiles 已抽到 app/04-panels.js（F 批）——
-// —— editNpcProfile 已抽到 app/07-media.js（F 批）——
 document.getElementById('npc-add-btn')?.addEventListener('click', () => editNpcProfile(null));
 // 卡片交换：从酒馆角色卡 PNG 导入
 document.getElementById('card-import-btn')?.addEventListener('click', () => {
@@ -1128,12 +1068,9 @@ document.getElementById('card-import-btn')?.addEventListener('click', () => {
   };
   input.click();
 });
-// —— exportNpcCard 已抽到 app/07-media.js（F 批）——
 loadNpcProfiles();
 
 // ---------- 场景档案管理 UI ----------
-// —— loadSceneProfiles 已抽到 app/04-panels.js（F 批）——
-// —— editSceneProfile 已抽到 app/07-media.js（F 批）——
 document.getElementById('scene-add-btn')?.addEventListener('click', () => editSceneProfile(null));
 loadSceneProfiles();
 
@@ -1141,8 +1078,6 @@ loadSceneProfiles();
 App.expressionsCache = {};
 App.expressionConfigCache = { emotionMap: {}, enableAutoSwitch: true };
 // 不预置角色名（2026-09-03）：角色列表完全来自用户已建的表情目录
-// —— loadExpressions 已抽到 app/04-panels.js（F 批）——
-// —— renderExpressionGrid 已抽到 app/04-panels.js（F 批）——
 document.getElementById('expr-char-dropdown')?.addEventListener('change', (e) => renderExpressionGrid(e.target.value));
 document.getElementById('expr-upload-btn')?.addEventListener('click', () => {
   const charName = document.getElementById('expr-char-dropdown')?.value;
@@ -1165,8 +1100,6 @@ document.getElementById('expr-upload-btn')?.addEventListener('click', () => {
 loadExpressions();
 
 // ---------- 输出过滤器管理 UI ----------
-// —— loadRegexRulesUI 已抽到 app/04-panels.js（F 批）——
-// —— editRegexRule 已抽到 app/09-ui.js（F 批）——
 document.getElementById('regex-add-btn')?.addEventListener('click', () => editRegexRule(null));
 document.getElementById('regex-test-btn')?.addEventListener('click', () => {
   const overlay = document.createElement('div');
@@ -1186,10 +1119,7 @@ loadRegexRulesUI();
 // ---------- 设定触发器管理 UI ----------
 App.lorebookEntriesCache = {};
 App.lorebookSettingsCache = { enabled: true, tokenBudget: 'auto', maxBudget: 10000, budgetRatio: 0.1 };
-// —— loadLorebookUI 已抽到 app/04-panels.js（F 批）——
-// —— renderLorebookList 已抽到 app/04-panels.js（F 批）——
 document.getElementById('lb-search')?.addEventListener('input', () => renderLorebookList());
-// —— editLorebookEntry 已抽到 app/09-ui.js（F 批）——
 document.getElementById('lb-add-btn')?.addEventListener('click', () => editLorebookEntry(null));
 // 从世界书导入设定触发器（支持自定义路径）
 document.getElementById('lb-wb-btn')?.addEventListener('click', async () => {
@@ -1290,17 +1220,9 @@ App.wbActive = [];
 App.wbOff = [];
 App.wbCurrent = null;
 App.wbEntries = {};
-// —— loadWorldbooksUI 已抽到 app/04-panels.js（F 批）——
-// —— renderWbBooks 已抽到 app/04-panels.js（F 批）——
-// —— openWbEditor 已抽到 app/09-ui.js（F 批）——
-// —— closeWbEditor 已抽到 app/09-ui.js（F 批）——
-// —— renderWbEntries 已抽到 app/04-panels.js（F 批）——
-// —— editWbEntry 已抽到 app/09-ui.js（F 批）——
 document.getElementById('wb-add-entry')?.addEventListener('click', () => editWbEntry(null));
 document.getElementById('wb-close-editor')?.addEventListener('click', closeWbEditor);
 // 页内弹窗（统一走 modal-overlay，不依赖系统 prompt/alert/confirm）
-// —— wbModal 已抽到 app/09-ui.js（F 批）——
-// —— wbConfirm 已抽到 app/09-ui.js（F 批）——
 document.getElementById('wb-new-btn')?.addEventListener('click', () => {
   wbModal('新建世界书',
     '<label class="api-field">名称<input id="wbn-name" type="text" placeholder="如：本作主线设定" style="width:100%"></label>' +
@@ -1366,8 +1288,6 @@ document.getElementById('wb-scan-btn')?.addEventListener('click', () => {
     }, '扫描');
 });
 // 批量启用/关闭 + 导入条目
-// —— wbBatch 已抽到 app/09-ui.js（F 批）——
-// —— wbSelectedIds 已抽到 app/09-ui.js（F 批）——
 document.getElementById('wb-select-all')?.addEventListener('change', (e) => {
   document.querySelectorAll('.wb-e-sel').forEach(cb => { cb.checked = e.target.checked; });
 });
@@ -1395,9 +1315,6 @@ loadWorldbooksUI();
 
 // ---------- 关系图谱管理 UI ----------
 App.graphDataCache = { nodes: [], edges: [] };
-// —— loadGraphUI 已抽到 app/04-panels.js（F 批）——
-// —— renderGraph 已抽到 app/04-panels.js（F 批）——
-// —— editGraphNode 已抽到 app/09-ui.js（F 批）——
 document.getElementById('graph-add-node')?.addEventListener('click', async () => { const name = prompt('角色名称：'); if (!name?.trim()) return; await fetch('/api/graph', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'addNode', node: { name: name.trim() } }) }); loadGraphUI(); });
 document.getElementById('graph-add-edge')?.addEventListener('click', async () => {
   const nodes = App.graphDataCache.nodes; if (nodes.length < 2) { toast('至少需要 2 个角色'); return; }
@@ -1412,7 +1329,6 @@ document.getElementById('graph-add-edge')?.addEventListener('click', async () =>
 loadGraphUI();
 
 // ---------- 剧情记忆管理 UI ----------
-// —— loadStoryMemoryUI 已抽到 app/04-panels.js（F 批）——
 document.getElementById('memory-refresh-btn')?.addEventListener('click', loadStoryMemoryUI);
 document.getElementById('memory-config-btn')?.addEventListener('click', async () => {
   const r = await fetch('/api/story-memory/config');
@@ -1443,11 +1359,8 @@ loadStoryMemoryUI();
 // 索引过期角标：不打开「🔍 语义」tab 也能看到提醒。
 // 触发条件：已建过索引 且 待索引块数比已索引多出 VEC_STALE_THRESHOLD 以上（聊了不少新内容）。
 const VEC_STALE_THRESHOLD = 20;
-// —— refreshVecStaleBadge 已抽到 app/09-ui.js（F 批）——
 
-// —— loadVecStatus 已抽到 app/04-panels.js（F 批）——
 
-// —— doVecSearch 已抽到 app/09-ui.js（F 批）——
 
 document.getElementById('vec-search-btn')?.addEventListener('click', doVecSearch);
 document.getElementById('vec-query')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doVecSearch(); } });
@@ -1527,24 +1440,18 @@ document.getElementById('vec-config-btn')?.addEventListener('click', async () =>
 
 // ---------- 地点档案管理 UI（知识库格式，可导出 markdown 复用） ----------
 App.locationDetailsCache = [];
-// —— loadLocationsUI 已抽到 app/04-panels.js（F 批）——
 document.getElementById('location-refresh-btn')?.addEventListener('click', loadLocationsUI);
 
 // ---------- 玩家身份管理 UI ----------
 App.personasCache = {};
 App.activePersonaCache = '';
-// —— loadPersonasUI 已抽到 app/04-panels.js（F 批）——
-// —— editPersona 已抽到 app/09-ui.js（F 批）——
 document.getElementById('persona-add-btn')?.addEventListener('click', () => editPersona(null));
 loadPersonasUI();
 
 // ---------- 剧情备忘管理 UI ----------
-// —— loadAgendaUI 已抽到 app/04-panels.js（F 批）——
 document.getElementById('agenda-add-btn')?.addEventListener('click', async () => { if (!App.chatId) { toast('请先打开对话'); return; } const content = prompt('备忘内容：'); if (!content?.trim()) return; await fetch('/api/agenda/' + encodeURIComponent(App.chatId), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'add', item: { content: content.trim() } }) }); loadAgendaUI(); });
 
 // ---------- 报告系统 UI ----------
-// —— loadReportListUI 已抽到 app/04-panels.js（F 批）——
-// —— showReportPreview 已抽到 app/09-ui.js（F 批）——
 document.getElementById('report-overview-btn')?.addEventListener('click', async () => {
   if (!App.chatId) { toast('请先打开对话'); return; }
   const range = prompt('报告范围（last10/today/all）：', 'last10');
@@ -1568,10 +1475,7 @@ document.getElementById('report-retro-btn')?.addEventListener('click', async () 
 loadReportListUI();
 
 // ---------- 旁注管理 UI ----------
-// —— loadAnnotationsUI 已抽到 app/04-panels.js（F 批）——
-// —— editAnnotation 已抽到 app/09-ui.js（F 批）——
 // 内联添加旁注（2026-09-03 补齐：DOM 补全后的「位置+内容+回车」快捷录入）
-// —— addAnnotationInline 已抽到 app/09-ui.js（F 批）——
 document.getElementById('ann-add-btn')?.addEventListener('click', addAnnotationInline);
 document.getElementById('ann-content-input')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addAnnotationInline(); } });
 loadAnnotationsUI();
@@ -1580,8 +1484,6 @@ loadAnnotationsUI();
 const FOLD_KEY = 'mr-sidebar-folded';
 App.foldedCards = [];
 try { App.foldedCards = JSON.parse(localStorage.getItem(FOLD_KEY) || '[]'); } catch (e) { App.foldedCards = []; }
-// —— applyFoldedState 已抽到 app/09-ui.js（F 批）——
-// —— saveFoldedState 已抽到 app/09-ui.js（F 批）——
 document.querySelectorAll('#sidebar .group-toggle').forEach(toggle => {
   toggle.addEventListener('click', () => {
     const group = toggle.closest('.card-group') || toggle.closest('.card.collapsible');
@@ -2104,18 +2006,14 @@ setInterval(loadStats, 15000);
 
 
 // ===== 从某条消息分叉出新会话（2026-09-02）=====
-// —— forkFromSeq 已抽到 app/06-timeline.js（F 批）——
 
-// —— loadBookmarksUI 已抽到 app/04-panels.js（F 批）——
 
-// —— syncBookmarkButtons 已抽到 app/06-timeline.js（F 批）——
 
 // 跳到指定 seq 的气泡（分段加载下若未渲染，先自动加载更早的直到出现）
 // —— jumpToSeq 留在 app.js（F-09 未搬：非事件绑定）——
 
 
 // ===== 消息时间轴导航（2026-09-02，去除旁注色分支）=====
-// —— renderTimelineNav 已抽到 app/04-panels.js（F 批）——
 
 // —— updateTimelineCurrent 留在 app.js（F-09 未搬：非事件绑定）——
 (function bindTimelineScroll() {

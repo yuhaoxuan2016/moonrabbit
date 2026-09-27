@@ -172,7 +172,6 @@ function sanitizeText(s) {
     });
 }
 
-// —— 全局状态与常量已抽到 app/00-state.js（F-01；index.html 按序先加载它）——
 {
   const title = document.querySelector('.subtitle');
   if (title) title.textContent = '通用 RP 界面 · 设定自填';
@@ -284,10 +283,6 @@ function safeColor(v) {
   if (/^rgba?\(\s*[\d.\s,%]+\)$/.test(s)) return s;
   if (/^[a-zA-Z]{3,20}$/.test(s)) return s;
   return null;
-}
-
-function highlightText(text) {
-  return escapeHtml(text);
 }
 
 // Markdown 渲染：图片 → 代码块 / 行内代码 / 引用 / 无序列表
