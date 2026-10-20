@@ -133,10 +133,43 @@ function makeWrap(role, seq) {
   return wrap;
 }
 
+// 空输出占位：模型把内容全写进思考链时显示——↻ 直接重跑本轮；✕ 丢弃。
+// 不写入 history（临时物·刷新即消）；reroll 对「未进 history 的 seq」做兼容（尾条为 user 即重跑）。
+function renderEmptyRetry(seq) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg-wrap';
+  wrap.dataset.seq = seq;
+  const row = document.createElement('div');
+  row.className = 'msg narrator';
+  row.innerHTML = '<div class="avatar">…</div><div class="bubble" style="color:var(--muted)">（本次生成未产出正文——内容都在上方思考链里。）</div>';
+  wrap.appendChild(row);
+  const bar = document.createElement('div');
+  bar.className = 'msg-actions';
+  const rb = document.createElement('button');
+  rb.className = 'ma-btn';
+  rb.textContent = '↻';
+  rb.title = '重试：重新生成本轮';
+  rb.addEventListener('click', () => reroll(seq));
+  bar.appendChild(rb);
+  const db = document.createElement('button');
+  db.className = 'ma-btn del';
+  db.textContent = '✕';
+  db.title = '丢弃这条空输出';
+  db.addEventListener('click', () => { wrap.remove(); if (App.anchorForNextGen != null) App.anchorForNextGen = null; });
+  bar.appendChild(db);
+  wrap.appendChild(bar);
+  els.messages.appendChild(wrap);
+  return wrap;
+}
+
 function reroll(seq) {
   if (App.streaming) return;
   const idx = App.history.findIndex((m) => m.seq === seq);
-  if (idx < 0) return;
+  if (idx < 0) {
+    // 空输出版（未进 history）也可重试：尾条为 user 时直接重跑本轮
+    if (App.history.length && App.history[App.history.length - 1].role === 'user') generate();
+    return;
+  }
   // 记录旧版进版本链（锚点 = 该回复之前最近一条 user 消息的 seq；多次重roll 累积）
   // 2026-09-09 方案 C：链语义 = 全部版本（含当前显示版）。重roll 时旧版已在链中（首次则入链），
   // 新生成的回复由 generate 收尾时入链（见 pushVersionToChain），保证位次连续。

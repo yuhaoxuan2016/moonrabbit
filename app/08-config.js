@@ -147,6 +147,73 @@ async function loadModel() {
   } catch (e) { /* 忽略 */ }
 }
 
+async function refreshModelOptions() {
+  try {
+    const r = await (await fetch('/api/models')).json();
+    const list = Array.isArray(r.models) ? r.models : [];
+    const current = (modelInput.value && modelInput.value !== '__custom__') ? modelInput.value : (r.current || '');
+    const seen = new Set();
+    modelInput.innerHTML = '';
+    for (const m of [current, ...list]) {
+      if (!m || seen.has(m)) continue;
+      seen.add(m);
+      const o = document.createElement('option');
+      o.value = m; o.textContent = m;
+      modelInput.appendChild(o);
+    }
+    const c = document.createElement('option');
+    c.value = '__custom__'; c.textContent = '✎ 自定义…';
+    modelInput.appendChild(c);
+    if (current) modelInput.value = current;
+    if (r.source === 'remote') toast(`已获取 ${list.length} 个可用模型`);
+    else toast('端点未返回模型列表，已使用常用候选');
+  } catch (e) { toast('模型列表获取失败：' + e.message); }
+}
+
+async function loadKeys() {
+  const box = document.getElementById('key-list');
+  if (!box) return;
+  try {
+    const r = await (await fetch('/api/keys')).json();
+    const list = Array.isArray(r.keys) ? r.keys : [];
+    box.innerHTML = '';
+    if (!list.length) { box.textContent = '（暂无已记忆的 Key——在 API 设置保存一次即自动记住）'; return; }
+    for (const k of list) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px dashed var(--border)';
+      const nm = document.createElement('span');
+      nm.style.cssText = 'flex:1;font-size:12px;word-break:break-all';
+      nm.textContent = k.baseURL + ' · ' + k.masked + (k.current ? '（当前）' : '');
+      row.appendChild(nm);
+      if (!k.current) {
+        const act = document.createElement('button');
+        act.className = 'ma-btn'; act.textContent = '启用';
+        act.onclick = async () => {
+          try {
+            const rr = await (await fetch('/api/keys', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'activate', baseURL: k.baseURL }) })).json();
+            if (!rr.ok) { toast('切换失败：' + (rr.error || '未知错误')); return; }
+            await loadKeys(); await loadModel(); await loadProfiles();
+            toast('已切到 ' + rr.baseURL);
+          } catch (e) { toast('切换失败：' + e.message); }
+        };
+        row.appendChild(act);
+        const del = document.createElement('button');
+        del.className = 'ma-btn del'; del.textContent = '删除';
+        del.onclick = async () => {
+          if (!confirm('删除该端点的 Key 记忆？')) return;
+          try {
+            const rr = await (await fetch('/api/keys', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'delete', baseURL: k.baseURL }) })).json();
+            if (!rr.ok) { toast('删除失败：' + (rr.error || '未知错误')); return; }
+            await loadKeys(); toast(rr.note || '已删除');
+          } catch (e) { toast('删除失败：' + e.message); }
+        };
+        row.appendChild(del);
+      }
+      box.appendChild(row);
+    }
+  } catch (e) { box.textContent = '读取失败：' + e.message; }
+}
+
 function migrateKey(oldKey, newKey) {
   try {
     if (!localStorage.getItem(newKey) && localStorage.getItem(oldKey)) {

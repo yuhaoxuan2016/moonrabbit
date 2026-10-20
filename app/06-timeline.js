@@ -37,7 +37,8 @@ async function loadTimeline() {
       const gain = Array.isArray(t.items_gain) && t.items_gain.length ? `<span class="gain"> ＋${t.items_gain.map((g) => escapeHtml(g.name)).join('、')}</span>` : '';
       const loss = t.items_loss.length ? `<span class="loss"> －${t.items_loss.map(escapeHtml).join('、')}</span>` : '';
       const emo = t.emotion && Object.keys(t.emotion).length ? `<span class="emotag"> 💗${Object.entries(t.emotion).map(([n, v]) => `${escapeHtml(n)}=${escapeHtml(v)}`).join('、')}</span>` : '';
-      d.innerHTML = `<div class="t">${escapeHtml(t.story_time || '?')}｜${escapeHtml(ev || '（无事件摘要）')}</div>${loc}${gain}${loss}${emo}`;
+      const refilled = t._refilled ? '<span class="refilled" title="本条由辅助 API 自动补记（AI 未输出标签），请核对"> 🤖 自动补记</span>' : '';
+      d.innerHTML = `<div class="t">${escapeHtml(t.story_time || '?')}｜${escapeHtml(ev || '（无事件摘要）')}</div>${refilled}${loc}${gain}${loss}${emo}`;
       if (t.id) {
         const act = document.createElement('div');
         act.className = 'tm-actions';

@@ -215,6 +215,7 @@ header {
 .header-right { display: flex; gap: 6px; flex: none; align-items: center; }
 .head-btn { background: var(--card); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 4px 12px; font-size: 12.5px; font-weight: 600; cursor: pointer; }
 .head-btn:hover { border-color: var(--accent); color: var(--accent); }
+#model-refresh { padding: 4px 7px; }
 .head-input { width: 185px; background: var(--card); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 4px 10px; font-size: 12.5px; outline: none; cursor: pointer; }
 .head-input:focus { border-color: var(--accent); }
 .head-input option { background: var(--bg2); color: var(--text); }
@@ -450,6 +451,9 @@ main { flex: 1; display: flex; min-height: 0; }
 .search-row input:focus { border-color: var(--accent); }
 .search-row button, #attach-btn, #send { background: var(--accent); border: none; color: #1a1a2e; border-radius: 8px; padding: 7px 13px; font-size: 13.5px; font-weight: 700; cursor: pointer; flex: none; }
 .search-row button:hover, #send:hover { filter: brightness(1.15); }
+#stop-btn { background: var(--danger); border: none; color: #fff; border-radius: 8px; padding: 7px 13px; font-size: 13.5px; font-weight: 700; cursor: pointer; flex: none; }
+#stop-btn:hover { filter: brightness(1.1); }
+#stop-btn.hidden { display: none; }
 .btn-ghost {
   width: 100%; margin-bottom: 8px;
   background: #2f6b4a !important; color: #eafff2 !important;
@@ -482,6 +486,7 @@ main { flex: 1; display: flex; min-height: 0; }
 .tm-item .gain { color: var(--success); font-size: 12px; }
 .tm-item .loss { color: var(--danger); font-size: 12px; }
 .tm-item .emotag { color: #f9a8d4; font-size: 12px; }
+.tm-item .refilled { color: var(--muted); font-size: 11px; background: var(--bg2); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
 .tm-item .tm-actions { position: absolute; right: 0; top: 4px; display: flex; gap: 4px; opacity: 0; transition: opacity 0.15s; }
 .tm-item:hover .tm-actions { opacity: 1; }
 .tm-actions .ma-btn { padding: 0 6px; font-size: 11px; }
@@ -850,7 +855,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
    2026-09-05 收官轮同步补全（G-B1 / G-B2 / G-B3 / G-B4 / G-D3）
    ——这批样式此前引用了未定义令牌 / 缺失选择器
    ============================================================ */
-/* G-B1：L3 尺度令牌（同步块 18 处引用 --fs-*/--r-*，旧版未定义 → 字号回退继承、圆角变直角） */
+/* G-B1：L3 尺度令牌（同步块 18 处引用 --fs-* / --r-*，旧版未定义 → 字号回退继承、圆角变直角） */
 :root {
   --fs-xs: 11px;  /* 徽章 / 辅助说明 */
   --fs-sm: 12px;  /* 侧栏正文 / 小按钮 */

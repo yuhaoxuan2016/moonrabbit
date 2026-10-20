@@ -152,4 +152,5 @@ async function loadSessionNote() {
       : '📌 会话常驻设定（每轮注入，防遗忘）';
     switchNoteSlot('其他');
   } catch (e) { /* 忽略 */ }
+  if (typeof syncPauseCheckboxes === 'function') syncPauseCheckboxes();
 }

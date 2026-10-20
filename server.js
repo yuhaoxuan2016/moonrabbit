@@ -485,7 +485,7 @@ const { h_api_vec_status, h_api_vec_build, h_api_vec_search, h_api_vec_config } 
 const { h_api_lorebook_30, h_api_lorebook_31, h_api_worldbooks_get, h_api_worldbooks_post, h_api_graph_32, h_api_graph_33, h_api_personas_34, h_api_personas_35 } = require('./lib/http/handlers/worldbooks');   // M-08·worldbooks-handlers 域（ROUTES 表按同名引用，表体零改动）
 const { h_api_timeline_62, h_api_prompt_latest_63, h_api_timeline_manual_64, h_api_timeline_update_65, h_api_timeline_insert_66, h_api_timeline_delete_67, h_api_timeline_ai_fill_68, h_api_timeline_truncate_69, h_api_timeline_export_73, h_api_inventory_70, h_api_inventory_manual_71, h_api_wardrobe_current_72 } = require('./lib/http/handlers/timeline');   // M-08·timeline-handlers 域（ROUTES 表按同名引用，表体零改动）
 const { h_route_avatars, h_route_22, h_route_23, h_api_expressions_config_24, h_route_25, h_route_26, h_route_46, h_api_cards_import_47 } = require('./lib/http/handlers/avatars');   // M-08·avatars-handlers 域（ROUTES 表按同名引用，表体零改动）
-const { h_api_model_6, h_api_model_7, h_route_8, h_api_presets_16, h_api_presets_17, h_api_profiles_18, h_api_profiles_19, h_api_chat_profiles_20, h_api_chat_profiles_21 } = require('./lib/http/handlers/config');   // M-08·config-handlers 域（ROUTES 表按同名引用，表体零改动）
+const { h_api_models, h_api_keys_77, h_api_model_6, h_api_model_7, h_route_8, h_api_presets_16, h_api_presets_17, h_api_profiles_18, h_api_profiles_19, h_api_chat_profiles_20, h_api_chat_profiles_21 } = require('./lib/http/handlers/config');   // M-08·config-handlers 域（ROUTES 表按同名引用，表体零改动）
 const { h_api_chat_74, h_api_fork_turns, h_api_last_chat } = require('./lib/http/handlers/chats');   // M-08·chats-handlers 域（ROUTES 表按同名引用，表体零改动）
 const ROUTES = [
   { test: (p, req) => (p === '/' || p === '/index.html'), handler: h_route_0 },
@@ -495,6 +495,8 @@ const ROUTES = [
   { test: (p, req) => (p === '/share-card.png' || p === '/placeholder.png' || p === '/placeholder-share.png'), handler: h_share_card_png_3 },
   { test: (p, req) => (p === '/style.css'), handler: h_style_css_4 },
   { test: (p, req) => (p === '/app.js' || /^\/app\/[\w.-]+\.js$/.test(p)), handler: h_app_js_5 },
+  { test: (p, req) => (p === '/api/models' && req.method === 'GET'), handler: h_api_models },
+  { test: (p, req) => (p === '/api/keys'), handler: h_api_keys_77 },
   { test: (p, req) => (p === '/api/model' && req.method === 'GET'), handler: h_api_model_6 },
   { test: (p, req) => (p === '/api/model' && req.method === 'POST'), handler: h_api_model_7 },
   { test: (p, req) => (/^\/api\/chats(?:\/([^/]+))?$/).test(p), handler: h_route_8 },
@@ -504,6 +506,7 @@ const ROUTES = [
   { test: (p, req) => (p === '/api/op/view' && req.method === 'POST'), handler: h_api_op_view_12 },
   { test: (p, req) => (p === '/api/op/wardrobe' && req.method === 'POST'), handler: h_api_op_wardrobe_13 },
   { test: (p, req) => (p === '/api/op/expand' && req.method === 'POST'), handler: h_api_op_expand_14 },
+  { test: (p, req) => (p === '/api/op/tools' && req.method === 'GET'), handler: h_api_op_tools_15 },
   { test: (p, req) => (p === '/api/op/tools' && req.method === 'POST'), handler: h_api_op_tools_15 },
   { test: (p, req) => (p === '/api/presets' && req.method === 'GET'), handler: h_api_presets_16 },
   { test: (p, req) => (p === '/api/presets' && req.method === 'POST'), handler: h_api_presets_17 },

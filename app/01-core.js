@@ -236,6 +236,33 @@ function loadAvatarCache() {
 }
 loadAvatarCache();
 
+const ROSTER_DOT_RE = /[·・•‧∙]/g;
+function rosterFullNames() {
+  try {
+    if (typeof Group !== 'undefined' && Group && Group.cfg && Group.chatId
+      && App && App.chatId && Group.chatId === App.chatId && Group.cfg.groupMode
+      && Array.isArray(Group.cfg.roster) && Group.cfg.roster.length) {
+      return Group.cfg.roster.map((r) => String((r && r.name) || '').trim()).filter(Boolean);
+    }
+  } catch (e) { /* 守卫：任何异常都退化为「不折叠」 */ }
+  return [];
+}
+
+function foldRosterName(rawName) {
+  const name = String(rawName == null ? '' : rawName).trim();
+  if (!name) return name;
+  const names = rosterFullNames();
+  if (!names.length) return name;
+  if (names.includes(name)) return name;              // 已是名单全名
+  if (name.length < 2) return name;                   // 单字不折
+  const bare = name.replace(ROSTER_DOT_RE, '');
+  const bareEq = names.filter((f) => f.replace(ROSTER_DOT_RE, '') === bare);
+  if (bareEq.length === 1) return bareEq[0];          // 去中点等价且唯一
+  if (bareEq.length > 1) return name;
+  const hits = names.filter((f) => f.startsWith(name) || (bare.length >= 2 && f.replace(ROSTER_DOT_RE, '').startsWith(bare)));
+  return hits.length === 1 ? hits[0] : name;          // 唯一前缀才折
+}
+
 function parseSegments(text) {
   const segs = [];
   let cur = null;
@@ -251,13 +278,13 @@ function parseSegments(text) {
     const m2 = /^([\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7afA-Za-z][\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7afA-Za-z·]{0,10})[（(](.+)[）)]$/.exec(line);
     if (m0) {
       push();
-      segs.push({ char: m0[1], action: m0[2], text: m0[3], actionOnly: false });
+      segs.push({ char: foldRosterName(m0[1]), action: m0[2], text: m0[3], actionOnly: false });
     } else if (m1) {
       push();
-      segs.push({ char: m1[1], text: m1[2], actionOnly: false });
+      segs.push({ char: foldRosterName(m1[1]), text: m1[2], actionOnly: false });
     } else if (m2) {
       push();
-      segs.push({ char: m2[1], text: m2[2], actionOnly: true });
+      segs.push({ char: foldRosterName(m2[1]), text: m2[2], actionOnly: true });
     } else {
       if (!cur) { cur = { char: null, text: '' }; }
       cur.text += (cur.text ? '\n' : '') + line;

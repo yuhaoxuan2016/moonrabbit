@@ -25,7 +25,11 @@ async function send() {
 
 async function generate() {
   App.streaming = true;
+  App.stoppedByUser = false;
+  App.genAbort = new AbortController();
   els.send.disabled = true;
+  const stopBtn = document.getElementById('stop-btn');
+  if (stopBtn) { stopBtn.classList.remove('hidden'); stopBtn.disabled = false; }
   els.typing.classList.remove('hidden');
   const extra = App.pendingContext;
   App.pendingContext = '';
@@ -35,6 +39,7 @@ async function generate() {
 
   let acc = '';
   let thinkAcc = '';
+  let lastPauseWarn = null;
   const tempWrap = makeWrap('assistant', seq);
   const tempRow = document.createElement('div');
   tempRow.className = 'msg narrator';
@@ -46,6 +51,7 @@ async function generate() {
     const resp = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
+      signal: App.genAbort.signal,
       body: JSON.stringify({
         messages: App.history,
         chatId: App.chatId,
@@ -64,7 +70,10 @@ async function generate() {
     const dec = new TextDecoder();
     let buf = '';
     for (;;) {
-      const { done, value } = await reader.read();
+      let chunk;
+      try { chunk = await reader.read(); }
+      catch (err) { if (App.stoppedByUser) break; throw err; }
+      const { done, value } = chunk;
       if (done) break;
       buf += dec.decode(value, { stream: true });
       let idx;
@@ -78,6 +87,11 @@ async function generate() {
         try { ev = JSON.parse(data); } catch (e) { continue; }
         if (ev.type === 'delta') {
           acc += sanitizeText(ev.text);
+          tempBub.textContent = stripTurnTags(acc);
+          els.messages.scrollTop = els.messages.scrollHeight;
+        } else if (ev.type === 'filtered') {
+          // 服务端输出过滤器命中：以过滤后文本替换气泡，历史/落盘同步使用
+          acc = sanitizeText(ev.text || '');
           tempBub.textContent = stripTurnTags(acc);
           els.messages.scrollTop = els.messages.scrollHeight;
         } else if (ev.type === 'replace') {
@@ -103,6 +117,8 @@ async function generate() {
           renderThinking(`⚠️ ${ev.name} 发言失败：${ev.error}`);
         } else if (ev.type === 'summarized') {
           renderThinking(`💾 ${ev.note}`);
+        } else if (ev.type === 'pause-warn') {
+          lastPauseWarn = { reason: ev.reason || '', location: ev.location || '' };
         } else if (ev.type === 'ping') {
           // SSE 心跳（Task8）：仅保活连接，无需处理
         } else if (ev.type === 'error') {
@@ -118,6 +134,15 @@ async function generate() {
     }
     if (acc.trim()) {
       renderAssistant(acc.trim(), seq);
+      if (lastPauseWarn) {
+        const warnWrap = els.messages.querySelector(`.msg-wrap[data-seq="${seq}"]`);
+        if (warnWrap) {
+          const badge = document.createElement('div');
+          badge.style.cssText = 'margin-top:6px;color:var(--warning);font-size:11px;line-height:1.5';
+          badge.textContent = '⚠️ 暂停场景：本轮出现' + (lastPauseWarn.reason || '离场表述') + (lastPauseWarn.location ? '（location：' + lastPauseWarn.location + '）' : '') + '——建议重 roll。';
+          warnWrap.appendChild(badge);
+        }
+      }
       // 思考记录一并存进 history（刷新/切会话后恢复显示）
       App.history.push({ role: 'assistant', content: acc.trim(), seq, thinking: thinkAcc.trim() || undefined });
       // 2026-09-09 方案 C：重roll 产生的新回复也入版本链（链=全部版本），
@@ -131,12 +156,18 @@ async function generate() {
       if (!/<storyevent>/i.test(acc) && !/<items>/i.test(acc)) {
         renderThinking('⚠️ 本轮 AI 未输出记账标签（storyevent/items）——剧情记忆未更新；后端已将标签指令重申置底，若持续出现请在「剧情记忆」手动补记或重发。');
       }
+    } else {
+      // 空输出（内容全在思考链）：给占位 + ↻ 重试 / ✕ 丢弃，避免「无气泡可点」
+      renderEmptyRetry(seq);
     }
   } catch (e) {
     tempWrap.remove();
-    renderAssistant(`（叙事者提示：${e.message}）`, seq);
+    if (!App.stoppedByUser) renderAssistant(`（叙事者提示：${e.message}）`, seq);
   } finally {
     App.streaming = false;
+    App.stoppedByUser = false;
+    App.genAbort = null;
+    if (stopBtn) stopBtn.classList.add('hidden');
     // 2026-09-09 方案 C：生成失败/中止时清理重roll锚点，防残留污染下一轮普通对话的入链判断
     App.anchorForNextGen = null;
     els.send.disabled = false;

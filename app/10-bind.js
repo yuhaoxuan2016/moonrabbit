@@ -155,6 +155,7 @@ apiBtn.addEventListener('click', async () => {
     apiNow.textContent = `当前：${c.protocol === 'openai' ? 'OpenAI 兼容' : 'Anthropic 兼容'} · ${c.baseURL} · ${c.model}${c.apiKeyMasked ? ' · Key ' + c.apiKeyMasked : ''} · max_tokens ${c.maxTokens} · thinking ${c.thinking} · context ${c.maxContext ?? 64000}`;
     await loadPresets();
     await loadProfiles();
+    await loadKeys();   // 已记忆的 Key 列表（按端点；掩码显示）
     loadInjections();   // 自定义注入槽（按当前会话加载）
   } catch (e) { /* 忽略 */ }
   apiModal.classList.remove('hidden');
@@ -357,6 +358,8 @@ document.getElementById('profile-del').addEventListener('click', async () => {
 
 // ---------- 模型查看 / 切换（select 下拉 + 自定义） ----------
 const modelInput = document.getElementById('model-input');
+document.getElementById('model-refresh').addEventListener('click', refreshModelOptions);
+document.getElementById('key-refresh').addEventListener('click', loadKeys);
 modelInput.addEventListener('change', async () => {
   let m = modelInput.value;
   if (m === '__custom__') {
@@ -711,28 +714,38 @@ if (moreToolsBtn && moreToolsMenu) {
   });
 }
 
-// 工具桥：自由勾选工具（本版 = 仅联网）
-const toolNames = () => els.toolChips.filter((c) => c.classList.contains('on')).map((c) => c.dataset.tool);
+// 工具桥：自由勾选工具（联网 + agent 只读工具；面板与 ⋯ 菜单各有一组同 data-tool 的 chip，按名字去重）
+const AGENT_TOOL_IDS = ['get_timeline', 'search_memory', 'read_setting', 'list_injected'];
+const toolNames = () => [...new Set(els.toolChips.filter((c) => c.classList.contains('on')).map((c) => c.dataset.tool))];
 const setTools = (names) => els.toolChips.forEach((c) => c.classList.toggle('on', names.includes(c.dataset.tool)));
+async function refreshToolChips(chatId) {
+  try {
+    const d = await (await fetch('/api/op/tools?chatId=' + encodeURIComponent(chatId || ''))).json();
+    if (d && d.ok) setTools(d.tools || []);
+  } catch (e) { /* 忽略 */ }
+}
 try { setTools(JSON.parse(localStorage.getItem('mr-op-tools') || '[]')); } catch (e) { setTools([]); }
 els.toolChips.forEach((chip) => {
   chip.addEventListener('click', async () => {
-    chip.classList.toggle('on');
+    const name = chip.dataset.tool;
+    const next = !chip.classList.contains('on');
+    // 同一工具的 chip 在 Agent 面板与 ⋯ 菜单各有一份，必须一起切换，否则两处状态互相打架
+    els.toolChips.forEach((c) => { if (c.dataset.tool === name) c.classList.toggle('on', next); });
     const sel = toolNames();
     chip.disabled = true;
     try {
       const r = await (await fetch('/api/op/tools', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ chatId: App.chatId, tools: sel }),
+        body: JSON.stringify({ chatId: App.chatId, tools: sel, agentTools: sel.filter((n) => AGENT_TOOL_IDS.includes(n)) }),
       })).json();
-      if (r.error) { chip.classList.toggle('on'); els.opNote.textContent = '✗ ' + r.error; }
+      if (r.error) { els.toolChips.forEach((c) => { if (c.dataset.tool === name) c.classList.toggle('on', !next); }); els.opNote.textContent = '✗ ' + r.error; }
       else {
         setTools(r.tools || []);
         localStorage.setItem('mr-op-tools', JSON.stringify(r.tools || []));
         els.opNote.textContent = '✓ ' + r.note;
       }
-    } catch (e) { chip.classList.toggle('on'); els.opNote.textContent = '✗ ' + e.message; }
+    } catch (e) { els.toolChips.forEach((c) => { if (c.dataset.tool === name) c.classList.toggle('on', !next); }); els.opNote.textContent = '✗ ' + e.message; }
     els.opNote.classList.remove('hidden');
     chip.disabled = false;
     setTimeout(() => els.opNote.classList.add('hidden'), 6000);
@@ -788,6 +801,11 @@ document.getElementById('tour-skip').addEventListener('click', tourDone);
 
 // ---------- 事件 ----------
 els.send.addEventListener('click', send);
+document.getElementById('stop-btn')?.addEventListener('click', () => {
+  if (!App.streaming) return;
+  App.stoppedByUser = true;
+  if (App.genAbort) App.genAbort.abort();
+});
 // Token 预估
 App.lastSystemPrompt = '';
 App.currentMaxContext = 1048576;
@@ -1003,6 +1021,50 @@ App.currentNoteSlot = '其他';
 els.noteAttachBtn.addEventListener('click', () => {
   els.noteAttachBox.classList.toggle('hidden');
 });
+
+// 暂停场景开关：写【暂停场景】/【暂停场景·严格】标记到「其他」槽（互斥）
+const pauseNormalCb = document.getElementById('pause-normal');
+const pauseStrictCb = document.getElementById('pause-strict');
+function pauseFlagsFromSlots() {
+  const t = String((App.noteSlotsData && App.noteSlotsData['其他']) || '');
+  const strict = /【暂停场景·严格】/.test(t);
+  return { normal: !strict && /【暂停场景】/.test(t), strict };
+}
+function syncPauseCheckboxes() {
+  const f = pauseFlagsFromSlots();
+  if (pauseNormalCb) pauseNormalCb.checked = f.normal;
+  if (pauseStrictCb) pauseStrictCb.checked = f.strict;
+}
+async function savePauseFlag(kind, on) {
+  if (!App.noteSlotsData) App.noteSlotsData = {};
+  let t = String(App.noteSlotsData['其他'] || '');
+  t = t.replace(/【暂停场景(?:·严格)?】/g, '').replace(/[ \t]+$/gm, '').replace(/\n{2,}/g, '\n').trim();
+  if (on) t = (t ? t + '\n' : '') + (kind === 'strict' ? '【暂停场景·严格】' : '【暂停场景】');
+  App.noteSlotsData['其他'] = t;
+  if (App.currentNoteSlot === '其他') els.noteAttachInput.value = t;
+  syncPauseCheckboxes();
+  try {
+    const r = await (await fetch('/api/op/note', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId: App.chatId, slots: App.noteSlotsData }),
+    })).json();
+    if (r && r.ok) {
+      els.noteAttachNote.textContent = on ? '⏸️ 已开启暂停场景（每轮注入）' : '已关闭暂停场景';
+      els.noteAttachNote.classList.remove('hidden');
+      setTimeout(() => els.noteAttachNote.classList.add('hidden'), 2000);
+    }
+  } catch (e) { /* 忽略 */ }
+}
+if (pauseNormalCb) pauseNormalCb.addEventListener('change', () => {
+  if (pauseNormalCb.checked && pauseStrictCb) pauseStrictCb.checked = false;
+  savePauseFlag('normal', pauseNormalCb.checked);
+});
+if (pauseStrictCb) pauseStrictCb.addEventListener('change', () => {
+  if (pauseStrictCb.checked && pauseNormalCb) pauseNormalCb.checked = false;
+  savePauseFlag('strict', pauseStrictCb.checked);
+});
+els.noteAttachBtn.addEventListener('click', syncPauseCheckboxes);
 // 页签切换：暂存当前槽内容 → 加载目标槽
 NOTE_SLOTS_UI.forEach((k) => {
   const tab = noteSlotTab(k);
@@ -1685,9 +1747,10 @@ document.querySelectorAll('#sidebar .card.collapsible .card-title').forEach(titl
 })();
 
 // ---------- agent 导演台（未经测试 · 实验性；默认关闭）----------
-// 开关在「⚙ API → agent 助手」；本卡片负责与 agent 对话（Meta）、看认知包与禁忌。
+// 开关在「系统 → 🤖 Agent 模式」卡片；本卡片负责与 agent 对话（Meta）、看认知包与禁忌。
 (function initMetaUI() {
   const badge = document.getElementById('meta-badge');
+  const stateBadge = document.getElementById('agent-state-badge');
   const input = document.getElementById('meta-input');
   const sendBtn = document.getElementById('meta-send-btn');
   const msgEl = document.getElementById('meta-msg');
@@ -1704,6 +1767,7 @@ document.querySelectorAll('#sidebar .card.collapsible .card-title').forEach(titl
     if (gCb) gCb.checked = on;
     if (pcSel) pcSel.value = (d && d.perChat && d.perChat[App.chatId]) || 'inherit';
     if (badge) { badge.textContent = on ? '开' : 'agent 未开启'; badge.className = 'badge ' + (on ? 'on' : 'off'); }
+    if (stateBadge) { stateBadge.textContent = on ? '开' : '关'; stateBadge.className = 'badge ' + (on ? 'on' : 'off'); }
   }
   async function loadMode() {
     try { paintMode(await (await fetch('/api/agent-mode')).json()); } catch (e) { /* 忽略 */ }
@@ -2035,6 +2099,7 @@ const Group = {
     try {
       const d = await (await fetch('/api/group/' + encodeURIComponent(chatId))).json();
       if (d && d.ok) {
+        this.chatId = chatId;
         this.cfg = { groupMode: !!d.groupMode, roster: d.roster || [],
           maxSpeakersPerTurn: d.maxSpeakersPerTurn || 4 };
         this.render();
@@ -2125,10 +2190,11 @@ const Group = {
     window.openChat = openChat = async function (id) {
       const r = await _openChat(id);
       Group.load(id);
+      refreshToolChips(id);
       return r;
     };
   }
-  if (App.chatId) Group.load(App.chatId);
+  if (App.chatId) { Group.load(App.chatId); refreshToolChips(App.chatId); }
 
   // @ 自动补全：只提示本会话 roster 内角色 + 旁白
   const input = document.getElementById('input');

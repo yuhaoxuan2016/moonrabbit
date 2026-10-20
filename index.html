@@ -27,6 +27,7 @@
       <option value="claude-3-5-sonnet">claude-3-5-sonnet</option>
       <option value="__custom__">✎ 自定义…</option>
     </select>
+    <button id="model-refresh" class="head-btn" title="从当前端点拉取可选模型列表">↻</button>
     <button id="new-chat-btn" class="head-btn">＋ 新对话</button>
     <button id="new-group-btn" class="head-btn" title="新建群聊（未经测试 · 实验性）：每个角色独立调用模型发言，导演自动调度，支持 @点名">＋ 群聊（未经测试）</button>
     <button id="api-btn" class="head-btn" title="API / 端点设置">⚙ API</button>
@@ -48,6 +49,9 @@
     <label class="api-field">API Key
       <input id="api-key" type="password" placeholder="留空 = 沿用当前 Key">
     </label>
+    <div class="set-group-title">🔑 已记忆的 Key（按端点）</div>
+    <div id="key-list" class="api-msg">—</div>
+    <div style="display:flex;gap:6px;margin-bottom:8px"><button id="key-refresh" class="ma-btn">↻ 刷新列表</button></div>
     <label class="api-field">输出上限 max_tokens（256-393216）
       <input id="api-maxtokens" type="number" min="256" max="393216" step="256" value="393216">
     </label>
@@ -76,15 +80,6 @@
     </label>
     <label class="api-field">摘要触发阈值（历史字符数）
       <input id="api-sumthreshold" type="number" min="2000" max="100000" step="1000" value="12000">
-    </label>
-    <div class="set-group-title">🎬 agent 助手（未经测试 · 实验性）</div>
-    <label class="api-field" style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="agent-global"> 总开关（关闭＝逐字节退回现状）（未经测试 · 实验性）</label>
-    <label class="api-field">按会话模式
-      <select id="agent-perchat">
-        <option value="inherit">跟随总开关</option>
-        <option value="on">本会话开启</option>
-        <option value="off">本会话关闭</option>
-      </select>
     </label>
     <div class="set-group-title">🎛 采样预设（命名预设 · 一键切换）</div>
     <div class="api-field">预设
@@ -384,6 +379,10 @@
       <button type="button" class="note-slot-tab" data-slot="关系">关系</button>
       <button type="button" class="note-slot-tab" data-slot="规则">规则</button>
       </div>
+      <div class="pause-scene-row" style="display:flex;gap:12px;flex-wrap:wrap;margin:6px 0;font-size:12px">
+      <label style="display:flex;align-items:center;gap:4px"><input type="checkbox" id="pause-normal"> ⏸️ 暂停场景（普通）</label>
+      <label style="display:flex;align-items:center;gap:4px"><input type="checkbox" id="pause-strict"> ⏸️ 严格暂停</label>
+      </div>
       <textarea id="note-attach-input" rows="6" placeholder="写入本会话「每轮必读」的设定速记（不会被上下文裁剪；切换页签分别编辑 背景/关系/规则/其他 槽，保存后合并注入）。用于长线剧情的关键设定，如：&#10;· 主角当前状态：受伤未愈／对某角色抱有戒心&#10;· 某物件的真实来历（暂未对外揭示）&#10;· 本线特殊规则：夜间不可使用某能力"></textarea>
       <div class="man-attach-row">
       <button id="note-attach-ok" class="head-btn">✅ 保存到本会话</button>
@@ -498,10 +497,29 @@
       </div>
     </div>
     <div class="sb-panel hidden" id="panel-system">
+      <div class="card collapsible" id="card-agent">
+      <div class="card-title">🤖 Agent 模式<span id="agent-state-badge" class="badge off">关</span><span class="fold-arrow">▾</span></div>
+      <label class="api-field" style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="agent-global"> 总开关（关闭＝逐字节退回现状）</label>
+      <label class="api-field">本会话
+        <select id="agent-perchat">
+          <option value="inherit">继承总开关（默认）</option>
+          <option value="on">强制开启</option>
+          <option value="off">强制关闭</option>
+        </select>
+      </label>
+      <div class="attach-note" style="margin-top:6px">只读工具（勾选后主模型本轮可调用；按会话保存）</div>
+      <div id="agent-tools" style="display:flex;flex-wrap:wrap;gap:4px;margin:2px 0 6px">
+        <button type="button" class="tool-chip" data-tool="get_timeline" title="读取本会话最近回合记录（只读）">🗂 回合记录</button>
+        <button type="button" class="tool-chip" data-tool="search_memory" title="语义检索本会话旧剧情（只读）">🧠 语义检索</button>
+        <button type="button" class="tool-chip" data-tool="read_setting" title="读取用户自建的设定/世界书条目（只读）">📖 读设定</button>
+        <button type="button" class="tool-chip" data-tool="list_injected" title="查看本轮 system 已注入的类别（只读）">📋 已注入</button>
+      </div>
+      <div class="attach-note" id="agent-note">只读工具 + 计划轮 + 预算闸门 + 过程可见；写记录轨未开放。</div>
+      </div>
       <div class="card collapsible" id="card-meta">
       <div class="card-title">🎬 导演台（未经测试）<span id="meta-badge" class="badge off">agent 未开启</span><span class="fold-arrow">▾</span></div>
       <div class="meta-body">
-        <div class="untested-note">⚠️ 未经测试 · 实验性：功能按设计实现，但尚未充分测试，行为与接口可能变化。默认关闭，需先在「⚙ API → agent 助手」里打开总开关。</div>
+        <div class="untested-note">⚠️ 未经测试 · 实验性：功能按设计实现，但尚未充分测试，行为与接口可能变化。默认关闭，需先在上方「🤖 Agent 模式」里打开总开关。</div>
         <div class="meta-input-row">
           <input id="meta-input" placeholder="例：她的眼睛是灰蓝色的／这段让她先哭后笑">
           <button id="meta-send-btn" class="head-btn">发送</button>
@@ -578,6 +596,10 @@
         <div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:4px">
           <button id="expand-btn" class="tool-chip" title="开启后，短指令会被扩写为详细动作/场景/台词描写" style="width:100%;text-align:left">✍️ 扩写</button>
           <button class="tool-chip" data-tool="web_search" title="联网搜索（仅用户明确要求「联网/查一下/搜索」时）" style="width:100%;text-align:left">🔍 联网</button>
+          <button class="tool-chip" data-tool="get_timeline" title="读取本会话最近回合记录（只读）" style="width:100%;text-align:left">🗂 回合记录</button>
+          <button class="tool-chip" data-tool="search_memory" title="语义检索本会话旧剧情（只读）" style="width:100%;text-align:left">🧠 语义检索</button>
+          <button class="tool-chip" data-tool="read_setting" title="读取用户自建的设定/世界书条目（只读）" style="width:100%;text-align:left">📖 读设定</button>
+          <button class="tool-chip" data-tool="list_injected" title="查看本轮 system 已注入的类别（只读）" style="width:100%;text-align:left">📋 已注入</button>
           <button id="var-hint-btn" class="tool-chip" title="可用变量模板" style="width:100%;text-align:left">📋 变量</button>
         </div>
       </div>
@@ -587,6 +609,7 @@
   <textarea id="input" rows="2" placeholder="开始输入你的剧情……"></textarea>
   <div id="token-estimate" class="token-estimate"></div>
   <button id="send">发送</button>
+  <button id="stop-btn" class="hidden" title="停止本轮生成">停止</button>
 </footer>
 
 <!-- 提示词查看弹窗（调试） -->
