@@ -77,6 +77,7 @@ document.getElementById('savepoint-btn').addEventListener('click', async () => {
   } catch (e) { toast('存档失败：' + e.message); }
 });
 document.getElementById('loadpoint-btn').addEventListener('click', async () => {
+  if (App.streaming) { toast('生成中，请稍后再读档'); return; }
   if (!App.chatId) { toast('还没有会话，无法读档'); return; }
   try {
     const { ok, savepoints } = await (await fetch(`/api/savepoints/list?chatId=${encodeURIComponent(App.chatId)}`)).json();

@@ -126,11 +126,11 @@ async function saveAttachPending(text) {
   });
 }
 
-async function loadAttachPending() {
+async function loadAttachPending(chatId = App.chatId) {
   // 打开会话时恢复「已附加」状态（本轮消费后由 saveAttachPending('') 清除）
-  if (!App.chatId) { App.pendingContext = ''; return; }
+  if (!chatId) { App.pendingContext = ''; return; }
   try {
-    const r = await (await fetch('/api/op/attach-pending?chatId=' + encodeURIComponent(App.chatId))).json();
+    const r = await (await fetch('/api/op/attach-pending?chatId=' + encodeURIComponent(chatId))).json();
     const t = (r && r.text || '').trim();
     App.pendingContext = t;
     if (t) els.manAttachNote.classList.remove('hidden');

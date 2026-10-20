@@ -4,6 +4,7 @@
 'use strict';
 
 async function send() {
+  if (!App.chatId) { toast('当前没有打开的会话（可能已归档/删除），请先新建或打开一个会话'); return; }
   const content = els.input.value.trim();
   if (!content || App.streaming) return;
   // 发送即取消自动保存防抖（防 3s 后以发送前旧快照 PUT 覆盖新数据）
@@ -153,13 +154,14 @@ async function generate() {
 }
 
 async function saveChat() {
-  if (!App.chatId) return;
+  const chatId = App.chatId;   // 锁定本次保存目标；重试期间切会话也不改投
+  if (!chatId) return;
   const firstUser = App.history.find((m) => m.role === 'user');
   const title = App.chatTitle || (firstUser ? firstUser.content.slice(0, 24) : '新对话');
   // 失败自动重试 1 次（500ms 后）；仍失败 → 状态栏提示（不静默丢数据）
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const r = await fetch('/api/chats/' + App.chatId, {
+      const r = await fetch('/api/chats/' + chatId, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ title, messages: App.history, versions: rerollVersions }),
@@ -176,7 +178,7 @@ async function saveChat() {
   }
   // 后台再补一次（异步、尽力而为）
   setTimeout(() => {
-    fetch('/api/chats/' + App.chatId, {
+    fetch('/api/chats/' + chatId, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ title, messages: App.history }),
@@ -357,9 +359,10 @@ async function openChat(id) {
   const mySeq = ++openChatSeq;
   if (App.history.length) await saveChat();
   App.pendingContext = '';   // 清空上一会话的附加资料
-  loadAttachPending();       // 恢复本会话「已附加」状态（2026-08-30 修复重启丢失；本轮消费后清除）
+  loadAttachPending(id);     // 恢复目标会话的「已附加」状态；旧实现拿的是上一会话 chatId
   try {
     const c = await (await fetch('/api/chats/' + id)).json();
+    if (mySeq !== openChatSeq) return;   // 后到的旧响应不得覆盖当前会话
     // F-6 修复：回填最近 system prompt 供上下文指示器估算（失败静默，指示器仅少一项）
     fetch('/api/prompt/latest?chatId=' + encodeURIComponent(id)).then((r) => r.json()).then((pd) => { if (pd && pd.latest && pd.latest.system) { App.lastSystemPrompt = pd.latest.system; updateTokenEstimate(); } }).catch(() => {});
     if (c.error) return;

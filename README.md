@@ -124,6 +124,13 @@ data/vec-config.json          语义检索配置（含 embedding 端点/模型/K
 - **可选外部服务（按需开启）**：联网搜索（`web_search` 工具）、AI 场景插图（`/images/generations`）、TTS 语音、语义检索的 embedding 端点等为**可选增强能力**——**端点、模型、Key 全部由你自己填**（软件不内置任何厂商端点，也不会去读你机器上的任何配置文件），由用户显式开启才使用，未开启不影响核心功能，且**均为运行时 HTTP 调用而非 npm 依赖**
 - **内容与平台解耦**：不内置任何世界观 / 角色，一切设定由用户填写
 
+## 安全
+
+- 默认只监听 `127.0.0.1`。不要把本服务直接暴露到公网；需要远程访问时，请在前面加带鉴权的反向代理。
+- 自定义模型、生图、TTS、向量端点会携带你填写的 API Key。不要把本服务交给不可信的人使用。
+- 世界书导入默认只允许程序目录内的路径；外部目录需显式设 `MOONRABBIT_ALLOW_EXTERNAL_IMPORT=1`。
+- 媒体端点默认拒绝本机/内网地址（防 SSRF）；确需本地服务时设 `MOONRABBIT_ALLOW_LOCAL_MEDIA=1`。
+
 ## 相关项目
 
 - 🤖 本项目的开发、测试与文档由 **AI 多智能体协作**完成——运行在 **DeepSeek Harness**（[deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)，"一切皆插件"的开源 Agent 框架）中的 AI 代理，与 **WorkBuddy**、**Qoder CN** 等 AI 编程助手分工协作（功能开发 / 全量代码审查 / 回归测试 / 文档撰写），人类监督把关
